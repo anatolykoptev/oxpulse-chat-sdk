@@ -10,5 +10,8 @@
     "test": "pnpm -r --filter './packages/*' run test",
     "typecheck": "pnpm -r --filter './packages/*' run typecheck",
     "test:contract": "vitest run --config e2e/vitest.config.ts"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.5"
   }
 }
