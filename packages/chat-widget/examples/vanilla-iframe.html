@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>@oxpulse/chat-widget — iframe mode example</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    #chat-container { height: 500px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <h1>OxPulse Chat Widget — iframe mode</h1>
+
+  <p>In iframe mode the widget renders in a sandboxed iframe. The postMessage
+  protocol handles communication between the parent page and the iframe.</p>
+
+  <div id="chat-container"></div>
+
+  <script type="module">
+    import { mount } from '../dist/index.js';
+
+    const widget = mount(document.getElementById('chat-container'), {
+      appId: 'YOUR_APP_ID',
+      jwt: 'YOUR_JWT_FROM_BACKEND',
+      roomId: 'demo-room',
+      mode: 'iframe',
+      baseUrl: 'https://oxpulse.chat',
+      theme: 'auto',
+      onError: (err) => {
+        console.error('Widget error:', err.code, err.message);
+      },
+      onTokenExpired: async () => {
+        // Fetch fresh JWT from your backend
+        const res = await fetch('/api/refresh-token');
+        const { jwt } = await res.json();
+        return jwt;
+      },
+    });
+
+    // Listen for iframe postMessages
+    window.addEventListener('message', (ev) => {
+      if (ev.data?.ns === 'oxpulse-chat') {
+        console.log('iframe message:', ev.data);
+      }
+    });
+
+    // Cleanup on page unload
+    window.addEventListener('unload', () => widget.destroy());
+  </script>
+</body>
+</html>

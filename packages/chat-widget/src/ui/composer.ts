@@ -1,0 +1,434 @@
+/**
+ * @oxpulse/chat-widget — Composer (W2.2 slice 2, fix-loop).
+ *
+ * Plain-text message input + send path.
+ * Dispatches `oxpulse-chat:error` on send failure + renders inline error chip.
+ * Uses theme tokens exclusively — no inline hex.
+ */
+
+import { shouldShowCounter, isCmdEnter, MAX_BODY_CHARS, autogrowHeightPx } from '../utils/textfield-helpers.js';
+import { AttachmentPicker } from './attachment-picker.js';
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+
+/** Minimal SDK client surface required by Composer. */
+interface ComposerClient {
+  sendText(roomId: string, text: string, args?: unknown): Promise<{ msgId: string }>;
+  sendTextOptimistic?(roomId: string, text: string, args?: unknown): Promise<{ msgId: string }>;
+  e2ee?: unknown;
+  /** W2.2 slice 4: optional — enables attachment support. */
+  sendFile?(
+    roomId: string,
+    blob: Blob,
+    args: { senderUid?: string; sha256?: string; mimeType?: string },
+  ): Promise<{ msgId: string; attachmentId: string }>;
+}
+
+export interface ComposerOptions {
+  client: ComposerClient;
+  roomId: string;
+  container: HTMLElement;
+  signal?: AbortSignal;
+  /** M5: Optional placeholder text. Default: 'Type a message…' */
+  placeholder?: string;
+}
+
+// ── Composer ──────────────────────────────────────────────────────────────────
+
+export class Composer {
+  // B1: true ECMAScript private field (not quoted-string pseudo-private)
+  readonly #container: HTMLElement;
+  #client: ComposerClient;
+  #roomId: string;
+  #signal: AbortSignal | undefined;
+  #placeholder: string;
+
+  // DOM refs — set during mount()
+  #root: HTMLElement | null = null;
+  #textarea: HTMLTextAreaElement | null = null;
+  #sendBtn: HTMLButtonElement | null = null;
+  #counter: HTMLElement | null = null;
+  #errorChip: HTMLElement | null = null;
+
+  /** Tracks in-flight send so destroy can suppress clear. */
+  #sending = false;
+  /** Whether destroy has been called — prevents post-send state mutation. */
+  #destroyed = false;
+  /** Last successfully-typed text — for retry after error. */
+  #lastText = '';
+  /** CM1: initial text to pre-fill textarea on mount — set via setInitialText() before mount(). */
+  #initialText = '';
+  /** W2.2 slice 4: attachment picker — present when client supports sendFile. */
+  #attachmentPicker: AttachmentPicker | null = null;
+
+  constructor(opts: ComposerOptions) {
+    this.#container = opts.container;
+    this.#client = opts.client;
+    this.#roomId = opts.roomId;
+    this.#signal = opts.signal;
+    this.#placeholder = opts.placeholder ?? 'Type a message…';
+  }
+
+  // ── Public API ──────────────────────────────────────────────────────────────
+
+  /**
+   * CM1: Pre-fill the textarea with an initial value before mount().
+   * Must be called before mount(). #updateState() in mount() will reflect this value
+   * so the send button and counter start in the correct state.
+   */
+  setInitialText(text: string): void {
+    this.#initialText = text;
+  }
+
+  mount(): void {
+    // M3: early abort check — if signal already fired, skip mounting entirely
+    if (this.#signal?.aborted) return;
+    if (this.#root) return; // idempotent
+
+    const root = document.createElement('div');
+    root.className = 'oxp-composer';
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'oxp-composer-input';
+    textarea.setAttribute('aria-label', 'Message input');
+    textarea.rows = 1;
+    // M5: placeholder text
+    textarea.placeholder = this.#placeholder;
+    // M2: browser-native cap prevents paste beyond limit
+    textarea.setAttribute('maxlength', String(MAX_BODY_CHARS));
+
+    // M10: hidden hint for disabled-button screen reader context
+    const sendHint = document.createElement('span');
+    sendHint.id = 'oxp-send-hint';
+    sendHint.className = 'oxp-sr-only';
+    sendHint.textContent = 'Message is empty';
+
+    const sendBtn = document.createElement('button');
+    sendBtn.className = 'oxp-composer-send';
+    sendBtn.type = 'button';
+    sendBtn.setAttribute('aria-label', 'Send message');
+    sendBtn.setAttribute('aria-describedby', 'oxp-send-hint');
+    sendBtn.textContent = 'Send';
+    sendBtn.disabled = true;
+
+    // M9: footer row wraps counter + send button (no magic position:absolute)
+    const footer = document.createElement('div');
+    footer.className = 'oxp-composer-footer';
+
+    const counter = document.createElement('span');
+    counter.className = 'oxp-composer-counter';
+    counter.setAttribute('aria-live', 'polite');
+    counter.hidden = true;
+
+    // W2.2 slice 4: paperclip attachment button (only when client supports sendFile)
+    if (typeof this.#client.sendFile === 'function') {
+      const attachBtn = document.createElement('button');
+      attachBtn.type = 'button';
+      attachBtn.className = 'oxp-composer-attachment-btn';
+      attachBtn.setAttribute('aria-label', 'Attach files');
+      attachBtn.textContent = '📎';
+      attachBtn.addEventListener('click', () => {
+        this.#attachmentPicker?.openFileDialog();
+      });
+      footer.appendChild(attachBtn);
+    }
+
+    footer.appendChild(counter);
+    footer.appendChild(sendBtn);
+
+    root.appendChild(sendHint);
+    root.appendChild(textarea);
+    root.appendChild(footer);
+    this.#container.appendChild(root);
+
+    this.#root = root;
+    this.#textarea = textarea;
+    this.#sendBtn = sendBtn;
+    this.#counter = counter;
+
+    // Event listeners
+    textarea.addEventListener('input', this.#onInput);
+    textarea.addEventListener('keydown', this.#onKeydown);
+    sendBtn.addEventListener('click', this.#onSendClick);
+
+    // W2.2 slice 4: paste + drag-drop (only when client supports sendFile)
+    if (typeof this.#client.sendFile === 'function') {
+      // Mount picker inside composer root for queue display
+      const pickerContainer = document.createElement('div');
+      root.insertBefore(pickerContainer, textarea);
+      // sendFile existence is already guarded above; cast is safe
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this.#attachmentPicker = new AttachmentPicker({
+        client: this.#client as any,
+        roomId: this.#roomId,
+        container: pickerContainer,
+        signal: this.#signal,
+      });
+      this.#attachmentPicker.mount();
+
+      textarea.addEventListener('paste', this.#onPaste);
+      root.addEventListener('dragover', this.#onDragover);
+      root.addEventListener('dragleave', this.#onDragleave);
+      root.addEventListener('drop', this.#onDrop);
+    }
+
+    // M3: { once: true } prevents double-destroy; early aborted already handled above
+    this.#signal?.addEventListener('abort', () => this.destroy(), { once: true });
+
+    // Focus textarea when mounted (if visible)
+    if (typeof requestAnimationFrame !== 'undefined') {
+      requestAnimationFrame(() => {
+        if (!this.#destroyed) textarea.focus();
+      });
+    }
+
+    // CM1: apply pre-filled initial text (set via setInitialText() before mount)
+    if (this.#initialText && textarea) {
+      textarea.value = this.#initialText;
+    }
+    // 1F: initialize state on mount so counter + send-hint reflect initial value
+    this.#updateState();
+  }
+
+  destroy(): void {
+    if (this.#destroyed) return;
+    this.#destroyed = true;
+
+    if (this.#textarea) {
+      this.#textarea.removeEventListener('input', this.#onInput);
+      this.#textarea.removeEventListener('keydown', this.#onKeydown);
+      this.#textarea.removeEventListener('paste', this.#onPaste);
+    }
+    if (this.#sendBtn) {
+      this.#sendBtn.removeEventListener('click', this.#onSendClick);
+    }
+    if (this.#root) {
+      this.#root.removeEventListener('dragover', this.#onDragover);
+      this.#root.removeEventListener('dragleave', this.#onDragleave);
+      this.#root.removeEventListener('drop', this.#onDrop);
+    }
+
+    this.#attachmentPicker?.destroy();
+    this.#attachmentPicker = null;
+
+    if (this.#root && this.#root.parentNode) {
+      this.#root.parentNode.removeChild(this.#root);
+    }
+
+    this.#root = null;
+    this.#textarea = null;
+    this.#sendBtn = null;
+    this.#counter = null;
+    this.#errorChip = null;
+  }
+
+  // ── Private handlers ────────────────────────────────────────────────────────
+
+  readonly #onInput = (): void => {
+    this.#updateState();
+    // M8: autogrow textarea height on input
+    if (this.#textarea) {
+      this.#textarea.style.height = 'auto';
+      this.#textarea.style.height = `${autogrowHeightPx(this.#textarea.scrollHeight, 144)}px`;
+    }
+  };
+
+  // W2.2 slice 4: paste handler — forward image files to picker.
+  // Typed as Event so jsdom plain Event dispatches work in tests;
+  // clipboardData is accessed via a type-safe cast to handle both ClipboardEvent and test stubs.
+  readonly #onPaste = (ev: Event): void => {
+    const clipboardData = (ev as { clipboardData?: { files?: FileList } }).clipboardData;
+    const files = clipboardData?.files;
+    if (!files || files.length === 0) return;
+    // Only intercept if there are actual file items (not plain text)
+    let hasFile = false;
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      if (f && f.size > 0) { hasFile = true; break; }
+    }
+    if (!hasFile) return;
+    ev.preventDefault();
+    this.#attachmentPicker?.handleFiles(files);
+  };
+
+  // W2.2 slice 4: drag-drop handlers
+  // Typed as Event (not DragEvent) so jsdom plain Event dispatches work in tests.
+  readonly #onDragover = (ev: Event): void => {
+    ev.preventDefault();
+    this.#root?.classList.add('oxp-composer-dragover');
+  };
+
+  readonly #onDragleave = (_ev: Event): void => {
+    this.#root?.classList.remove('oxp-composer-dragover');
+  };
+
+  readonly #onDrop = (ev: Event): void => {
+    ev.preventDefault();
+    this.#root?.classList.remove('oxp-composer-dragover');
+    // dataTransfer is available on DragEvent and also on our test stub via Object.defineProperty
+    const dataTransfer = (ev as { dataTransfer?: { files?: FileList } }).dataTransfer;
+    const files = dataTransfer?.files;
+    if (files && files.length > 0) {
+      this.#attachmentPicker?.handleFiles(files);
+    }
+  };
+
+  readonly #onKeydown = (ev: KeyboardEvent): void => {
+    // isCmdEnter already guards isComposing (M7)
+    if (isCmdEnter(ev)) {
+      ev.preventDefault();
+      void this.#send();
+    }
+    // Plain Enter: default textarea behavior (newline) — no action needed
+  };
+
+  readonly #onSendClick = (): void => {
+    void this.#send();
+  };
+
+  // ── State updates ───────────────────────────────────────────────────────────
+
+  #updateState(): void {
+    if (!this.#textarea || !this.#sendBtn || !this.#counter) return;
+
+    const text = this.#textarea.value;
+    const len = text.length;
+    const trimmed = text.trim();
+
+    const overLimit = len > MAX_BODY_CHARS;
+    const empty = trimmed.length === 0;
+    this.#sendBtn.disabled = empty || overLimit || this.#sending;
+
+    // M10 / 1G: update send-hint text for screen readers.
+    // During #sending=true, hint reads "Sending message…" so SR announces correct state.
+    const hint = this.#root?.querySelector('#oxp-send-hint');
+    if (hint) {
+      if (this.#sending) {
+        hint.textContent = 'Sending message…';
+      } else {
+        hint.textContent = overLimit ? 'Message exceeds character limit' : 'Message is empty';
+      }
+    }
+
+    // Counter visibility + M2: clamp display to 0 (never show negative)
+    const showCounter = shouldShowCounter(len, MAX_BODY_CHARS);
+    this.#counter.hidden = !showCounter;
+    if (showCounter) {
+      const remaining = Math.max(MAX_BODY_CHARS - len, 0);
+      // M10: announce units for screen readers
+      this.#counter.textContent = `${remaining} characters remaining`;
+      this.#counter.dataset['overLimit'] = overLimit ? 'true' : 'false';
+    }
+  }
+
+  // ── Send ────────────────────────────────────────────────────────────────────
+
+  async #send(textOverride?: string): Promise<void> {
+    if (!this.#textarea || !this.#sendBtn) return;
+
+    const text = textOverride ?? this.#textarea.value.trim();
+    if (!text || text.length === 0) return;
+    if (text.length > MAX_BODY_CHARS) return;
+
+    // Save for retry before the send attempt
+    this.#lastText = text;
+
+    this.#sending = true;
+    this.#sendBtn.disabled = true;
+    // 1E: disable textarea during send to prevent data-loss race.
+    // CM3: textarea disabled during send prevents all user input — the preserve-branch
+    // ("user typed new content while send was in-flight") is unreachable because
+    // the browser blocks keyboard input to disabled elements. The user's typed content
+    // cannot be lost by clearing a textarea they cannot type into.
+    if (this.#textarea) this.#textarea.disabled = true;
+    // 1G: update hint to "Sending message…" while in-flight
+    this.#updateState();
+    // Clear any previous error chip
+    this.#clearErrorChip();
+
+    try {
+      // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path
+      const useOptimistic =
+        typeof this.#client.sendTextOptimistic === 'function' &&
+        Boolean(this.#client.e2ee);
+
+      if (useOptimistic) {
+        await this.#client.sendTextOptimistic!(this.#roomId, text, {});
+      } else {
+        await this.#client.sendText(this.#roomId, text, {});
+      }
+
+      // 1E: Clear only if not destroyed during the send.
+      // CM3: textarea was disabled during send — user cannot type new content mid-flight,
+      // so textarea.value is still the sent text. Safe to clear unconditionally.
+      if (!this.#destroyed && this.#textarea) {
+        this.#textarea.disabled = false;
+        this.#textarea.value = '';
+        this.#lastText = '';
+        this.#updateState();
+      }
+    } catch (err) {
+      // Dispatch error event on the container (bubbles up to shadow root)
+      const message = err instanceof Error ? err.message : String(err);
+      const detail: { kind: string; message: string; msgId?: string } = {
+        kind: 'send_failed',
+        message,
+      };
+      this.#container.dispatchEvent(
+        new CustomEvent('oxpulse-chat:error', {
+          bubbles: true,
+          composed: true,
+          detail,
+        }),
+      );
+
+      // B2: Render inline error chip with retry button
+      if (!this.#destroyed) {
+        this.#renderErrorChip(message);
+      }
+    } finally {
+      this.#sending = false;
+      // 1E: re-enable textarea (in case catch path ran without re-enabling in try)
+      if (!this.#destroyed && this.#textarea && this.#textarea.disabled) {
+        this.#textarea.disabled = false;
+      }
+      if (!this.#destroyed) this.#updateState();
+    }
+  }
+
+  // ── Error chip ──────────────────────────────────────────────────────────────
+
+  #renderErrorChip(message: string): void {
+    this.#clearErrorChip();
+    if (!this.#root) return;
+
+    const chip = document.createElement('div');
+    chip.className = 'oxp-composer-error';
+    chip.setAttribute('role', 'alert');
+    chip.setAttribute('aria-live', 'assertive');
+
+    const msg = document.createElement('span');
+    msg.textContent = message;
+
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.textContent = 'Retry';
+    retryBtn.setAttribute('aria-label', 'Retry sending message');
+    retryBtn.addEventListener('click', () => {
+      this.#clearErrorChip();
+      void this.#send(this.#lastText);
+    });
+
+    chip.appendChild(msg);
+    chip.appendChild(retryBtn);
+    this.#root.appendChild(chip);
+    this.#errorChip = chip;
+  }
+
+  #clearErrorChip(): void {
+    if (this.#errorChip && this.#errorChip.parentNode) {
+      this.#errorChip.parentNode.removeChild(this.#errorChip);
+    }
+    this.#errorChip = null;
+  }
+}

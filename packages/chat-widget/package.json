@@ -1,0 +1,69 @@
+{
+  "name": "@oxpulse/chat-widget",
+  "version": "0.1.0",
+  "description": "OxPulse Chat embed widget — Custom Element + iframe mode",
+  "license": "AGPL-3.0-or-later",
+  "author": "Anatoly Koptev",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat/tree/main/packages/chat-widget",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat.git",
+    "directory": "packages/chat-widget"
+  },
+  "keywords": [
+    "oxpulse",
+    "chat",
+    "widget",
+    "web-component",
+    "custom-element",
+    "iframe",
+    "embed"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./element": {
+      "types": "./dist/element.d.ts",
+      "import": "./dist/element.js"
+    },
+    "./iframe": {
+      "types": "./dist/iframe.d.ts",
+      "import": "./dist/iframe.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "examples"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "tsc --outDir dist",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@oxpulse/chat-sdk": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "jsdom": "^25.0.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

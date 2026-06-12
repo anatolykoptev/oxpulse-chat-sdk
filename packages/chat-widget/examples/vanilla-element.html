@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>@oxpulse/chat-widget — Custom Element example</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    #chat-container { height: 500px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <h1>OxPulse Chat Widget — Custom Element</h1>
+
+  <p>Replace the placeholder values below with real credentials.</p>
+
+  <div id="chat-container">
+    <oxpulse-chat
+      app-id="YOUR_APP_ID"
+      jwt="YOUR_JWT_FROM_BACKEND"
+      room-id="demo-room"
+      theme="auto">
+    </oxpulse-chat>
+  </div>
+
+  <!--
+    In production: load from npm CDN or self-host.
+    In dev: run `npm run build` in packages/chat-widget then serve locally.
+  -->
+  <script type="module">
+    // Load widget (auto-registers <oxpulse-chat>)
+    import '../dist/index.js';
+
+    // Event listeners
+    const el = document.querySelector('oxpulse-chat');
+
+    el.addEventListener('oxpulse-chat:ready', (ev) => {
+      console.log('Widget ready — room:', ev.detail.roomId);
+    });
+
+    el.addEventListener('oxpulse-chat:error', (ev) => {
+      console.error('Widget error:', ev.detail.code, ev.detail.message);
+    });
+
+    el.addEventListener('oxpulse-chat:token-expired', async (ev) => {
+      console.log('Token expired, refreshing...');
+      // In production: fetch a fresh JWT from your backend
+      // const newJwt = await fetch('/api/refresh-token').then(r => r.json()).then(d => d.jwt);
+      // el.refreshToken(newJwt);
+    });
+  </script>
+</body>
+</html>

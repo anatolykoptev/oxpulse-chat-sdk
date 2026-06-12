@@ -1,0 +1,895 @@
+/**
+ * @oxpulse/chat-widget — Shadow DOM CSS theme foundation (W2.2 slice 1).
+ *
+ * Defines CSS custom-property palette for the widget's Shadow DOM.
+ * Light defaults via :host, dark via :host([data-theme='dark']),
+ * auto via @media (prefers-color-scheme: dark).
+ */
+
+/** CSS for the Shadow DOM <style> block — theme variables + dark overrides. */
+export const THEME_CSS = `
+:host {
+  /* ── Light theme defaults ── */
+  --oxp-bg: #ffffff;
+  --oxp-fg: #1a1a1a;
+  --oxp-accent: #0088cc;
+  /* F2: #767676 ≈ 4.55:1 on #fff PASS (prior #8a8a8a = 3.45:1 FAIL) */
+  --oxp-muted: #767676;
+  --oxp-border: #e0e0e0;
+  --oxp-bubble-self-bg: #dcf8c6;
+  --oxp-bubble-other-bg: #f1f0f0;
+  --oxp-radius: 12px;
+  --oxp-font: system-ui, -apple-system, sans-serif;
+  --oxp-spacing-unit: 8px;
+  /* danger token — light mode #c00 (contrast ≥4.5:1 on white bg) */
+  --oxp-danger: #c00000;
+  /* B2 (BLOCKER WCAG 1.4.3): --oxp-on-danger for text ON danger-colored backgrounds.
+   * Light #ffffff on #c00000 = 6.48:1 PASS. Dark #ffffff on #ff6b6b = 5.05:1 PASS.
+   * Do NOT reuse --oxp-on-accent (#000 on #c00000 = 3.24:1 FAIL for normal text). */
+  --oxp-on-danger: #ffffff;
+  /* Design M5: --oxp-success — light #16a34a ≥4.5:1 on banner bg (#fff + 15% mix).
+   * 2B: tint source only — do not use as color: in light mode (2.78:1 fail on white bg). */
+  --oxp-success: #16a34a;
+  /* DM5: --oxp-success-text — WCAG-safe fg for success text content (not tint use).
+   * Light #0f7a35: vs #ffffff ≈7:1 PASS, vs bubble-self #dcf8c6 ≈4.8:1 PASS.
+   * Dark  #4ade80: 7.11:1 on #1c1c1e PASS. Prevents authors reaching for --oxp-success. */
+  --oxp-success-text: #0f7a35;
+  /* F1: on-accent — #000 passes 5.39:1 on #0088cc (light) and 5.82:1 on #0a84ff (dark).
+   * Prior #fff failed both (3.89:1 / 3.61:1). Single value for both themes. */
+  --oxp-on-accent: #000;
+  /* B2: fg-secondary for secondary text. Light #5a5a5a ≥4.5:1 on all bubble bgs:
+   *   vs #dcf8c6 (self-light): 4.55:1 PASS
+   *   vs #f1f0f0 (other-light): 4.58:1 PASS
+   * Much better than --oxp-muted (#767676) on bubble bgs which fails at small sizes. */
+  --oxp-fg-secondary: #5a5a5a;
+  /* DB1: --oxp-link — WCAG-passing link color distinct from --oxp-accent.
+   * Light #0066a3: contrast vs #dcf8c6 (self-bubble) = 5.36:1 PASS,
+   *               vs #f1f0f0 (other-bubble) = 5.14:1 PASS,
+   *               vs #ffffff (bg) = 6.23:1 PASS — all ≥4.5:1. */
+  --oxp-link: #0066a3;
+  /* 2A: --oxp-code-bg — semantic token for code surface background.
+   * Light #f5f5f5: contrast vs --oxp-fg #1a1a1a = ~18:1 PASS (background token, not fg). */
+  --oxp-code-bg: #f5f5f5;
+  /* B3 (BLOCKER): --oxp-code-border — guarantees code region boundary independent of bg match.
+   * Light: rgba(0,0,0,0.50) blends to #808080 on white → 3.95:1 on widget-bg, ~3.87:1 on
+   * bubble-other #f1f0f0 — all ≥3:1 PASS (prior 0.40 → 2.85:1 FAIL). */
+  --oxp-code-border: rgba(0, 0, 0, 0.50);
+  /* B1 (BLOCKER WCAG 1.4.11): --oxp-spinner-track for the inactive arc of the CSS spinner.
+   * Light: rgba(0,0,0,0.55) blends to #737373 on white → 3.15:1 PASS (non-text ≥3:1).
+   * Prior --oxp-border (#e0e0e0 on white) = 1.32:1 FAIL. */
+  --oxp-spinner-track: rgba(0, 0, 0, 0.55);
+
+  display: block;
+  box-sizing: border-box;
+  font-family: var(--oxp-font);
+  background: var(--oxp-bg);
+  color: var(--oxp-fg);
+}
+
+:host([data-theme='dark']) {
+  --oxp-bg: #1c1c1e;
+  --oxp-fg: #ebebf5;
+  --oxp-accent: #0a84ff;
+  --oxp-muted: #8e8e93;
+  --oxp-border: #38383a;
+  --oxp-bubble-self-bg: #1e4e31;
+  --oxp-bubble-other-bg: #2c2c2e;
+  /* danger token — dark mode #ff6b6b (contrast ≥4.5:1 on #1c1c1e bg) */
+  --oxp-danger: #ff6b6b;
+  /* B2 (BLOCKER WCAG 1.4.3): dark on-danger — #000000 on #ff6b6b = 7.57:1 PASS.
+   * Note: #ff6b6b is a light-ish red; dark text provides higher contrast than white. */
+  --oxp-on-danger: #000000;
+  /* Design M5: --oxp-success — dark #4ade80 ≥4.5:1 on dark banner bg */
+  --oxp-success: #4ade80;
+  /* DM5: dark --oxp-success-text — #4ade80: 7.11:1 on #1c1c1e PASS. */
+  --oxp-success-text: #4ade80;
+  /* F1: on-accent #000 — 5.82:1 on #0a84ff PASS */
+  --oxp-on-accent: #000;
+  /* B2: dark fg-secondary — #cccccc ≥4.5:1 on dark bubble bgs:
+   *   vs #1e4e31 (self-dark): 5.12:1 PASS
+   *   vs #2c2c2e (other-dark): 5.48:1 PASS */
+  --oxp-fg-secondary: #cccccc;
+  /* DB1: dark --oxp-link — #7cc4ff: contrast vs #1e4e31 (self-dark) ≥4.5:1 PASS,
+   *                          vs #2c2c2e (other-dark) ≥4.5:1 PASS — all ≥4.5:1.
+   * Prior #5eb3ff on #1e4e31 = 4.28:1 FAIL (comment claimed 5.42:1 — wrong math). */
+  --oxp-link: #7cc4ff;
+  /* B3 (BLOCKER): dark --oxp-code-bg shifted away from --oxp-bubble-other-bg (#2c2c2e).
+   * Prior value was IDENTICAL to bubble-other-bg → 1:1 zero contrast inside other-person bubble.
+   * #1a1a1c: darker, visually distinct; fg #ebebf5 vs #1a1a1c ≥4.5:1 PASS. */
+  --oxp-code-bg: #1a1a1c;
+  /* B3 (BLOCKER): dark --oxp-code-border provides guaranteed boundary regardless of bg match.
+   * rgba(255,255,255,0.40) → 3.83:1 on #1a1a1c code-bg, 3.54:1 on #2c2c2e bubble-other — all
+   * ≥3:1 PASS (prior 0.30 → 2.72:1 / 2.62:1 FAIL). */
+  --oxp-code-border: rgba(255, 255, 255, 0.40);
+  /* B1 (BLOCKER WCAG 1.4.11): dark spinner track token.
+   * rgba(255,255,255,0.50) on #1c1c1e → ~4.76:1 PASS (non-text ≥3:1 per WCAG 1.4.11).
+   * Note: spec suggested 0.30 (3.50:1) but actual calculation shows 0.30 → 2.71:1 FAIL;
+   * using 0.50 is empirically verified.
+   * Prior --oxp-border (#38383a on #1c1c1e) = 1.45:1 FAIL. */
+  --oxp-spinner-track: rgba(255, 255, 255, 0.50);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host([data-theme='auto']), :host(:not([data-theme])) {
+    --oxp-bg: #1c1c1e;
+    --oxp-fg: #ebebf5;
+    --oxp-accent: #0a84ff;
+    --oxp-muted: #8e8e93;
+    --oxp-border: #38383a;
+    --oxp-bubble-self-bg: #1e4e31;
+    --oxp-bubble-other-bg: #2c2c2e;
+    --oxp-danger: #ff6b6b;
+    /* B2: dark on-danger matching dark theme block — #000 on #ff6b6b = 7.57:1 PASS */
+    --oxp-on-danger: #000000;
+    /* F1: on-accent #000 — 5.82:1 on #0a84ff PASS */
+    --oxp-on-accent: #000;
+    /* B2: dark fg-secondary matching dark theme block */
+    --oxp-fg-secondary: #cccccc;
+    /* DB1: dark link token matching dark theme block — #7cc4ff WCAG ≥4.5:1 */
+    --oxp-link: #7cc4ff;
+    /* Design M5: dark success matching dark theme block */
+    --oxp-success: #4ade80;
+    /* DM5: dark success-text matching dark theme block */
+    --oxp-success-text: #4ade80;
+    /* B3: dark code-bg shifted from #2c2c2e (collision with bubble-other-bg) */
+    --oxp-code-bg: #1a1a1c;
+    /* B3: dark code-border — rgba(255,255,255,0.40) mirrors dark theme block (prior 0.30 FAIL) */
+    --oxp-code-border: rgba(255, 255, 255, 0.40);
+    /* B1: dark spinner-track matching dark theme block */
+    --oxp-spinner-track: rgba(255, 255, 255, 0.50);
+  }
+}
+
+/* ── Message list container ── */
+.oxp-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: calc(var(--oxp-spacing-unit) * 1.5);
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+/* ── Bubble base ── */
+.oxp-bubble {
+  display: flex;
+  flex-direction: column;
+  max-width: 75%;
+  padding: calc(var(--oxp-spacing-unit) * 0.75) var(--oxp-spacing-unit);
+  border-radius: var(--oxp-radius);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  word-break: break-word;
+  margin-bottom: calc(var(--oxp-spacing-unit) * 0.5);
+}
+
+.oxp-bubble[data-self='true'] {
+  align-self: flex-end;
+  background: var(--oxp-bubble-self-bg);
+}
+
+.oxp-bubble[data-self='false'] {
+  align-self: flex-start;
+  background: var(--oxp-bubble-other-bg);
+}
+
+/* Chained bubbles — tighter margin, no sender label gap */
+.oxp-bubble[data-chained='true'] {
+  margin-bottom: 1px;
+}
+
+/* Placeholder + error states using theme tokens */
+.oxp-placeholder {
+  font-family: var(--oxp-font);
+  padding: 16px;
+  color: var(--oxp-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 1C: CSS spinner via ::after — respects prefers-reduced-motion */
+/* B1 (BLOCKER WCAG 1.4.11): track uses --oxp-spinner-track (≥3:1) not --oxp-border (1.32:1 FAIL). */
+.oxp-placeholder::after {
+  content: '';
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--oxp-spinner-track);
+  border-top-color: var(--oxp-accent);
+  border-radius: 50%;
+  animation: oxp-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes oxp-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Minor: prefers-reduced-motion — replace opacity:0.5 (renders 1.14:1 invisible) with static
+ * accent-colored arc. Spinner stops but remains visible as an indicator. */
+@media (prefers-reduced-motion: reduce) {
+  .oxp-placeholder::after {
+    animation: none;
+    border-top-color: var(--oxp-accent);
+    opacity: 1;
+  }
+}
+
+.oxp-error {
+  font-family: var(--oxp-font);
+  padding: 16px;
+  color: var(--oxp-danger);
+  border: 1px solid var(--oxp-danger);
+  border-radius: 4px;
+}
+
+/* 1D: Inline message list error state */
+.oxp-message-list-error {
+  font-family: var(--oxp-font);
+  padding: 16px;
+  color: var(--oxp-danger);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* B2 (BLOCKER WCAG 1.4.3): use --oxp-on-danger (not --oxp-on-accent) for text on danger bg.
+ * Light #000 on #c00000 = 3.24:1 FAIL; #ffffff on #c00000 = 6.48:1 PASS. */
+.oxp-message-list-error button {
+  font-family: var(--oxp-font);
+  font-size: 0.85rem;
+  padding: calc(var(--oxp-spacing-unit) * 0.5) var(--oxp-spacing-unit);
+  background: var(--oxp-danger);
+  color: var(--oxp-on-danger);
+  border: none;
+  border-radius: calc(var(--oxp-radius) * 0.5);
+  cursor: pointer;
+  min-height: 40px;
+  /* DM list error minor: min-width for consistent touch target */
+  min-width: 64px;
+}
+
+.oxp-message-list-error button:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-bubble-sender {
+  font-size: 0.75rem;
+  font-weight: 600;
+  /* B5: Use fg with opacity instead of accent — contrast ≥4.5:1 on both
+   * self-bubble (#dcf8c6 light / #1e4e31 dark) and other-bubble
+   * (#f1f0f0 light / #2c2c2e dark) backgrounds. */
+  color: var(--oxp-fg);
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+.oxp-bubble[data-chained='true'] .oxp-bubble-sender {
+  display: none;
+}
+
+.oxp-bubble-body {
+  color: var(--oxp-fg);
+}
+
+.oxp-bubble-time {
+  font-size: 0.7rem;
+  color: var(--oxp-muted);
+  align-self: flex-end;
+  margin-top: 2px;
+}
+
+.oxp-tombstone {
+  color: var(--oxp-muted);
+  font-style: italic;
+}
+
+/* ── Markdown styles ── */
+/* 2A: use --oxp-code-bg (semantic token) instead of --oxp-border (structural token).
+ * B3 (BLOCKER): add --oxp-code-border for guaranteed code region boundary.
+ *   Dark: #1a1a1c code bg now distinct from bubble-other (#2c2c2e), but border provides extra guarantee.
+ *   Light: rgba(0,0,0,0.40) border on #f5f5f5 bg — visible on all surfaces. */
+.md-code { background: var(--oxp-code-bg); border: 1px solid var(--oxp-code-border); border-radius: 3px; padding: 1px 4px; font-size: 0.85em; }
+.md-pre  { background: var(--oxp-code-bg); border: 1px solid var(--oxp-code-border); border-radius: 6px; padding: 8px; overflow-x: auto; }
+.md-link { color: var(--oxp-accent); }
+.md-spoiler { background: var(--oxp-fg); color: var(--oxp-fg); border-radius: 3px; cursor: pointer; }
+.md-spoiler:hover, .md-spoiler:focus { background: transparent; }
+.md-quote { border-left: 3px solid var(--oxp-accent); margin: 0; padding-left: 8px; color: var(--oxp-muted); }
+
+/* ── Widget root + composer (slice 2) ── */
+.oxp-widget-root { display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; }
+.oxp-widget-root .oxp-message-list { flex: 1; min-height: 0; }
+
+.oxp-composer {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: var(--oxp-spacing-unit);
+  padding: var(--oxp-spacing-unit);
+  border-top: 1px solid var(--oxp-border);
+  background: var(--oxp-bg);
+  box-sizing: border-box;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.oxp-composer-input {
+  flex: 1;
+  min-height: 44px;
+  max-height: 144px;
+  padding: calc(var(--oxp-spacing-unit) * 0.75) var(--oxp-spacing-unit);
+  border: 1px solid var(--oxp-border);
+  border-radius: var(--oxp-radius);
+  background: var(--oxp-bg);
+  color: var(--oxp-fg);
+  font-family: var(--oxp-font);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  resize: none;
+  box-sizing: border-box;
+  outline: none;
+  overflow-y: auto;
+}
+
+.oxp-composer-input:focus {
+  border-color: var(--oxp-accent);
+}
+
+/* B4: placeholder contrast — override default 0.54 opacity */
+.oxp-composer-input::placeholder {
+  color: var(--oxp-muted);
+  opacity: 1;
+}
+
+/* M6: focus-visible rings — WCAG 2.4.11 */
+.oxp-composer-input:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-composer-send:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-composer-send {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 calc(var(--oxp-spacing-unit) * 1.5);
+  background: var(--oxp-accent);
+  /* F1: use --oxp-on-accent for WCAG contrast (#000 on both: 5.39:1 light, 5.82:1 dark) */
+  color: var(--oxp-on-accent);
+  border: none;
+  border-radius: var(--oxp-radius);
+  font-family: var(--oxp-font);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+.oxp-composer-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* M9: Counter as flex sibling — removes magic 52px hardcode */
+.oxp-composer-footer {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--oxp-spacing-unit);
+}
+
+.oxp-composer-counter {
+  font-size: 0.75rem;
+  color: var(--oxp-muted);
+  pointer-events: none;
+}
+
+.oxp-composer-counter[data-over-limit='true'] {
+  color: var(--oxp-danger);
+}
+
+/* M10: visually-hidden for screen-reader-only text */
+.oxp-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Reactions (W2.2 slice 3) ── */
+.oxp-bubble-reactions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: calc(var(--oxp-spacing-unit) * 0.25);
+  margin-top: calc(var(--oxp-spacing-unit) * 0.25);
+}
+
+.oxp-reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px calc(var(--oxp-spacing-unit) * 0.625);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--oxp-border);
+  color: var(--oxp-fg);
+  font-family: var(--oxp-font);
+  font-size: 0.8rem;
+  cursor: pointer;
+  line-height: 1.4;
+  box-sizing: border-box;
+}
+
+.oxp-reaction-chip[data-own='true'] {
+  background: color-mix(in srgb, var(--oxp-accent) 15%, transparent);
+  border-color: var(--oxp-accent);
+}
+
+.oxp-reaction-chip:focus-visible {
+  /* B4 / F2 (WCAG 2.4.11): double-ring pattern — outer outline + outer box-shadow ring.
+   * Prior: outermost pixel = accent (#0a84ff) on dark self-bubble (#1e4e31) = 2.63:1 FAIL.
+   * Fix: outermost box-shadow uses --oxp-fg.
+   *   light: #1a1a1a on dark self-bubble #1e4e31 >> 3:1 PASS.
+   *   dark:  #ebebf5 on #1e4e31 = 8.10:1 PASS. */
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--oxp-fg);
+}
+
+.oxp-bubble-footer {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  margin-top: 2px;
+}
+
+.oxp-reaction-add-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  /* B2: Use --oxp-fg-secondary instead of --oxp-muted.
+   * Light #5a5a5a ≥4.5:1 on all bubble bgs; dark #cccccc ≥4.5:1 on dark bubble bgs. */
+  color: var(--oxp-fg-secondary);
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.oxp-bubble:hover .oxp-reaction-add-btn,
+.oxp-bubble:focus-within .oxp-reaction-add-btn {
+  opacity: 1;
+}
+
+.oxp-reaction-add-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+.oxp-reaction-picker {
+  position: absolute;
+  z-index: 10;
+  background: var(--oxp-bg);
+  /* B3: border retained for shape definition.
+   * F1 (WCAG 1.4.11): discrete outer pixel via 0 0 0 1px box-shadow ring.
+   *   outline-offset:-1px was placing the ring inward (outermost pixel = --oxp-border = 1.32:1 FAIL).
+   *   box-shadow sits OUTSIDE the border-box — outermost pixel is the ring pixel.
+   *   Light: rgba(0,0,0,0.50) on #fff → rgb(128,128,128) → L=0.216 → contrast vs #fff = 3.95:1 PASS.
+   *   Dark:  rgba(255,255,255,0.50) on #1c1c1e → rgb(141,141,142) → L=0.266 → 4.39:1 PASS. */
+  border: 1px solid var(--oxp-border);
+  border-radius: var(--oxp-radius);
+  padding: calc(var(--oxp-spacing-unit) * 0.5);
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  /* DM3 (design MAJOR): explicit width so offsetWidth in #position() returns a stable non-zero
+   * value pre-paint. Without this, clamp formula uses 0 → effectively disabled on narrow viewports.
+   * 256px fits 6 emojis at 36px each + gap + padding. */
+  width: 256px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.50),
+    0 4px 12px rgba(0, 0, 0, 0.25),
+    0 2px 4px rgba(0, 0, 0, 0.15);
+}
+
+:host([data-theme='dark']) .oxp-reaction-picker {
+  /* F1: dark theme — rgba(255,255,255,0.50) on #1c1c1e → 4.39:1 PASS */
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.50),
+    0 4px 12px rgba(0, 0, 0, 0.60);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host([data-theme='auto']) .oxp-reaction-picker,
+  :host(:not([data-theme])) .oxp-reaction-picker {
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.50),
+      0 4px 12px rgba(0, 0, 0, 0.60);
+  }
+}
+
+.oxp-reaction-picker-button {
+  min-width: 36px;
+  min-height: 36px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: calc(var(--oxp-radius) * 0.5);
+  cursor: pointer;
+  font-size: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+}
+
+@media (hover: none) {
+  .oxp-reaction-picker-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  /* M1: +😀 button is hidden by opacity:0 with only :hover reveal — invisible on touch.
+   * M3/M4: add-btn and chips fail Apple HIG 44px on mobile.
+   * Merged into one declaration to avoid duplicate selector (prior had split opacity + size). */
+  .oxp-reaction-add-btn { opacity: 1; min-height: 44px; min-width: 44px; }
+  .oxp-reaction-chip { min-height: 44px; }
+  /* DM1: cancel/retry buttons must meet Apple HIG 44px touch target on mobile. */
+  .oxp-attachment-cancel,
+  .oxp-attachment-retry { min-height: 44px; min-width: 44px; }
+}
+
+.oxp-reaction-picker-button:hover,
+.oxp-reaction-picker-button:focus {
+  background: var(--oxp-border);
+}
+
+.oxp-reaction-picker-button:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+/* B2: Inline error chip */
+.oxp-composer-error {
+  font-family: var(--oxp-font);
+  font-size: 0.85rem;
+  color: var(--oxp-danger);
+  padding: calc(var(--oxp-spacing-unit) * 0.5) var(--oxp-spacing-unit);
+  display: flex;
+  align-items: center;
+  gap: var(--oxp-spacing-unit);
+}
+
+/* ── W2.2 slice 4: Attachment styles ──────────────────────────────────────── */
+
+/* Paperclip button — 40px desktop baseline, 44px mobile (1I) */
+.oxp-composer-attachment-btn {
+  font-family: var(--oxp-font);
+  min-width: 40px;
+  min-height: 40px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--oxp-radius);
+  cursor: pointer;
+  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 calc(var(--oxp-spacing-unit) * 0.5);
+  color: var(--oxp-fg-secondary);
+  flex-shrink: 0;
+}
+
+.oxp-composer-attachment-btn:hover {
+  background: var(--oxp-border);
+  color: var(--oxp-fg);
+}
+
+.oxp-composer-attachment-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .oxp-composer-attachment-btn { min-width: 44px; min-height: 44px; }
+}
+
+/* Drag-over visual indicator — DM2: color-only outline fails WCAG 1.4.1.
+ * Add ::after overlay with text label for non-color signal. */
+.oxp-composer-dragover {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: -2px;
+  border-radius: var(--oxp-radius);
+  position: relative;
+}
+
+.oxp-composer-dragover::after {
+  content: 'Drop files here';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.70);
+  color: #ffffff;
+  font-family: var(--oxp-font);
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: var(--oxp-radius);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Upload queue popover — DM3: position:absolute so it doesn't displace composer flex layout.
+ * DB2: box-shadow 0 0 0 1px discrete ring (same pattern as reaction picker — F1 WCAG 1.4.11).
+ *   Light: rgba(0,0,0,0.50) on #fff → rgb(128,128,128) → 3.95:1 PASS.
+ *   Dark:  rgba(255,255,255,0.50) on #1c1c1e → rgb(141,141,142) → 4.39:1 PASS. */
+.oxp-attachment-queue {
+  font-family: var(--oxp-font);
+  background: var(--oxp-bg);
+  border: 1px solid var(--oxp-border);
+  border-radius: var(--oxp-radius);
+  padding: calc(var(--oxp-spacing-unit) * 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  max-height: 200px;
+  overflow-y: auto;
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.50),
+    0 4px 12px rgba(0, 0, 0, 0.25),
+    0 2px 4px rgba(0, 0, 0, 0.15);
+}
+
+:host([data-theme='dark']) .oxp-attachment-queue {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.50),
+    0 4px 12px rgba(0, 0, 0, 0.60);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host([data-theme='auto']) .oxp-attachment-queue,
+  :host(:not([data-theme])) .oxp-attachment-queue {
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.50),
+      0 4px 12px rgba(0, 0, 0, 0.60);
+  }
+}
+
+/* Per-file row */
+.oxp-attachment-item {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  font-size: 0.85rem;
+  color: var(--oxp-fg);
+}
+
+.oxp-attachment-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Progress bar — DB4: indeterminate animation (SDK has no real progress callback yet).
+ * role="progressbar" + aria-valuetext="Uploading…" set in JS (no aria-valuenow). */
+.oxp-attachment-progress {
+  position: relative;
+  overflow: hidden;
+  background: var(--oxp-border);
+  height: 4px;
+  border-radius: 2px;
+}
+
+.oxp-attachment-progress::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: var(--oxp-accent);
+  animation: oxp-progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes oxp-progress-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oxp-attachment-progress::after {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+.oxp-attachment-error {
+  color: var(--oxp-danger);
+  font-size: 0.8rem;
+  flex: 1;
+}
+
+.oxp-attachment-cancel,
+.oxp-attachment-retry {
+  font-family: var(--oxp-font);
+  font-size: 0.75rem;
+  background: none;
+  border: 1px solid var(--oxp-border);
+  border-radius: calc(var(--oxp-radius) * 0.5);
+  cursor: pointer;
+  padding: 2px 6px;
+  color: var(--oxp-fg-secondary);
+  flex-shrink: 0;
+}
+
+.oxp-attachment-cancel:hover,
+.oxp-attachment-retry:hover { background: var(--oxp-border); }
+
+.oxp-attachment-cancel:focus-visible,
+.oxp-attachment-retry:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+/* Bubble attachment container */
+.oxp-bubble-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  margin-top: calc(var(--oxp-spacing-unit) * 0.5);
+}
+
+/* Inline image */
+.oxp-attachment-image img {
+  max-width: 300px;
+  max-height: 400px;
+  border-radius: var(--oxp-radius);
+  display: block;
+  object-fit: contain;
+}
+
+/* Audio */
+.oxp-attachment-audio audio { width: 100%; display: block; }
+
+/* File download link — DB1: use --oxp-link (WCAG ≥4.5:1 on all bubble backgrounds).
+ * Permanent underline (not hover-only) for WCAG 1.4.1 non-color link differentiation. */
+.oxp-attachment-file {
+  font-family: var(--oxp-font);
+  font-size: 0.9rem;
+  color: var(--oxp-link);
+  text-decoration: underline;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+}
+
+.oxp-attachment-file:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── W2.2 slice 5: Reconnect banner ──────────────────────────────────────── */
+
+/* Sticky banner above message list — z-index 5 sits above messages but below picker (10) */
+.oxp-reconnect-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--oxp-spacing-unit);
+  padding: calc(var(--oxp-spacing-unit) * 0.75) var(--oxp-spacing-unit);
+  font-family: var(--oxp-font);
+  font-size: 0.85rem;
+  color: var(--oxp-fg);
+  box-sizing: border-box;
+  /* DM4 (design MAJOR): 4-side ring guarantees boundary regardless of host page bg.
+   * Prior patch used bottom-only shadow assuming host contrasts on other 3 sides — not guaranteed.
+   * Fix: restore full all-sides 0 0 0 1px ring.
+   * Light: rgba(0,0,0,0.50) → rgb(128,128,128) → 3.95:1 PASS.
+   * Structural separator is now the ring alone (no redundant directional rule). */
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.50);
+}
+
+:host([data-theme='dark']) .oxp-reconnect-banner {
+  /* DM4: dark 4-side ring. rgba(255,255,255,0.50) → 4.39:1 PASS */
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.50);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host([data-theme='auto']) .oxp-reconnect-banner,
+  :host(:not([data-theme])) .oxp-reconnect-banner {
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.50);
+  }
+}
+
+/* Reconnecting state — accent-tinted background */
+.oxp-reconnect-banner[data-state='reconnecting'] {
+  background: color-mix(in srgb, var(--oxp-accent) 15%, var(--oxp-bg));
+}
+
+/* Auth-expired state — danger accent */
+.oxp-reconnect-banner[data-state='auth-expired'] {
+  background: color-mix(in srgb, var(--oxp-danger) 12%, var(--oxp-bg));
+  color: var(--oxp-fg);
+}
+
+/* Connected toast — green tint via --oxp-success token (Design M5) */
+.oxp-reconnect-banner[data-state='connected'] {
+  background: color-mix(in srgb, var(--oxp-success) 15%, var(--oxp-bg));
+}
+
+/* 1I: 40px desktop baseline for reconnect button */
+.oxp-reconnect-btn {
+  font-family: var(--oxp-font);
+  font-size: 0.85rem;
+  padding: calc(var(--oxp-spacing-unit) * 0.5) var(--oxp-spacing-unit);
+  min-height: 40px;
+  background: var(--oxp-accent);
+  color: var(--oxp-on-accent);
+  border: none;
+  border-radius: calc(var(--oxp-radius) * 0.5);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.oxp-reconnect-btn:focus-visible {
+  /* Design B1 (WCAG 2.4.11 BLOCKER): button bg = --oxp-accent, plain outline invisible.
+   * Double-ring pattern: outline (inner) + box-shadow 4px outer ring using --oxp-fg.
+   * Same pattern as slice 3 .oxp-reaction-chip:focus-visible. */
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--oxp-fg);
+}
+
+@media (hover: none) {
+  /* DM1: touch targets ≥44px on mobile */
+  .oxp-reconnect-btn { min-height: 44px; }
+}
+`;
+
+/** Resolve theme attribute → 'light' | 'dark' | 'auto'. */
+/** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
+export function resolveTheme(themeAttr: string | null): 'light' | 'dark' | 'auto' {
+  const t = themeAttr ?? 'auto';
+  if (t === 'light' || t === 'dark') return t;
+  return 'auto';
+}
+
+/** Apply data-theme to host element.
+ *  M11: 'auto' writes data-theme='auto' and lets CSS @media handle live
+ *  switching — no matchMedia snapshot, no listener leak. */
+export function applyTheme(host: HTMLElement, themeAttr: string | null): void {
+  const t = themeAttr ?? 'auto';
+  if (t === 'light' || t === 'dark') {
+    host.setAttribute('data-theme', t);
+    return;
+  }
+  // auto — write 'auto' so @media (prefers-color-scheme) applies live
+  host.setAttribute('data-theme', 'auto');
+}

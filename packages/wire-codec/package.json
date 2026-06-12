@@ -1,0 +1,67 @@
+{
+  "name": "@oxpulse/wire-codec",
+  "version": "0.3.0",
+  "description": "OxPulse wire codec \u2014 CBOR + zstd + per-language shared dictionaries for E2EE chat envelopes.",
+  "license": "AGPL-3.0-or-later",
+  "author": "Anatoly Koptev",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat/tree/main/packages/wire-codec",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat.git",
+    "directory": "packages/wire-codec"
+  },
+  "bugs": {
+    "url": "https://github.com/anatolykoptev/oxpulse-chat/issues"
+  },
+  "keywords": [
+    "oxpulse",
+    "chat",
+    "e2ee",
+    "cbor",
+    "zstd",
+    "wire",
+    "codec",
+    "envelope"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "dicts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "prepare": "tsc --outDir dist",
+    "build": "tsc --outDir dist",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit"
+  },
+  "dependencies": {
+    "cbor-x": "^1.6.4",
+    "@bokuweb/zstd-wasm": "^0.0.27"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
