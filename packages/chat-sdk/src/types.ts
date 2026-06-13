@@ -433,6 +433,18 @@ export interface SubscribeArgs {
 // './types'` (and the index.ts re-export below) keep working unchanged.
 export type { SDKChatErrorCode } from './errors.js';
 
+// ── Visibility ───────────────────────────────────────────────────────────────
+
+/**
+ * Room access model.
+ *
+ * - "member": default; only explicit members may send/read.
+ * - "open": any authenticated app-user may append/read; moderation via banned role.
+ *
+ * Wire field: visibility (string). Server default: "member".
+ */
+export type RoomVisibility = "member" | "open";
+
 // ── W5: Room + Member types ───────────────────────────────────────────────────
 
 export interface Room {
@@ -445,6 +457,8 @@ export interface Room {
   archivedAt: string | null;
   metadata: Record<string, unknown>;
   members: Member[];
+  /** Room access model. Server default: "member". */
+  visibility: RoomVisibility;
 }
 
 /**
@@ -464,6 +478,8 @@ export interface RoomSummary {
   createdAt: string;
   archivedAt: string | null;
   metadata: Record<string, unknown>;
+  /** Room access model. Server default: "member". */
+  visibility: RoomVisibility;
 }
 
 export interface Member {
@@ -482,6 +498,11 @@ export interface CreateRoomArgs {
   productRef?: string;
   metadata?: Record<string, unknown>;
   initialMembers?: Array<{ userId: string; role?: string }>;
+  /**
+   * Room access model. Omit to use the server default ("member").
+   * Pass "open" to create a room any authenticated app-user can join.
+   */
+  visibility?: RoomVisibility;
 }
 
 export interface UpdateRoomArgs {

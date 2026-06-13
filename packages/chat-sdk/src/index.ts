@@ -29,7 +29,7 @@
 export { SDKChatClient, BATCH_ADD_MEMBERS_CHUNK } from './client.js';
 export type { SDKChatClientOptions, SendArgs, ListArgs, ListResult, SubscribeArgs, MessageRow, SDKChatErrorCode, UpdateMessageArgs, PinnedMessage, MutationEvent, ReactionEvent, ReactionsResponse, OptimisticHandle, CryptoProvider, E2EEOptions, SealContext, BatchAppendItem, CryptoMode } from './types.js';
 // ─── W5: Room management types ───────────────────────────────────────────────
-export type { Room, RoomSummary, Member } from './types.js';
+export type { Room, RoomSummary, Member, RoomVisibility } from './types.js';
 export { createSFrameProvider } from './sframe.js';
 // Re-export ReplayError from sframe-ratchet/chat so consumers can inspect unsealError: 'replay'.
 export { ReplayError } from 'sframe-ratchet/chat';
