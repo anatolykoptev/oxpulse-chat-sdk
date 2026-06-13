@@ -1,36 +1,50 @@
 #!/usr/bin/env node
-// Release watcher for oxpulse-chat-sdk npm packages.
+// Release script for oxpulse-chat-sdk npm packages.
 //
-// Reads versions from packages/* in this repo (no git clone/sync needed —
-// this script runs inside the repo itself). Publishes to npm when local
-// version > registry version.
+// Two publish modes:
 //
-// Behaviour:
-//   For each package in PACKAGES (in dep order — deps before dependents):
-//     1. Read local version from packages/<dir>/package.json
-//     2. Reject prerelease versions (versions containing "-") with a hard error
-//     3. Query npm registry for latest version
-//     4. local > registry  → pnpm publish (rewrites workspace:^ to real ranges)
-//                           + git tag + push tag
-//     5. equal or local <  → skip
+// ── TOKEN MODE (default for local dev) ───────────────────────────────────────
+//   Active when: NPM_TOKEN env is set.
+//   Auth: pnpm publish with npm_config_//registry.npmjs.org/:_authToken.
+//   Does NOT emit provenance.
 //
-// Fail-fast: any publish failure exits immediately (exit 1). Dependents are
-// not published on top of a failed dependency. Re-run is safe — the
-// version-compare gate skips already-published packages.
+// ── OIDC / TRUSTED PUBLISHING MODE ───────────────────────────────────────────
+//   Active when: TRUSTED_PUBLISH=1 OR (CI=true AND NPM_TOKEN is absent).
+//   Auth: none — npm exchanges the GitHub Actions OIDC token automatically.
+//   How it works:
+//     1. `pnpm pack --pack-destination <tmp>` — pnpm rewrites workspace:^
+//        references to real semver ranges in the tarball's package.json.
+//     2. Assert the packed package.json has NO "workspace:" strings.
+//     3. `npm publish <tarball> --provenance --access public` — npm CLI fetches
+//        the OIDC token from the GitHub Actions environment and exchanges it
+//        with the npm trusted-publishing endpoint. No token env var needed.
+//   Requirement: npm ≥ 11.5.1, Node ≥ 22.14 (enforced in release.yml).
 //
-// Required env:
-//   NPM_TOKEN          npm automation token, bypass_2fa=true, write access
-//                      to @oxpulse/* packages.
+// ── CHAT-WIDGET SOFT-SKIP ────────────────────────────────────────────────────
+//   @oxpulse/chat-widget does not yet exist on npm, so npm Trusted Publishing
+//   cannot be configured for it (npm requires the package to exist first for
+//   the trusted-publisher UI). Until then:
+//   - In OIDC mode: if `npm view` returns 404 (never published), we LOG a clear
+//     skip message and CONTINUE rather than fail the whole run.
+//   - Once the package exists on npm (bootstrap via manual publish), it will be
+//     treated like the others (trusted publisher configured, version gate runs).
+//   - In token mode: behaviour is unchanged (publish if local > registry).
+//   The SOFT_PACKAGES set below controls which packages get soft-skip in OIDC
+//   mode. Remove '@oxpulse/chat-widget' from it once its trusted publisher is
+//   configured on npm.
+//
+// ── ORDERING INVARIANT ────────────────────────────────────────────────────────
+//   PACKAGES is in dep order (wire-codec → chat-sdk → chat-widget). A same-run
+//   bump of wire-codec is visible to chat-sdk because we publish wire-codec first
+//   and npm view will return the new version by the time chat-sdk publishes.
 //
 // Optional env:
-//   DRY_RUN=1          Run `pnpm publish --dry-run` instead of real publish.
-//                      Skips tagging/pushing. Still runs the no-workspace-string
-//                      assertion on the packed tarball.
+//   DRY_RUN=1          Skip actual publish + tag/push. Pack + assert still run.
 //
 // Exit codes:
 //   0  ok (no-op or successful publish)
 //   1  publish failure or workspace-string assertion failed
-//   2  config error (missing token / wrong remote)
+//   2  config error (missing token in token mode / wrong remote)
 
 import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync, execSync } from 'node:child_process';
@@ -46,13 +60,26 @@ const REPO_ROOT = join(__dirname, '..');
 const DRY_RUN = process.env.DRY_RUN === '1';
 const NPM_TOKEN = process.env.NPM_TOKEN;
 
-// Packages in this repo, in dependency order (deps before dependents so a
-// same-run wire-codec bump is visible to chat-sdk if both bump together).
+// OIDC mode: explicit opt-in via TRUSTED_PUBLISH=1, or auto-detected when
+// running in CI without an NPM_TOKEN (the GitHub Actions OIDC case).
+const OIDC_MODE =
+	process.env.TRUSTED_PUBLISH === '1' ||
+	(process.env.CI === 'true' && !NPM_TOKEN);
+
+// Packages in this repo, in dependency order.
 const PACKAGES = [
 	{ name: '@oxpulse/wire-codec', dir: 'packages/wire-codec' },
 	{ name: '@oxpulse/chat-sdk',   dir: 'packages/chat-sdk'   },
 	{ name: '@oxpulse/chat-widget', dir: 'packages/chat-widget' },
 ];
+
+// In OIDC mode, packages in this set are treated as "soft" — if npm view
+// returns 404 (never published / no trusted publisher yet), we log + skip
+// instead of failing the run. Once a package is bootstrapped on npm and its
+// trusted publisher is configured, remove it from this set.
+//
+// wire-codec and chat-sdk must NOT be in this set — their failures are fatal.
+const SOFT_PACKAGES_OIDC = new Set(['@oxpulse/chat-widget']);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -80,13 +107,20 @@ function assertNoPrerelease(version, context) {
 	}
 }
 
+// Returns the latest registry version, or '0.0.0' if the package does not
+// exist (E404). Throws on other failures.
+// Also returns a boolean `notFound` to let callers distinguish "never published"
+// from a real version (used for soft-skip logic).
 function npmViewVersion(pkgName) {
 	const res = spawnSync('npm', ['view', pkgName, 'version'], {
 		encoding: 'utf8',
 	});
-	if (res.status === 0) return res.stdout.trim();
-	// E404 or non-zero with E404 in stderr = never published; treat as "0.0.0"
-	if (res.status !== 0 && /E?404/.test(res.stderr)) return '0.0.0';
+	if (res.status === 0) return { version: res.stdout.trim(), notFound: false };
+	// E404 = never published; treat as "0.0.0" so local always wins,
+	// but return notFound=true so soft-skip logic can catch it.
+	if (res.status !== 0 && /E?404/.test(res.stderr)) {
+		return { version: '0.0.0', notFound: true };
+	}
 	throw new Error(`npm view ${pkgName} failed: ${res.stderr}`);
 }
 
@@ -100,67 +134,98 @@ function readLocalVersion(pkgDir) {
 	return pkg.version;
 }
 
-// Assert the packed tarball for a package contains no workspace: strings in
-// package.json — pnpm must have rewritten them. Throws on failure.
-function assertNoWorkspaceStrings(pkgName, pkgDir) {
+// Pack the package via pnpm (which rewrites workspace:^ to real ranges),
+// assert the packed package.json has no "workspace:" strings, then return
+// the tarball path and the raw packed package.json content.
+//
+// scratch dir is created by the caller and must be cleaned up by the caller.
+function packAndAssert(pkgName, pkgDir, scratch) {
+	const packRes = spawnSync(
+		'pnpm',
+		['pack', '--pack-destination', scratch],
+		{ cwd: pkgDir, encoding: 'utf8' },
+	);
+	if (packRes.status !== 0) {
+		throw new Error(`pnpm pack failed for ${pkgName}: ${packRes.stderr}`);
+	}
+	// pnpm outputs the full tarball path as the last non-empty line of stdout.
+	const tarballPath = packRes.stdout.trim().split('\n').filter(Boolean).pop().trim();
+
+	// Extract package/package.json from the tarball.
+	const extractRes = spawnSync(
+		'tar',
+		['-xzOf', tarballPath, 'package/package.json'],
+		{ encoding: 'utf8' },
+	);
+	if (extractRes.status !== 0) {
+		throw new Error(`tar extract failed for ${pkgName}: ${extractRes.stderr}`);
+	}
+	const packedPkgJson = extractRes.stdout;
+
+	if (packedPkgJson.includes('workspace:')) {
+		throw new Error(
+			`BLOCKER: packed ${pkgName}/package.json still contains "workspace:" strings — ` +
+			`pnpm workspace-protocol rewrite failed. Packed deps:\n` +
+			JSON.stringify(JSON.parse(packedPkgJson).dependencies ?? {}, null, 2),
+		);
+	}
+	log(`workspace-string assertion passed for ${pkgName}`);
+	return { tarballPath, packedPkgJson };
+}
+
+async function publishPackageOidc(pkg, localVersion) {
+	const pkgDir = join(REPO_ROOT, pkg.dir);
+	log(`[OIDC] publishing ${pkg.name}@${localVersion}…`);
+
 	const scratch = join(tmpdir(), `oxpulse-pack-${Date.now()}`);
 	mkdirSync(scratch, { recursive: true });
 	try {
-		// pnpm pack outputs the tarball filename to stdout
-		const packRes = spawnSync(
-			'pnpm',
-			['pack', '--pack-destination', scratch],
-			{ cwd: pkgDir, encoding: 'utf8' },
-		);
-		if (packRes.status !== 0) {
-			throw new Error(`pnpm pack failed for ${pkgName}: ${packRes.stderr}`);
-		}
-		// pnpm pack outputs the full tarball path as the last line of stdout
-		const tarballPath = packRes.stdout.trim().split('\n').filter(Boolean).pop().trim();
+		const { tarballPath } = packAndAssert(pkg.name, pkgDir, scratch);
 
-		// Extract package/package.json from the tarball and check for workspace:
-		const extractRes = spawnSync(
-			'tar',
-			['-xzOf', tarballPath, 'package/package.json'],
-			{ encoding: 'utf8' },
+		if (DRY_RUN) {
+			log(`DRY_RUN — would publish via OIDC: npm publish ${tarballPath} --provenance --access public`);
+			return;
+		}
+
+		// npm publish <tarball> --provenance:
+		//   - npm CLI auto-fetches the OIDC token from ACTIONS_ID_TOKEN_REQUEST_URL
+		//     (set by GitHub Actions when permissions.id-token=write).
+		//   - No NODE_AUTH_TOKEN or NPM_TOKEN needed.
+		//   - Emits a signed provenance attestation on npmjs.com.
+		const res = spawnSync(
+			'npm',
+			['publish', tarballPath, '--provenance', '--access', 'public'],
+			{ stdio: 'inherit', encoding: 'utf8' },
 		);
-		if (extractRes.status !== 0) {
-			throw new Error(`tar extract failed for ${pkgName}: ${extractRes.stderr}`);
+		if (res.status !== 0) {
+			fail(1, `npm publish (OIDC) failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 		}
-		const packedPkgJson = extractRes.stdout;
-		if (packedPkgJson.includes('workspace:')) {
-			throw new Error(
-				`BLOCKER: packed ${pkgName}/package.json still contains "workspace:" strings — ` +
-				`pnpm workspace-protocol rewrite failed. Packed deps:\n` +
-				JSON.stringify(JSON.parse(packedPkgJson).dependencies ?? {}, null, 2)
-			);
-		}
-		log(`workspace-string assertion passed for ${pkgName}`);
-		return packedPkgJson;
 	} finally {
 		try { rmSync(scratch, { recursive: true, force: true }); } catch {}
 	}
+
+	tagAndPush(pkg.name, localVersion);
 }
 
-async function publishPackage(pkg, localVersion) {
+async function publishPackageToken(pkg, localVersion) {
 	const pkgDir = join(REPO_ROOT, pkg.dir);
-	log(`publishing ${pkg.name}@${localVersion}…`);
+	log(`[token] publishing ${pkg.name}@${localVersion}…`);
 
-	// Assert no workspace: strings in the packed tarball BEFORE publish.
-	// Runs in both dry-run and real mode.
-	assertNoWorkspaceStrings(pkg.name, pkgDir);
+	// Assert no workspace: strings (run pack-and-assert for the check, discard tarball).
+	const scratch = join(tmpdir(), `oxpulse-pack-${Date.now()}`);
+	mkdirSync(scratch, { recursive: true });
+	try {
+		packAndAssert(pkg.name, pkgDir, scratch);
+	} finally {
+		try { rmSync(scratch, { recursive: true, force: true }); } catch {}
+	}
 
 	// Use pnpm publish — it rewrites workspace:^ to real ranges at pack time.
-	// Auth via env var: pnpm respects npm_config_* env vars for registry auth.
 	const args = ['publish', '--no-git-checks', '--access', 'public'];
 	if (DRY_RUN) args.push('--dry-run');
 
 	const childEnv = Object.assign({}, process.env);
-	// pnpm respects npm_config_* env vars for registry auth.
-	// The key contains slashes so must be set via Object.assign / bracket notation.
-	if (NPM_TOKEN) {
-		childEnv['npm_config_//registry.npmjs.org/:_authToken'] = NPM_TOKEN;
-	}
+	childEnv['npm_config_//registry.npmjs.org/:_authToken'] = NPM_TOKEN;
 
 	const res = spawnSync('pnpm', args, {
 		cwd: pkgDir,
@@ -169,7 +234,6 @@ async function publishPackage(pkg, localVersion) {
 	});
 
 	if (res.status !== 0) {
-		// Fail fast — exit immediately, do not continue to dependents.
 		fail(1, `pnpm publish failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 	}
 
@@ -178,7 +242,11 @@ async function publishPackage(pkg, localVersion) {
 		return;
 	}
 
-	const tag = `${pkg.name}@${localVersion}`;
+	tagAndPush(pkg.name, localVersion);
+}
+
+function tagAndPush(pkgName, localVersion) {
+	const tag = `${pkgName}@${localVersion}`;
 	try {
 		execSync(`git tag -a "${tag}" -m "release ${tag}"`, {
 			cwd: REPO_ROOT,
@@ -187,20 +255,22 @@ async function publishPackage(pkg, localVersion) {
 		execSync(`git push origin "${tag}"`, { cwd: REPO_ROOT, stdio: 'inherit' });
 		log(`tagged + pushed ${tag}`);
 	} catch (err) {
-		// Tag already exists if script ran twice for the same version before
-		// npm view caught up. Publish succeeded — that's the load-bearing op.
+		// Tag already exists if script ran twice for same version before npm view
+		// caught up. Publish already succeeded — that's the load-bearing op.
 		log(`tag/push warning (non-fatal): ${err.message ?? err}`);
 	}
 }
 
 // ─── Pre-flight ─────────────────────────────────────────────────────────────
 
-if (!NPM_TOKEN && !DRY_RUN) {
-	fail(2, 'NPM_TOKEN env not set (set DRY_RUN=1 to skip auth check)');
+log(`mode=${OIDC_MODE ? 'OIDC/trusted-publish' : 'token'} dry_run=${DRY_RUN}`);
+
+if (!OIDC_MODE && !NPM_TOKEN && !DRY_RUN) {
+	fail(2, 'NPM_TOKEN env not set (set TRUSTED_PUBLISH=1 for OIDC mode, or DRY_RUN=1 to skip auth check)');
 }
 
-// Assert the git remote matches the expected repo to avoid accidental tag
-// pushes from a fork or mis-cloned checkout.
+// Assert git remote matches expected repo to avoid accidental tag pushes from
+// a fork or mis-cloned checkout.
 try {
 	const remoteUrl = execSync('git remote get-url origin', {
 		cwd: REPO_ROOT,
@@ -213,7 +283,7 @@ try {
 	fail(2, `could not read git remote: ${err.message ?? err}`);
 }
 
-log(`repo_root=${REPO_ROOT} dry_run=${DRY_RUN}`);
+log(`repo_root=${REPO_ROOT}`);
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
@@ -223,17 +293,33 @@ let skipped = 0;
 for (const pkg of PACKAGES) {
 	const local = readLocalVersion(pkg.dir);
 
-	// Hard-reject prerelease versions — we don't support them and semverCompare
-	// would silently mis-handle them (strips the prerelease suffix via parseInt).
+	// Hard-reject prerelease versions.
 	assertNoPrerelease(local, `${pkg.name} local package.json`);
 
-	const remote = npmViewVersion(pkg.name);
+	const { version: remote, notFound } = npmViewVersion(pkg.name);
+
+	// ── Soft-skip for packages not yet bootstrapped on npm (OIDC mode only) ──
+	// In OIDC mode, if a package has never been published (notFound=true) AND it
+	// is in SOFT_PACKAGES_OIDC, we skip gracefully — the trusted publisher
+	// cannot be configured for a non-existent package. The operator must do a
+	// first manual publish (`pnpm publish --access public`) from a local machine
+	// with an npm token, then configure the trusted publisher on npmjs.com.
+	if (OIDC_MODE && notFound && SOFT_PACKAGES_OIDC.has(pkg.name)) {
+		log(`${pkg.name}: no trusted publisher yet (package not on npm) — bootstrap manually first, then add to trusted publishers. SKIPPING (non-fatal).`);
+		skipped++;
+		continue;
+	}
+
 	assertNoPrerelease(remote, `${pkg.name} npm registry`);
 
 	const cmp = semverCompare(local, remote);
 	if (cmp > 0) {
 		log(`${pkg.name}: local=${local} > registry=${remote} — publishing`);
-		await publishPackage(pkg, local);
+		if (OIDC_MODE) {
+			await publishPackageOidc(pkg, local);
+		} else {
+			await publishPackageToken(pkg, local);
+		}
 		published++;
 	} else if (cmp === 0) {
 		log(`${pkg.name}: local=${local} == registry=${remote} — skip`);

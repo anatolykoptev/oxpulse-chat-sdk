@@ -1,0 +1,78 @@
+# npm Trusted Publishing (OIDC) — no token required.
+#
+# npm's provenance/OIDC flow:
+#   - This workflow requests an OIDC token (id-token: write).
+#   - `npm publish <tarball> --provenance` exchanges that token with npm's
+#     OIDC endpoint, which checks that THIS workflow file + THIS repo is the
+#     registered trusted publisher for the package. No NPM_TOKEN needed.
+#
+# Trusted publishers configured on npm (npmjs.com → package → Publishing):
+#   @oxpulse/wire-codec  → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
+#   @oxpulse/chat-sdk    → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
+#   @oxpulse/chat-widget → NOT YET (package must exist on npm first — bootstrap manually)
+#
+# Trigger: workflow_dispatch only (manual). Add push trigger later once stable.
+
+name: Release (npm OIDC)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for OIDC token exchange with npm
+  contents: read    # required for actions/checkout
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          # registry-url puts the npm config in place; OIDC mode does NOT use
+          # NODE_AUTH_TOKEN, but the registry URL is still needed for `npm view`.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Enable corepack and install pnpm 10.33.2
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.2 --activate
+
+      # npm ≥ 11.5.1 is required for OIDC trusted publishing (--provenance).
+      # The ubuntu-latest runner ships an older npm; upgrade explicitly.
+      - name: Upgrade npm to latest (≥ 11.5.1 required for OIDC)
+        run: |
+          npm i -g npm@latest
+          NPM_VER=$(npm --version)
+          echo "npm version: $NPM_VER"
+          # Fail if npm < 11.5.1 (simple numeric comparison on major.minor.patch)
+          python3 - <<'EOF'
+          import sys
+          ver = "$NPM_VER".split(".")
+          major, minor, patch = int(ver[0]), int(ver[1]), int(ver[2]) if len(ver) > 2 else 0
+          required = (11, 5, 1)
+          if (major, minor, patch) < required:
+              print(f"FATAL: npm {major}.{minor}.{patch} < 11.5.1 — OIDC publish not supported", file=sys.stderr)
+              sys.exit(1)
+          print(f"npm version OK: {major}.{minor}.{patch} >= 11.5.1")
+          EOF
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all packages
+        run: pnpm build
+
+      - name: Publish via OIDC trusted publishing
+        # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
+        # NPM_TOKEN must NOT be set (the whole point is to publish without it).
+        # The script uses `npm publish <tarball> --provenance` which exchanges
+        # the GH OIDC token with npm automatically.
+        env:
+          TRUSTED_PUBLISH: '1'
+        run: node scripts/release-npm-packages.mjs
