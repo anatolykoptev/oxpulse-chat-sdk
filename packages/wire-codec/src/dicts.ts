@@ -13,8 +13,8 @@
 // All clients ship ALL three dictionaries (~48 KB total). Per-language gating
 // would fingerprint the user's language at handshake; carrying every dict makes
 // the dict-id leak benign — observer only learns "this client supports all
-// shipped dicts", not "this client is RU/FA/EN". See:
-// deploy/krolik-server/plans/oxpulse-chat/2026-05-04-1kbps-resilience-design-v2-multitype.md
+// Privacy design: dicts are
+// topology-neutral (no per-user or per-language sub-negotiation at handshake).
 
 import { WireCodecError } from "./errors.js";
 

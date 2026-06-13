@@ -101,7 +101,7 @@ Every client ships all three dicts. Per-language gating would fingerprint the us
 
 ## Bench numbers
 
-Measured on Node.js 20, ARM 24 GB (krolik/Oracle Cloud). Numbers are indicative; your mileage may vary by payload entropy and hardware.
+Measured on Node.js 20, Oracle Cloud ARM64 (4-core, 24 GB). Numbers are indicative; your mileage may vary by payload entropy and hardware.
 
 ### Peer envelope size (full chat-msg envelopes)
 

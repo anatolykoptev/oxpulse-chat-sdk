@@ -4,10 +4,10 @@
   "description": "OxPulse Chat embed widget — Custom Element + iframe mode",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
-  "homepage": "https://github.com/anatolykoptev/oxpulse-chat/tree/main/packages/chat-widget",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat-sdk/tree/main/packages/chat-widget",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anatolykoptev/oxpulse-chat.git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat-sdk.git",
     "directory": "packages/chat-widget"
   },
   "keywords": [
@@ -65,5 +65,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "bugs": {
+    "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
   }
 }

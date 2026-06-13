@@ -1,6 +1,6 @@
 # wire-codec bench results
 
-Measured on Node.js 20, ARM 24 GB (krolik / Oracle Cloud AArch64).
+Measured on Node.js 20, Oracle Cloud ARM64 (4-core, 24 GB).
 Run: 
 
 ## Peer envelope size (full chat-msg envelopes)

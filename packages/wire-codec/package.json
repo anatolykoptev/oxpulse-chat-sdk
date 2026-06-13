@@ -1,17 +1,17 @@
 {
   "name": "@oxpulse/wire-codec",
   "version": "0.3.0",
-  "description": "OxPulse wire codec \u2014 CBOR + zstd + per-language shared dictionaries for E2EE chat envelopes.",
+  "description": "OxPulse wire codec — CBOR + zstd + per-language shared dictionaries for E2EE chat envelopes.",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
-  "homepage": "https://github.com/anatolykoptev/oxpulse-chat/tree/main/packages/wire-codec",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat-sdk/tree/main/packages/wire-codec",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anatolykoptev/oxpulse-chat.git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat-sdk.git",
     "directory": "packages/wire-codec"
   },
   "bugs": {
-    "url": "https://github.com/anatolykoptev/oxpulse-chat/issues"
+    "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
   },
   "keywords": [
     "oxpulse",

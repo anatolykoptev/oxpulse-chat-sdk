@@ -4,14 +4,14 @@
   "description": "OxPulse Chat SDK — send/list/subscribe over the OxPulse SDK HTTP API. CSP-safe (zero eval/Function calls).",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
-  "homepage": "https://github.com/anatolykoptev/oxpulse-chat/tree/main/packages/chat-sdk",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat-sdk/tree/main/packages/chat-sdk",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anatolykoptev/oxpulse-chat.git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat-sdk.git",
     "directory": "packages/chat-sdk"
   },
   "bugs": {
-    "url": "https://github.com/anatolykoptev/oxpulse-chat/issues"
+    "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
   },
   "keywords": [
     "oxpulse",
