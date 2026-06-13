@@ -44,6 +44,7 @@ import type {
   PresenceUser,
   OptimisticHandle,
   BatchAppendItem,
+  RoomVisibility,
 } from './types.js';
 import { SDKChatBatchError, SDKChatError } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
@@ -70,6 +71,7 @@ interface RoomDTO {
   archived_at: string | null;
   metadata: Record<string, unknown>;
   members: MemberDTO[];
+  visibility: RoomVisibility;
 }
 
 interface MemberDTO {
@@ -93,6 +95,7 @@ function dtoToRoom(dto: RoomDTO): Room {
     archivedAt: dto.archived_at,
     metadata: dto.metadata,
     members: dto.members.map(dtoToMember),
+    visibility: dto.visibility,
   };
 }
 
@@ -1130,6 +1133,7 @@ export class SDKChatClient {
         role: m.role,
       }));
     }
+    if (args.visibility !== undefined) body['visibility'] = args.visibility;
 
     let resp: Response;
     try {
@@ -1291,6 +1295,7 @@ export class SDKChatClient {
         created_at: string;
         archived_at: string | null;
         metadata: Record<string, unknown>;
+        visibility: RoomVisibility;
       }>;
       limit: number;
       offset: number;
@@ -1306,6 +1311,7 @@ export class SDKChatClient {
         createdAt: r.created_at,
         archivedAt: r.archived_at,
         metadata: r.metadata,
+        visibility: r.visibility,
       })),
       limit: body.limit,
       offset: body.offset,
