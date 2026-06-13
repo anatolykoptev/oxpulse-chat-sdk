@@ -4,27 +4,30 @@
 // Two publish modes:
 //
 // ── TOKEN MODE (default for local dev) ───────────────────────────────────────
-//   Active when: NPM_TOKEN env is set.
+//   Active when: NPM_TOKEN env is set and TRUSTED_PUBLISH is unset.
 //   Auth: pnpm publish with npm_config_//registry.npmjs.org/:_authToken.
 //   Does NOT emit provenance.
 //
 // ── OIDC / TRUSTED PUBLISHING MODE ───────────────────────────────────────────
-//   Active when: TRUSTED_PUBLISH=1 OR (CI=true AND NPM_TOKEN is absent).
+//   Active when: TRUSTED_PUBLISH=1 (EXPLICIT opt-in only).
 //   Auth: none — npm exchanges the GitHub Actions OIDC token automatically.
 //   How it works:
 //     1. `pnpm pack --pack-destination <tmp>` — pnpm rewrites workspace:^
 //        references to real semver ranges in the tarball's package.json.
 //     2. Assert the packed package.json has NO "workspace:" strings.
-//     3. `npm publish <tarball> --provenance --access public` — npm CLI fetches
+//     3. `npm publish <tarball> --access public` — npm CLI fetches
 //        the OIDC token from the GitHub Actions environment and exchanges it
 //        with the npm trusted-publishing endpoint. No token env var needed.
-//   Requirement: npm ≥ 11.5.1, Node ≥ 22.14 (enforced in release.yml).
+//   Provenance: opt-in via NPM_PROVENANCE=1. Requires the source repo to be
+//   PUBLIC — npm refuses provenance from private repos. Do NOT set
+//   NPM_PROVENANCE=1 in the workflow while the repo is private.
+//   Requirement: npm >= 11.5.1, Node >= 22.14 (enforced in release.yml).
 //
 // ── CHAT-WIDGET SOFT-SKIP ────────────────────────────────────────────────────
 //   @oxpulse/chat-widget does not yet exist on npm, so npm Trusted Publishing
 //   cannot be configured for it (npm requires the package to exist first for
 //   the trusted-publisher UI). Until then:
-//   - In OIDC mode: if `npm view` returns 404 (never published), we LOG a clear
+//   - In OIDC mode: if `npm view` returns E404 (never published), we LOG a clear
 //     skip message and CONTINUE rather than fail the whole run.
 //   - Once the package exists on npm (bootstrap via manual publish), it will be
 //     treated like the others (trusted publisher configured, version gate runs).
@@ -40,6 +43,10 @@
 //
 // Optional env:
 //   DRY_RUN=1          Skip actual publish + tag/push. Pack + assert still run.
+//   NPM_PROVENANCE=1   Add --provenance to npm publish (OIDC mode only).
+//                      Requires the source repo to be PUBLIC — npm refuses
+//                      provenance generation from private repos. Set this in
+//                      release.yml only after the repo goes public.
 //
 // Exit codes:
 //   0  ok (no-op or successful publish)
@@ -47,7 +54,7 @@
 //   2  config error (missing token in token mode / wrong remote)
 
 import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
-import { spawnSync, execSync } from 'node:child_process';
+import { spawnSync, execSync, execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -60,11 +67,15 @@ const REPO_ROOT = join(__dirname, '..');
 const DRY_RUN = process.env.DRY_RUN === '1';
 const NPM_TOKEN = process.env.NPM_TOKEN;
 
-// OIDC mode: explicit opt-in via TRUSTED_PUBLISH=1, or auto-detected when
-// running in CI without an NPM_TOKEN (the GitHub Actions OIDC case).
-const OIDC_MODE =
-	process.env.TRUSTED_PUBLISH === '1' ||
-	(process.env.CI === 'true' && !NPM_TOKEN);
+// OIDC mode: EXPLICIT opt-in only via TRUSTED_PUBLISH=1.
+// The implicit "CI=true && !NPM_TOKEN" arm was removed — publishing should
+// never be a side-effect of "running in CI without a token configured".
+const OIDC_MODE = process.env.TRUSTED_PUBLISH === '1';
+
+// Provenance attestation opt-in.
+// Requires a PUBLIC source repo — npm refuses --provenance from private repos.
+// Set NPM_PROVENANCE=1 in release.yml when the repo goes public.
+const PROVENANCE = process.env.NPM_PROVENANCE === '1';
 
 // Packages in this repo, in dependency order.
 const PACKAGES = [
@@ -74,7 +85,7 @@ const PACKAGES = [
 ];
 
 // In OIDC mode, packages in this set are treated as "soft" — if npm view
-// returns 404 (never published / no trusted publisher yet), we log + skip
+// returns E404 (never published / no trusted publisher yet), we log + skip
 // instead of failing the run. Once a package is bootstrapped on npm and its
 // trusted publisher is configured, remove it from this set.
 //
@@ -112,13 +123,27 @@ function assertNoPrerelease(version, context) {
 // Also returns a boolean `notFound` to let callers distinguish "never published"
 // from a real version (used for soft-skip logic).
 function npmViewVersion(pkgName) {
-	const res = spawnSync('npm', ['view', pkgName, 'version'], {
+	const res = spawnSync('npm', ['view', pkgName, 'version', '--json'], {
 		encoding: 'utf8',
 	});
-	if (res.status === 0) return { version: res.stdout.trim(), notFound: false };
-	// E404 = never published; treat as "0.0.0" so local always wins,
-	// but return notFound=true so soft-skip logic can catch it.
-	if (res.status !== 0 && /E?404/.test(res.stderr)) {
+	if (res.status === 0) {
+		// --json wraps the version string in quotes; parse it.
+		const parsed = JSON.parse(res.stdout.trim());
+		return { version: parsed, notFound: false };
+	}
+	// Parse the structured JSON error to detect E404 precisely.
+	// Avoids false positives from substrings like "E40456" or proxy 404 pages.
+	try {
+		const errJson = JSON.parse(res.stdout.trim() || res.stderr.trim());
+		if (errJson?.error?.code === 'E404') {
+			return { version: '0.0.0', notFound: true };
+		}
+	} catch {
+		// stdout/stderr not JSON — fall through to anchored regex fallback.
+	}
+	// Anchored fallback: match the word-boundary form \bE404\b to avoid
+	// substring false-positives (e.g. E40456, or a proxy page mentioning "404").
+	if (/\bE404\b/.test(res.stderr)) {
 		return { version: '0.0.0', notFound: true };
 	}
 	throw new Error(`npm view ${pkgName} failed: ${res.stderr}`);
@@ -182,21 +207,20 @@ async function publishPackageOidc(pkg, localVersion) {
 	try {
 		const { tarballPath } = packAndAssert(pkg.name, pkgDir, scratch);
 
+		const publishArgs = ['publish', tarballPath, '--access', 'public'];
+		if (PROVENANCE) publishArgs.push('--provenance');
+
 		if (DRY_RUN) {
-			log(`DRY_RUN — would publish via OIDC: npm publish ${tarballPath} --provenance --access public`);
+			log(`DRY_RUN — would publish via OIDC: npm ${publishArgs.join(' ')}`);
 			return;
 		}
 
-		// npm publish <tarball> --provenance:
+		// npm publish <tarball> [--provenance] --access public:
 		//   - npm CLI auto-fetches the OIDC token from ACTIONS_ID_TOKEN_REQUEST_URL
 		//     (set by GitHub Actions when permissions.id-token=write).
 		//   - No NODE_AUTH_TOKEN or NPM_TOKEN needed.
-		//   - Emits a signed provenance attestation on npmjs.com.
-		const res = spawnSync(
-			'npm',
-			['publish', tarballPath, '--provenance', '--access', 'public'],
-			{ stdio: 'inherit', encoding: 'utf8' },
-		);
+		//   - --provenance: emits a signed attestation — only works with a PUBLIC repo.
+		const res = spawnSync('npm', publishArgs, { stdio: 'inherit', encoding: 'utf8' });
 		if (res.status !== 0) {
 			fail(1, `npm publish (OIDC) failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 		}
@@ -248,11 +272,14 @@ async function publishPackageToken(pkg, localVersion) {
 function tagAndPush(pkgName, localVersion) {
 	const tag = `${pkgName}@${localVersion}`;
 	try {
-		execSync(`git tag -a "${tag}" -m "release ${tag}"`, {
+		execFileSync('git', ['tag', '-a', tag, '-m', `release ${tag}`], {
 			cwd: REPO_ROOT,
 			stdio: 'inherit',
 		});
-		execSync(`git push origin "${tag}"`, { cwd: REPO_ROOT, stdio: 'inherit' });
+		execFileSync('git', ['push', 'origin', tag], {
+			cwd: REPO_ROOT,
+			stdio: 'inherit',
+		});
 		log(`tagged + pushed ${tag}`);
 	} catch (err) {
 		// Tag already exists if script ran twice for same version before npm view
@@ -263,7 +290,7 @@ function tagAndPush(pkgName, localVersion) {
 
 // ─── Pre-flight ─────────────────────────────────────────────────────────────
 
-log(`mode=${OIDC_MODE ? 'OIDC/trusted-publish' : 'token'} dry_run=${DRY_RUN}`);
+log(`mode=${OIDC_MODE ? 'OIDC/trusted-publish' : 'token'} dry_run=${DRY_RUN} provenance=${PROVENANCE}`);
 
 if (!OIDC_MODE && !NPM_TOKEN && !DRY_RUN) {
 	fail(2, 'NPM_TOKEN env not set (set TRUSTED_PUBLISH=1 for OIDC mode, or DRY_RUN=1 to skip auth check)');

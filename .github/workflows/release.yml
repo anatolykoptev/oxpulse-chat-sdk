@@ -1,10 +1,16 @@
 # npm Trusted Publishing (OIDC) — no token required.
 #
-# npm's provenance/OIDC flow:
+# npm's OIDC flow:
 #   - This workflow requests an OIDC token (id-token: write).
-#   - `npm publish <tarball> --provenance` exchanges that token with npm's
+#   - `npm publish <tarball> --access public` exchanges that token with npm's
 #     OIDC endpoint, which checks that THIS workflow file + THIS repo is the
 #     registered trusted publisher for the package. No NPM_TOKEN needed.
+#
+# Provenance attestation:
+#   --provenance requires a PUBLIC source repo. While this repo is private,
+#   do NOT set NPM_PROVENANCE=1 here. Flip to NPM_PROVENANCE=1 when the repo
+#   goes public (and update the npm "Environment name" field on the trusted
+#   publisher to "release" or leave it blank).
 #
 # Trusted publishers configured on npm (npmjs.com → package → Publishing):
 #   @oxpulse/wire-codec  → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
@@ -18,20 +24,31 @@ name: Release (npm OIDC)
 on:
   workflow_dispatch:
 
-permissions:
-  id-token: write   # required for OIDC token exchange with npm
-  contents: read    # required for actions/checkout
-
 jobs:
   release:
     runs-on: ubuntu-latest
 
+    # Scoped here — only this job needs id-token; no workflow-level blast radius.
+    permissions:
+      id-token: write   # required for OIDC token exchange with npm
+      contents: read    # required for actions/checkout
+
+    # Gates this job behind the "release" environment.
+    # Set a required reviewer in repo Settings → Environments → release.
+    # If no protection rules are configured, GitHub auto-creates the environment
+    # and the job runs immediately — harmless and forward-compatible.
+    # npm trusted-publisher "Environment name" field: leave BLANK or set to "release".
+    environment: release
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # SHA-pinned for supply-chain hardening (holds id-token: write).
+        # v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        # v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.x'
           # registry-url puts the npm config in place; OIDC mode does NOT use
@@ -43,17 +60,22 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.33.2 --activate
 
-      # npm ≥ 11.5.1 is required for OIDC trusted publishing (--provenance).
+      # npm >= 11.5.1 is required for OIDC trusted publishing.
       # The ubuntu-latest runner ships an older npm; upgrade explicitly.
-      - name: Upgrade npm to latest (≥ 11.5.1 required for OIDC)
+      - name: Upgrade npm to latest (>= 11.5.1 required for OIDC)
         run: |
           npm i -g npm@latest
           NPM_VER=$(npm --version)
           echo "npm version: $NPM_VER"
-          # Fail if npm < 11.5.1 (simple numeric comparison on major.minor.patch)
+          echo "NPM_VER=$NPM_VER" >> "$GITHUB_ENV"
+
+      - name: Assert npm >= 11.5.1
+        env:
+          NPM_VER: ${{ env.NPM_VER }}
+        run: |
           python3 - <<'EOF'
-          import sys
-          ver = "$NPM_VER".split(".")
+          import sys, os
+          ver = os.environ["NPM_VER"].split(".")
           major, minor, patch = int(ver[0]), int(ver[1]), int(ver[2]) if len(ver) > 2 else 0
           required = (11, 5, 1)
           if (major, minor, patch) < required:
@@ -71,8 +93,9 @@ jobs:
       - name: Publish via OIDC trusted publishing
         # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
         # NPM_TOKEN must NOT be set (the whole point is to publish without it).
-        # The script uses `npm publish <tarball> --provenance` which exchanges
-        # the GH OIDC token with npm automatically.
+        #
+        # NPM_PROVENANCE: intentionally absent — provenance requires a PUBLIC
+        # source repo. Set NPM_PROVENANCE=1 here when this repo goes public.
         env:
           TRUSTED_PUBLISH: '1'
         run: node scripts/release-npm-packages.mjs
