@@ -71,7 +71,7 @@ interface RoomDTO {
   archived_at: string | null;
   metadata: Record<string, unknown>;
   members: MemberDTO[];
-  visibility: RoomVisibility;
+  visibility?: RoomVisibility;  // optional: pre-open-rooms servers omit this field
 }
 
 interface MemberDTO {
@@ -95,7 +95,8 @@ function dtoToRoom(dto: RoomDTO): Room {
     archivedAt: dto.archived_at,
     metadata: dto.metadata,
     members: dto.members.map(dtoToMember),
-    visibility: dto.visibility,
+    // Server default is 'member'; pre-open-rooms servers omit visibility.
+    visibility: dto.visibility ?? 'member',
   };
 }
 
@@ -1295,7 +1296,7 @@ export class SDKChatClient {
         created_at: string;
         archived_at: string | null;
         metadata: Record<string, unknown>;
-        visibility: RoomVisibility;
+        visibility?: RoomVisibility;  // RoomListItem does not yet emit this field (pre-open-rooms server)
       }>;
       limit: number;
       offset: number;
@@ -1311,7 +1312,8 @@ export class SDKChatClient {
         createdAt: r.created_at,
         archivedAt: r.archived_at,
         metadata: r.metadata,
-        visibility: r.visibility,
+        // RoomListItem omits visibility on pre-open-rooms servers; default to 'member'.
+        visibility: r.visibility ?? 'member',
       })),
       limit: body.limit,
       offset: body.offset,

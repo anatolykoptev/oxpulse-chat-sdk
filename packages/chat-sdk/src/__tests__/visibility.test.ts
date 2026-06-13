@@ -145,13 +145,86 @@ describe('SDKChatClient — visibility surface (v1.4.0)', () => {
     expect(room.visibility).toBe('open');
   });
 
+  it("getRoom response: absent visibility → defaults to 'member' (pre-open-rooms server)", async () => {
+    // Server returns no visibility field (pre-open-rooms prod server).
+    const dto = {
+      app_id: 'app1',
+      room_id: 'r1',
+      title: null,
+      product_ref: null,
+      created_by: 'user1',
+      created_at: '2026-06-13T00:00:00Z',
+      archived_at: null,
+      metadata: {},
+      members: [],
+      // visibility absent
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(fakeResponse(dto)),
+    );
+
+    const client = makeClient();
+    const room = await client.getRoom('r1');
+
+    // Fallback in dtoToRoom: dto.visibility ?? member
+    expect(room.visibility).toBe('member');
+  });
+
   // ── listRooms response mapping ──────────────────────────────────────────────
 
-  it('listRooms response: RoomSummary.visibility is populated', async () => {
+  // ── listRooms: missing visibility field (real RoomListItem omits it) ─────────
+
+  it("listRooms: absent visibility in list row → defaults to 'member' (server version skew)", async () => {
+    // The server RoomListItem does NOT emit visibility (pre-open-rooms servers).
+    // This test exercises the ?? 'member' fallback in the list mapper.
+    // It would FAIL without the fallback (typed undefined, domain requires RoomVisibility).
     const listBody = {
       rooms: [
-        { ...serverRoom('r1', 'open'), members: undefined },
-        { ...serverRoom('r2', 'member'), members: undefined },
+        {
+          app_id: 'app1',
+          room_id: 'r1',
+          title: null,
+          product_ref: null,
+          created_by: 'user1',
+          created_at: '2026-06-13T00:00:00Z',
+          archived_at: null,
+          metadata: {},
+          // visibility deliberately absent — mirrors real RoomListItem server shape
+        },
+      ],
+      limit: 50,
+      offset: 0,
+      has_more: false,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(fakeResponse(listBody)),
+    );
+
+    const client = makeClient();
+    const result = await client.listRooms();
+
+    // Fallback: absent field → member
+    expect(result.rooms[0].visibility).toBe('member');
+  });
+
+  it('listRooms: server sends visibility: "open" in list row → passed through (forward-compat)', async () => {
+    // Forward-compat: once the server adds visibility to RoomListItem, the SDK
+    // should pass it through instead of always returning member.
+    const listBody = {
+      rooms: [
+        {
+          app_id: 'app1',
+          room_id: 'r1',
+          title: null,
+          product_ref: null,
+          created_by: 'user1',
+          created_at: '2026-06-13T00:00:00Z',
+          archived_at: null,
+          metadata: {},
+          visibility: 'open',
+        },
       ],
       limit: 50,
       offset: 0,
@@ -166,7 +239,6 @@ describe('SDKChatClient — visibility surface (v1.4.0)', () => {
     const result = await client.listRooms();
 
     expect(result.rooms[0].visibility).toBe('open');
-    expect(result.rooms[1].visibility).toBe('member');
   });
 
   // ── Type export check (compile-time + runtime) ──────────────────────────────
