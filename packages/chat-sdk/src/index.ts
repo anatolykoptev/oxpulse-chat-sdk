@@ -42,6 +42,11 @@ export { SDKChatError, SDKChatBatchError } from './errors.js';
 export { SDKPushClient, SDKPushError } from './push.js';
 export type { SDKPushErrorCode, SubscribeResult, SubscriptionChangeListenerOpts } from './push.js';
 
+// ─── Anon-read token minting ─────────────────────────────────────────────────
+
+export { mintAnonReadToken, AnonReadMintError } from './anon-read.js';
+export type { AnonReadMintResult, AnonReadMintErrorCode } from './anon-read.js';
+
 // ─── Wire-codec re-exports (compression API) ─────────────────────────────────
 // Production-safe symbols only. Test-only helpers (_evictDictForTesting,
 // _resetLoaderForTesting) are intentionally excluded.

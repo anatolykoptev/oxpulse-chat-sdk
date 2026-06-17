@@ -46,6 +46,26 @@ export interface WidgetConfig {
   // withVoice?: boolean;
 
   /**
+   * Enable anonymous read-only mode.
+   * When true and no `jwt` is provided, the widget mints a short-lived anon-read
+   * token via POST /api/sdk/auth/anon-read-mint and mounts in read-only mode
+   * (composer hidden). The token is re-minted automatically before expiry.
+   */
+  allowAnonRead?: boolean;
+
+  /**
+   * @internal — test-only mint override.
+   * When provided, `element.ts` calls this instead of the real mintAnonReadToken.
+   * Allows unit tests to inject a fake mint call without a network.
+   * Never set in production code.
+   */
+  _mintAnonReadToken?: (opts: { baseUrl: string; appId: string; roomId: string }) => Promise<{
+    token: string;
+    userId: string;
+    expiresAt: number;
+  }>;
+
+  /**
    * @internal — test-only factory override.
    * When provided, `element.ts` calls this instead of constructing a real SDKChatClient.
    * Allows unit tests to inject a mock client without a network.
@@ -77,6 +97,8 @@ export const OBSERVED_ATTRIBUTES = [
   'theme',
   'lang',
   'self-uid',
+  'base-url',
+  'allow-anon-read',
 ] as const;
 
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */

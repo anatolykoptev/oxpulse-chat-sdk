@@ -21,7 +21,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer } from './ui/composer.js';
 import { isAuthError } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient } from '@oxpulse/chat-sdk';
+import { SDKChatClient, mintAnonReadToken, AnonReadMintError } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 
 const WIDGET_VERSION = '0.1.0';
@@ -70,6 +70,8 @@ export class OxpulseChatElement extends HTMLElement {
    * Set during bootstrap so tests can fire async subscribe errors without public API leak.
    */
   #subscribeOnError: ((err: unknown) => void) | null = null;
+  /** Timer ID for anon-read token pre-expiry re-mint. */
+  #anonRenewTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -93,6 +95,10 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList?.destroy();
     this.#messageList = null;
     this.#styleEl = null;
+    if (this.#anonRenewTimer !== null) {
+      clearTimeout(this.#anonRenewTimer);
+      this.#anonRenewTimer = null;
+    }
     // Clear shadow DOM content (resource cleanup)
     if (this.#shadow) {
       while (this.#shadow.firstChild) {
@@ -110,8 +116,8 @@ export class OxpulseChatElement extends HTMLElement {
       applyTheme(this, value);
     }
 
-    // Attribute changes that require re-init (JWT, room, app-id, self-uid)
-    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid') {
+    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read)
+    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read') {
       // 1H: debounce via queueMicrotask — N synchronous setAttribute calls collapse into 1 bootstrap.
       // Abort the current bootstrap immediately (prevents stale state mutation).
       this.#abortController?.abort();
@@ -186,6 +192,10 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList?.destroy();
     this.#messageList = null;
     this.#styleEl = null;
+    if (this.#anonRenewTimer !== null) {
+      clearTimeout(this.#anonRenewTimer);
+      this.#anonRenewTimer = null;
+    }
     if (this.#shadow) {
       while (this.#shadow.firstChild) {
         this.#shadow.removeChild(this.#shadow.firstChild);
@@ -200,7 +210,7 @@ export class OxpulseChatElement extends HTMLElement {
    * Not exposed as attributes — only via the JS API.
    * @internal
    */
-  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'allowLegacyToken' | '_createClient'>): void {
+  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken'>): void {
     this.#config = {
       ...(this.#config ?? { appId: '', jwt: '', roomId: '' }),
       ...config,
@@ -220,6 +230,10 @@ export class OxpulseChatElement extends HTMLElement {
     }
 
     // Clear previous content
+    if (this.#anonRenewTimer !== null) {
+      clearTimeout(this.#anonRenewTimer);
+      this.#anonRenewTimer = null;
+    }
     this.#composer?.destroy();
     this.#composer = null;
     this.#messageList?.destroy();
@@ -240,8 +254,12 @@ export class OxpulseChatElement extends HTMLElement {
     // Render loading placeholder
     this.#renderPlaceholder('Chat loading…');
 
+    // In anon-read mode the mint endpoint is the authorization gate; skip the
+    // JWT-based origin check (config.jwt is empty before minting).
     try {
-      await checkOrigin(config);
+      if (!config.allowAnonRead) {
+        await checkOrigin(config);
+      }
     } catch (err) {
       if (signal.aborted) return;
       const widgetErr =
@@ -319,9 +337,60 @@ export class OxpulseChatElement extends HTMLElement {
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
       }
 
+      // ── Anon-read mode: mint token when allow-anon-read is set and no jwt provided ──
+      const resolvedBaseUrl = config.baseUrl ?? 'https://oxpulse.chat';
+      let resolvedJwt = config.jwt;
+      let isAnonMode = false;
+
+      if (config.allowAnonRead && !config.jwt) {
+        isAnonMode = true;
+        const mintFn = config._mintAnonReadToken ?? mintAnonReadToken;
+        let mintResult: { token: string; userId: string; expiresAt: number };
+        try {
+          mintResult = await mintFn({
+            baseUrl: resolvedBaseUrl,
+            appId: config.appId,
+            roomId: config.roomId,
+          });
+        } catch (err) {
+          if (signal.aborted) return;
+          const mintErrMsg = err instanceof AnonReadMintError
+            ? `Anon read token mint failed (${err.code}): ${err.message}`
+            : `Anon read token mint failed: ${err instanceof Error ? err.message : String(err)}`;
+          const widgetErr = new WidgetError('UNKNOWN', mintErrMsg);
+          this.#renderError(widgetErr.message);
+          if (this.#config?.onError) {
+            this.#config.onError(widgetErr);
+          }
+          this.dispatchEvent(new CustomEvent('oxpulse-chat:error', {
+            bubbles: true, composed: true, detail: widgetErr,
+          }));
+          return;
+        }
+        if (signal.aborted) return;
+
+        resolvedJwt = mintResult.token;
+
+        // Schedule re-mint 30 s before expiry. expiresAt is a Unix timestamp in seconds.
+        const nowSecs = Math.floor(Date.now() / 1000);
+        const renewAfterMs = Math.max((mintResult.expiresAt - nowSecs - 30) * 1000, 0);
+        if (this.#anonRenewTimer !== null) {
+          clearTimeout(this.#anonRenewTimer);
+        }
+        this.#anonRenewTimer = setTimeout(() => {
+          this.#anonRenewTimer = null;
+          if (!this.#initialized) return;
+          // Re-bootstrap to mint a fresh token. Uses current abortController.
+          this.#abortController?.abort();
+          this.#abortController = new AbortController();
+          this.#initialized = true;
+          void this.#bootstrap(this.#abortController.signal);
+        }, renewAfterMs);
+      }
+
       const clientOpts = {
-        baseUrl: config.baseUrl ?? 'https://oxpulse.chat',
-        jwt: config.jwt,
+        baseUrl: resolvedBaseUrl,
+        jwt: resolvedJwt,
         appId: config.appId,
       };
       const sdkClient: RawClient = config._createClient
@@ -497,14 +566,18 @@ export class OxpulseChatElement extends HTMLElement {
       };
       subscribeFnRef = subscribeFn;
 
-      // Composer sits at the bottom of widgetRoot
-      this.#composer = new Composer({
-        client: composerClient,
-        roomId: config.roomId,
-        container: widgetRoot,
-        signal: signal,
-      });
-      this.#composer.mount();
+      // Composer sits at the bottom of widgetRoot.
+      // In anon-read mode the token is read-only — hide the composer entirely.
+      // Showing a write UI with a token that 403s on send is broken UX.
+      if (!isAnonMode) {
+        this.#composer = new Composer({
+          client: composerClient,
+          roomId: config.roomId,
+          container: widgetRoot,
+          signal: signal,
+        });
+        this.#composer.mount();
+      }
     }
 
     if (signal.aborted) return;
@@ -555,27 +628,34 @@ export class OxpulseChatElement extends HTMLElement {
     const appId = this.getAttribute('app-id');
     const jwt = this.getAttribute('jwt');
     const roomId = this.getAttribute('room-id');
+    const allowAnonRead = this.hasAttribute('allow-anon-read');
 
-    if (!appId || !jwt || !roomId) return null;
+    // jwt is required unless allow-anon-read is set (anon mode mints its own token)
+    if (!appId || !roomId) return null;
+    if (!jwt && !allowAnonRead) return null;
 
     const mode = this.getAttribute('mode');
     const theme = this.getAttribute('theme');
     const lang = this.getAttribute('lang');
     const selfUid = this.getAttribute('self-uid');
+    const baseUrl = this.getAttribute('base-url') ?? undefined;
 
     return {
       appId,
-      jwt,
+      jwt: jwt ?? '',
       roomId,
       mode: (mode === 'inline' || mode === 'iframe') ? mode : 'inline',
       theme: (theme === 'light' || theme === 'dark' || theme === 'auto') ? theme : 'auto',
       lang: lang ?? undefined,
       selfUid: selfUid ?? undefined,
-      // Merge stored callbacks + test factory override
+      baseUrl,
+      allowAnonRead,
+      // Merge stored callbacks + test factory overrides
       onTokenExpired: this.#config?.onTokenExpired,
       onError: this.#config?.onError,
       allowLegacyToken: this.#config?.allowLegacyToken,
       _createClient: this.#config?._createClient,
+      _mintAnonReadToken: this.#config?._mintAnonReadToken,
     };
   }
 
@@ -637,19 +717,22 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
   const el = document.createElement(ELEMENT_TAG) as OxpulseChatElement;
 
   el.setAttribute('app-id', config.appId);
-  el.setAttribute('jwt', config.jwt);
+  if (config.jwt) el.setAttribute('jwt', config.jwt);
   el.setAttribute('room-id', config.roomId);
   if (config.mode) el.setAttribute('mode', config.mode);
   if (config.theme) el.setAttribute('theme', config.theme);
   if (config.lang) el.setAttribute('lang', config.lang);
   if (config.selfUid) el.setAttribute('self-uid', config.selfUid);
+  if (config.baseUrl) el.setAttribute('base-url', config.baseUrl);
+  if (config.allowAnonRead) el.setAttribute('allow-anon-read', '');
 
-  // Store callbacks + test factory override (not representable as attributes)
+  // Store callbacks + test factory overrides (not representable as attributes)
   el._setCallbacks({
     onTokenExpired: config.onTokenExpired,
     onError: config.onError,
     allowLegacyToken: config.allowLegacyToken,
     _createClient: config._createClient,
+    _mintAnonReadToken: config._mintAnonReadToken,
   });
 
   target.appendChild(el);
