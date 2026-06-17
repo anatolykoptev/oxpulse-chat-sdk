@@ -143,7 +143,13 @@ jobs:
           # the Version Packages PR is merged). Build MUST precede publish
           # because pnpm pack (used by release-npm-packages.mjs in OIDC mode)
           # does NOT run prepublishOnly — dist/ must already exist.
-          publish: pnpm build && node scripts/release-npm-packages.mjs
+          #
+          # Must be a SINGLE npm script, not "pnpm build && node …": changesets/
+          # action runs the publish command via argv tokenisation, NOT a shell,
+          # so a literal "&&" is passed as an argument (pnpm forwards it into each
+          # child `tsc`, breaking the build with TS5112). The `release:ci` script
+          # body IS executed by sh, so the "&&" inside it works correctly.
+          publish: pnpm release:ci
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
