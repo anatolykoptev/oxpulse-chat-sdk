@@ -271,11 +271,11 @@ async function publishPackageToken(pkg, localVersion) {
 
 function tagAndPush(pkgName, localVersion) {
 	const tag = `${pkgName}@${localVersion}`;
-	// In OIDC/CI mode we deliberately do NOT git-tag: the workflow holds only
-	// contents:read (a tag push needs contents:write, withheld to keep the
-	// publish token minimal), and CI runners have no git identity. The release
-	// is identified by the npm version + the workflow run SHA. Tagging stays
-	// enabled for local token-mode releases.
+	// In OIDC/CI mode we deliberately do NOT git-tag. The release workflow now
+	// holds contents:write (changesets/action needs it to push the Version
+	// Packages bump commit), but tagging is still skipped here: CI runners have
+	// no git identity, and the release is identified by the npm version + the
+	// workflow run SHA. Tagging stays enabled for local token-mode releases.
 	if (OIDC_MODE) {
 		log(`OIDC mode: skipping git tag ${tag} (release id = npm version + run SHA)`);
 		return;
