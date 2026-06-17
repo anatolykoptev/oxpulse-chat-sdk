@@ -47,6 +47,11 @@ export type { SDKPushErrorCode, SubscribeResult, SubscriptionChangeListenerOpts 
 export { mintAnonReadToken, AnonReadMintError } from './anon-read.js';
 export type { AnonReadMintResult, AnonReadMintErrorCode } from './anon-read.js';
 
+// ─── Named-write token minting ───────────────────────────────────────────────
+
+export { mintNamedWriteToken, NamedWriteMintError } from './named-write.js';
+export type { MintNamedWriteOptions, NamedWriteMintErrorCode } from './named-write.js';
+
 // ─── Wire-codec re-exports (compression API) ─────────────────────────────────
 // Production-safe symbols only. Test-only helpers (_evictDictForTesting,
 // _resetLoaderForTesting) are intentionally excluded.
