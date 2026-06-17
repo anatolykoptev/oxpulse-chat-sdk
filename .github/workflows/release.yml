@@ -1,3 +1,17 @@
+# Changesets-based auto-release pipeline.
+#
+# Two-phase flow:
+#   Phase 1 — Version PR:
+#     Push to main with pending changesets → changesets/action opens (or
+#     updates) a "Version Packages" pull request that bumps package.json
+#     versions + generates CHANGELOG entries. No publish happens yet.
+#
+#   Phase 2 — Publish:
+#     Merging the "Version Packages" PR triggers this workflow again; since
+#     there are now no pending changesets, changesets/action runs the publish
+#     command instead: `pnpm build && node scripts/release-npm-packages.mjs`.
+#     The custom publisher uses npm OIDC trusted publishing (no token needed).
+#
 # npm Trusted Publishing (OIDC) — no token required.
 #
 # npm's OIDC flow:
@@ -17,21 +31,41 @@
 #   @oxpulse/chat-sdk    → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
 #   @oxpulse/chat-widget → NOT YET (package must exist on npm first — bootstrap manually)
 #
-# Trigger: workflow_dispatch only (manual). Add push trigger later once stable.
+# GitHub Releases note:
+#   changesets/action creates GitHub Releases automatically when the publish
+#   command emits "New tag: <name>@<version>" lines. The custom OIDC publisher
+#   (release-npm-packages.mjs) does NOT emit those lines (and intentionally
+#   skips git-tagging in OIDC mode — see tagAndPush() comment in that file).
+#   Therefore GitHub Releases are NOT auto-created by this pipeline. npm
+#   publishes still work correctly. GitHub Releases are a future follow-up.
 
-name: Release (npm OIDC)
+name: Release (npm OIDC + Changesets)
 
 on:
+  push:
+    branches:
+      - main
+  # Manual fallback: trigger a publish run directly without waiting for a
+  # Version Packages PR, e.g. to re-publish after a transient npm outage.
   workflow_dispatch:
 
 jobs:
   release:
     runs-on: ubuntu-latest
 
-    # Scoped here — only this job needs id-token; no workflow-level blast radius.
+    # Permissions widening vs. the previous publish-only workflow:
+    #   contents: write   — changesets/action must push the version bump commit
+    #                       when creating/updating the "Version Packages" PR.
+    #                       The old workflow had contents: read (no PR needed).
+    #   pull-requests: write — changesets/action opens and labels the PR.
+    #   id-token: write   — same as before: npm OIDC token exchange.
+    # Blast-radius note: these permissions are scoped to this single job.
+    # The environment: release gate (required reviewer) provides the human
+    # checkpoint before any publish step runs.
     permissions:
-      id-token: write   # required for OIDC token exchange with npm
-      contents: read    # required for actions/checkout
+      contents: write
+      pull-requests: write
+      id-token: write
 
     # Gates this job behind the "release" environment.
     # Set a required reviewer in repo Settings → Environments → release.
@@ -45,6 +79,10 @@ jobs:
         # SHA-pinned for supply-chain hardening (holds id-token: write).
         # v4.3.1
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          # Full history required: changesets/action compares against the base
+          # branch to detect which changesets are new.
+          fetch-depth: 0
 
       - name: Set up Node.js 22
         # v4.4.0
@@ -87,15 +125,25 @@ jobs:
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
-      - name: Build all packages
-        run: pnpm build
-
-      - name: Publish via OIDC trusted publishing
-        # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
-        # NPM_TOKEN must NOT be set (the whole point is to publish without it).
-        #
-        # NPM_PROVENANCE: intentionally absent — provenance requires a PUBLIC
-        # source repo. Set NPM_PROVENANCE=1 here when this repo goes public.
+      - name: Create Version PR or Publish
+        # SHA-pinned. v1.9.0
+        # Source: https://github.com/changesets/action/releases/tag/v1.9.0
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d
+        with:
+          # version: runs `changeset version` inside the action to bump
+          # package.json files and generate CHANGELOG entries when a Version
+          # Packages PR is being created or updated.
+          version: pnpm changeset version
+          # publish: runs ONLY when there are no pending changesets (i.e. after
+          # the Version Packages PR is merged). Build MUST precede publish
+          # because pnpm pack (used by release-npm-packages.mjs in OIDC mode)
+          # does NOT run prepublishOnly — dist/ must already exist.
+          publish: pnpm build && node scripts/release-npm-packages.mjs
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
+          # NPM_TOKEN must NOT be set (the whole point is to publish without it).
+          #
+          # NPM_PROVENANCE: intentionally absent — provenance requires a PUBLIC
+          # source repo. Set NPM_PROVENANCE=1 here when this repo goes public.
           TRUSTED_PUBLISH: '1'
-        run: node scripts/release-npm-packages.mjs
