@@ -44,6 +44,26 @@ export interface WidgetConfig {
   selfUid?: string;
   // Reserved for v3.0 voice/video:
   // withVoice?: boolean;
+
+  /**
+   * @internal — test-only factory override.
+   * When provided, `element.ts` calls this instead of constructing a real SDKChatClient.
+   * Allows unit tests to inject a mock client without a network.
+   * Never set in production code.
+   */
+  _createClient?: (opts: { baseUrl: string; jwt: string; appId: string }) => {
+    list(roomId: string, args: { limit: number }): Promise<{ items: import('./ui/message-list.js').MessageRow[]; hasNext: boolean }>;
+    subscribe(roomId: string, args: {
+      onMessage: (row: import('./ui/message-list.js').MessageRow) => void;
+      onError?: (err: unknown) => void;
+      onMutation?: (event: { msgId: string; op: string; deletedAt?: string; editedAt?: string; [k: string]: unknown }) => void;
+      onReaction?: (event: { msgId: string; op: 'reaction_add' | 'reaction_remove'; reaction: string; userId: string; [k: string]: unknown }) => void;
+    }): () => void;
+    sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string }): Promise<{ seq?: number; msgId: string }>;
+    getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
+    sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+    removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+  };
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
