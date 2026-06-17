@@ -372,8 +372,11 @@ export class OxpulseChatElement extends HTMLElement {
         resolvedJwt = mintResult.token;
 
         // Schedule re-mint 30 s before expiry. expiresAt is a Unix timestamp in seconds.
+        // Floor at 5 s so a near-expired / clock-skewed token cannot spin a tight re-mint
+        // loop (each renew is a network call); the 300 s server TTL makes this rare anyway.
         const nowSecs = Math.floor(Date.now() / 1000);
-        const renewAfterMs = Math.max((mintResult.expiresAt - nowSecs - 30) * 1000, 0);
+        const ANON_MIN_RENEW_MS = 5000;
+        const renewAfterMs = Math.max((mintResult.expiresAt - nowSecs - 30) * 1000, ANON_MIN_RENEW_MS);
         if (this.#anonRenewTimer !== null) {
           clearTimeout(this.#anonRenewTimer);
         }
@@ -500,14 +503,6 @@ export class OxpulseChatElement extends HTMLElement {
           sdkClient.removeReaction?.(roomId, msgId, emoji) ?? Promise.resolve(),
       };
 
-      // ComposerClient adapter — bridges (roomId, text, args?) → SDK { senderUid, text }.
-      // senderUid: use config.selfUid if present; SDK server-side accepts '' for anonymous senders
-      // when the JWT's sub claim is authoritative (server uses JWT sub, not sender_uid, for auth).
-      const composerClient = {
-        sendText: (roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }> =>
-          sdkClient.sendText(roomId, { senderUid: config.selfUid ?? '', text }),
-      };
-
       // F3: Remove placeholder in a single explicit pass — keeps #styleEl, removes all else.
       // Prior while-loop + querySelector was brittle (two passes, order-dependent).
       const styleEl = this.#styleEl;
@@ -570,6 +565,14 @@ export class OxpulseChatElement extends HTMLElement {
       // In anon-read mode the token is read-only — hide the composer entirely.
       // Showing a write UI with a token that 403s on send is broken UX.
       if (!isAnonMode) {
+        // ComposerClient adapter — bridges (roomId, text) → SDK { senderUid, text }.
+        // Constructed ONLY in authed mode: an anon token is read-only, so the write
+        // path is never wired (capability-based block, not merely UI-hidden).
+        // senderUid: config.selfUid if present; the server authorizes by the JWT sub, not sender_uid.
+        const composerClient = {
+          sendText: (roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }> =>
+            sdkClient.sendText(roomId, { senderUid: config.selfUid ?? '', text }),
+        };
         this.#composer = new Composer({
           client: composerClient,
           roomId: config.roomId,

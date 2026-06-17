@@ -129,10 +129,4 @@ describe('mintAnonReadToken', () => {
     });
   });
 
-  it('falsification: removing status mapping makes 403 return wrong code', () => {
-    // This documents the intent: the test above would NOT pass if statusToCode
-    // returned 'mint_failed' for 403. Verified by reviewing statusToCode logic.
-    // (Static check — no runtime assertion needed here.)
-    expect(true).toBe(true);
-  });
 });

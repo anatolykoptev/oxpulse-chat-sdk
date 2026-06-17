@@ -221,10 +221,10 @@ describe('OxpulseChatElement — anon-read mode', () => {
 
     // With jwt present, anon mode is not triggered
     expect(mintFn).not.toHaveBeenCalled();
-    // Client should use the original LOCALHOST_JWT
-    if (capturedOpts.length > 0) {
-      expect(capturedOpts[0]?.jwt).toBe(LOCALHOST_JWT);
-    }
+    // The authed path MUST construct the client — asserted so the jwt check below
+    // cannot pass vacuously if a regression silently no-ops the authed path.
+    expect(createClient).toHaveBeenCalledOnce();
+    expect(capturedOpts[0]?.jwt).toBe(LOCALHOST_JWT);
   });
 });
 

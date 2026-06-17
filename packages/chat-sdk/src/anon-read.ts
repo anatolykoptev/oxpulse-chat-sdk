@@ -91,6 +91,20 @@ export async function mintAnonReadToken(opts: {
     );
   }
 
+  // Guard the 2xx contract — a missing field would otherwise surface as a silent
+  // `undefined` token downstream (symmetric with the parse-failure guard above).
+  if (
+    typeof body.token !== 'string' ||
+    typeof body.expires_at !== 'number' ||
+    typeof body.user_id !== 'string'
+  ) {
+    throw new AnonReadMintError(
+      'mint_failed',
+      'anon-read-mint: response missing token/expires_at/user_id',
+      response.status,
+    );
+  }
+
   return {
     token: body.token,
     userId: body.user_id,
