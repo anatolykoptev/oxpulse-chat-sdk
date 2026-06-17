@@ -12,7 +12,8 @@
     "test:contract": "vitest run --config e2e/vitest.config.ts",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "node scripts/release-npm-packages.mjs"
+    "release": "node scripts/release-npm-packages.mjs",
+    "release:ci": "pnpm build && node scripts/release-npm-packages.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
