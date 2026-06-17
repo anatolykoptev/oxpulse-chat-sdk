@@ -315,6 +315,15 @@ export class MessageList {
     return this.#lastSeq;
   }
 
+  /**
+   * Route a new message row to the list's internal handler.
+   * Used by the element's reconnect SubscribeFn to deliver messages when
+   * the Reconnector re-establishes the SSE stream after an error.
+   */
+  handleMessage(row: MessageRow): void {
+    this.#handleNewMessage(row);
+  }
+
   /** Tear down: abort in-flight mount(), unsubscribe, clear DOM, close picker. */
   destroy(): void {
     // C1: abort first so mid-flight mount() bails before subscribe

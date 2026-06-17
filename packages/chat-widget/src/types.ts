@@ -44,6 +44,46 @@ export interface WidgetConfig {
   selfUid?: string;
   // Reserved for v3.0 voice/video:
   // withVoice?: boolean;
+
+  /**
+   * Enable anonymous read-only mode.
+   * When true and no `jwt` is provided, the widget mints a short-lived anon-read
+   * token via POST /api/sdk/auth/anon-read-mint and mounts in read-only mode
+   * (composer hidden). The token is re-minted automatically before expiry.
+   */
+  allowAnonRead?: boolean;
+
+  /**
+   * @internal — test-only mint override.
+   * When provided, `element.ts` calls this instead of the real mintAnonReadToken.
+   * Allows unit tests to inject a fake mint call without a network.
+   * Never set in production code.
+   */
+  _mintAnonReadToken?: (opts: { baseUrl: string; appId: string; roomId: string }) => Promise<{
+    token: string;
+    userId: string;
+    expiresAt: number;
+  }>;
+
+  /**
+   * @internal — test-only factory override.
+   * When provided, `element.ts` calls this instead of constructing a real SDKChatClient.
+   * Allows unit tests to inject a mock client without a network.
+   * Never set in production code.
+   */
+  _createClient?: (opts: { baseUrl: string; jwt: string; appId: string }) => {
+    list(roomId: string, args: { limit: number }): Promise<{ items: import('./ui/message-list.js').MessageRow[]; hasNext: boolean }>;
+    subscribe(roomId: string, args: {
+      onMessage: (row: import('./ui/message-list.js').MessageRow) => void;
+      onError?: (err: unknown) => void;
+      onMutation?: (event: { msgId: string; op: string; deletedAt?: string; editedAt?: string; [k: string]: unknown }) => void;
+      onReaction?: (event: { msgId: string; op: 'reaction_add' | 'reaction_remove'; reaction: string; userId: string; [k: string]: unknown }) => void;
+    }): () => void;
+    sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string }): Promise<{ seq?: number; msgId: string }>;
+    getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
+    sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+    removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+  };
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
@@ -57,6 +97,8 @@ export const OBSERVED_ATTRIBUTES = [
   'theme',
   'lang',
   'self-uid',
+  'base-url',
+  'allow-anon-read',
 ] as const;
 
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */

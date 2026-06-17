@@ -17,6 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement, mount } from '../element.js';
+import type { MessageListClient } from '../ui/message-list.js';
 
 // Vitest uses jsdom by default when configured. We need to ensure customElements is available.
 
@@ -30,6 +31,27 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 const LOCALHOST_JWT = makeJwt({ aud_origins: ['http://localhost:*'], sub: 'u1' });
+
+/**
+ * Mock client factory for tests — returns a duck-typed client matching the
+ * MessageListClient + sendText interface expected by element.ts.
+ * Inject via config._createClient to avoid real network calls in jsdom.
+ */
+function makeMockClient(): MessageListClient & {
+  sendText(roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }>;
+} {
+  return {
+    list: vi.fn().mockResolvedValue({ items: [], hasNext: false }),
+    subscribe: vi.fn().mockImplementation((_roomId: string, _args: unknown) => {
+      // Return no-op unsubscribe
+      return () => {};
+    }),
+    getReactions: vi.fn().mockResolvedValue({ counts: {}, users: {}, truncated: false }),
+    sendReaction: vi.fn().mockResolvedValue(undefined),
+    removeReaction: vi.fn().mockResolvedValue(undefined),
+    sendText: vi.fn().mockResolvedValue({ msgId: 'mock-msg-id' }),
+  };
+}
 
 describe('OxpulseChatElement', () => {
   let container: HTMLDivElement;
@@ -64,6 +86,7 @@ describe('OxpulseChatElement', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     expect(el.shadowRoot).not.toBeNull();
   });
@@ -73,9 +96,10 @@ describe('OxpulseChatElement', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     // Wait for async bootstrap
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 30));
     container.removeChild(el);
     // Shadow root should be empty after disconnect
     expect(el.shadowRoot?.childNodes.length ?? 0).toBe(0);
@@ -86,8 +110,9 @@ describe('OxpulseChatElement', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 30));
     el.destroy();
     expect(el.shadowRoot?.childNodes.length ?? 0).toBe(0);
   });
@@ -106,6 +131,7 @@ describe('OxpulseChatElement', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     const newJwt = makeJwt({ aud_origins: ['http://localhost:*'], sub: 'u2' });
     el.refreshToken(newJwt);
@@ -117,6 +143,7 @@ describe('OxpulseChatElement', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
 
     const readyPromise = new Promise<CustomEvent>((resolve) => {
       el.addEventListener('oxpulse-chat:ready', (ev) => resolve(ev as CustomEvent));
@@ -357,6 +384,7 @@ describe('OxpulseChatElement — B1 inline mode MessageList', () => {
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
     el.setAttribute('mode', 'inline');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 30));
 
@@ -460,6 +488,7 @@ describe('OxpulseChatElement — F3 placeholder cleanup', () => {
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
     el.setAttribute('mode', 'inline');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 50));
 
@@ -498,6 +527,7 @@ describe('OxpulseChatElement — B1 selfUid attribute', () => {
     el.setAttribute('room-id', 'room1');
     el.setAttribute('mode', 'inline');
     el.setAttribute('self-uid', 'u1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 50));
 
@@ -526,6 +556,7 @@ describe('OxpulseChatElement — B1 selfUid attribute', () => {
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
     el.setAttribute('mode', 'inline');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 50));
 
@@ -550,6 +581,51 @@ describe('OxpulseChatElement — B1 selfUid attribute', () => {
   });
 });
 
+// ── W2.2 slice 3: SDK client wiring integration ──────────────────────────────
+
+describe('OxpulseChatElement — W2.2 slice 3 SDK wiring', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+  });
+
+  it('calls_client_list_on_mount_with_roomId', async () => {
+    // Verify widget calls client.list(roomId, ...) during bootstrap.
+    const client = makeMockClient();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(client.list).toHaveBeenCalledWith('room1', expect.objectContaining({ limit: expect.any(Number) }));
+    el.destroy();
+  });
+
+  it('calls_client_subscribe_on_mount_with_roomId', async () => {
+    // Verify widget calls client.subscribe(roomId, ...) during bootstrap.
+    const client = makeMockClient();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(client.subscribe).toHaveBeenCalledWith('room1', expect.objectContaining({ onMessage: expect.any(Function) }));
+    el.destroy();
+  });
+});
+
 // ── W2.2 slice 5: token refresh + reconnect integration ──────────────────────
 
 import { isAuthError } from '../utils/auth.js';
@@ -568,12 +644,13 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
 
   it('dispatches_token_expired_on_subscribe_401', async () => {
     // CB1: Element must dispatch oxpulse-chat:token-expired when subscribe() fires auth error
-    // CB2: Uses stub client triggerSubscribeError() not simulateSubscribeAuthError (removed)
-    // The stub client is injected by the element internally — we observe the event on the host.
+    // CB2: triggerSubscribeError() routes through real handleSubscribeError path.
+    // _createClient mock prevents real network calls in jsdom.
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
 
     const events: Event[] = [];
     el.addEventListener('oxpulse-chat:token-expired', (e) => events.push(e));
@@ -581,7 +658,7 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 30));
 
-    // Trigger auth error via stub client's exposed hook (CB2)
+    // Trigger auth error via the real handleSubscribeError path (CB2)
     el.triggerSubscribeError({ status: 401, kind: 'auth_expired' });
     await new Promise((r) => setTimeout(r, 5));
 
@@ -596,10 +673,11 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 30));
 
-    // Trigger auth error via stub client hook
+    // Trigger auth error via real error path
     el.triggerSubscribeError({ status: 401, kind: 'auth_expired' });
     await new Promise((r) => setTimeout(r, 5));
 
@@ -620,6 +698,7 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     // Bootstrap is async — advance through it with real setTimeout then switch to fake
     vi.useRealTimers();
@@ -642,6 +721,7 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 30));
 
@@ -661,6 +741,7 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 30));
 
@@ -724,6 +805,7 @@ describe('OxpulseChatElement — 1C loading placeholder a11y', () => {
     // Instead, verify theme CSS alone since the placeholder flash is transient.
     // The main test is on CSS (runtime test via theme.test.ts).
 
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     // Very brief wait — before origin check resolves, placeholder should be present
     await new Promise((r) => setTimeout(r, 0));
@@ -765,6 +847,7 @@ describe('OxpulseChatElement — 1H attribute debounce', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
 
     // Wait for initial bootstrap to fully complete
@@ -812,6 +895,7 @@ describe('OxpulseChatElement — W2.2 slice 2 composer', () => {
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
     el.setAttribute('mode', 'inline');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 50));
 
