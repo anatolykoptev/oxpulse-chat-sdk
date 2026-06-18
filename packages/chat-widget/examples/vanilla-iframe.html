@@ -20,13 +20,21 @@
   <script type="module">
     import { mount } from '../dist/index.js';
 
+    // Named-write (allow-write) mode via programmatic mount().
+    // The widget mints the write token by calling write-mint-endpoint on YOUR server.
+    // Backend shape: POST /api/oxpulse-write-token { room_id } → { token }
     const widget = mount(document.getElementById('chat-container'), {
       appId: 'YOUR_APP_ID',
-      jwt: 'YOUR_JWT_FROM_BACKEND',
       roomId: 'demo-room',
+      jwt: '',            // empty — using anon-read for reads
       mode: 'iframe',
       baseUrl: 'https://oxpulse.chat',
       theme: 'auto',
+      // Read side: anon-read token (minted automatically)
+      allowAnonRead: true,
+      // Write side: named-write token minted from your backend
+      allowWrite: true,
+      writeMintEndpoint: '/api/oxpulse-write-token',
       onError: (err) => {
         console.error('Widget error:', err.code, err.message);
       },

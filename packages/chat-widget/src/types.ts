@@ -84,6 +84,42 @@ export interface WidgetConfig {
     sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
     removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
   };
+
+  // ── Named-write (allow-write) config ───────────────────────────────────────
+
+  /**
+   * Enable named-write (authed compose) mode.
+   *
+   * When true the widget renders a compose UI (input + send button). A write
+   * token is obtained from `writeMintEndpoint` (server-side mint on the
+   * embedding client's backend). When false (default) the widget is read-only.
+   *
+   * The write token is separate from the read `jwt` — it is minted with
+   * named-identity write capability via the Phase B grant flow.
+   */
+  allowWrite?: boolean;
+
+  /**
+   * URL of the embedding client's own named-write mint endpoint.
+   *
+   * Required when `allowWrite` is true. The widget POSTs `{ room_id }` to this
+   * URL and expects `{ token }` in the JSON response (same contract as
+   * `mintNamedWriteToken` in `@oxpulse/chat-sdk`).
+   *
+   * The backend should exchange the user's session for a named-write grant via
+   * POST /api/sdk/auth/group-grant-mint and return the resulting SDK JWT.
+   *
+   * Example: `writeMintEndpoint: '/api/oxpulse-write-token'`
+   */
+  writeMintEndpoint?: string;
+
+  /**
+   * @internal — test-only mint override for named-write.
+   * When provided, `element.ts` calls this instead of `mintNamedWriteToken`.
+   * Allows unit tests to inject a fake mint without a network.
+   * Never set in production code.
+   */
+  _mintNamedWriteToken?: (opts: { mintEndpoint: string; roomId: string }) => Promise<string>;
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
@@ -99,6 +135,8 @@ export const OBSERVED_ATTRIBUTES = [
   'self-uid',
   'base-url',
   'allow-anon-read',
+  'allow-write',
+  'write-mint-endpoint',
 ] as const;
 
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
@@ -114,6 +152,10 @@ export interface WidgetEventMap {
   'oxpulse-chat:error': CustomEvent<WidgetError>;
   /** Fired when the server returns 401; handler should call element.refreshToken(). */
   'oxpulse-chat:token-expired': CustomEvent<{ roomId: string }>;
+  /** Fired after a named-write message is successfully sent. */
+  'oxpulse-chat:message-sent': CustomEvent<{ roomId: string; msgId: string }>;
+  /** Fired when a named-write send attempt fails (non-recoverable, after error chip shown). */
+  'oxpulse-chat:write-error': CustomEvent<WidgetError>;
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -124,6 +166,8 @@ export type WidgetErrorCode =
   | 'JWT_EXPIRED'
   | 'TOKEN_REFRESH_FAILED'
   | 'NETWORK_ERROR'
+  | 'WRITE_MINT_FAILED'
+  | 'WRITE_SEND_FAILED'
   | 'UNKNOWN';
 
 export class WidgetError extends Error {
