@@ -2,13 +2,17 @@
 "@oxpulse/chat-widget": minor
 ---
 
-add allow-write (named-write) mode to chat widget
+add allow-write (named-write) mode to chat widget (inline mode only)
 
 Adds `allowWrite` / `allow-write` config to `<oxpulse-chat>` and `mount()`. When
 enabled, the widget mints a named-write JWT from the host page's own backend
-(`writeMintEndpoint`) and renders a compose UI (input + send button) for BOTH
-`mode:'inline'` (shadow DOM) and `mode:'iframe'` (sandboxed). Without `allowWrite`
-the widget stays read-only (no behaviour change from previous releases).
+(`writeMintEndpoint`) and renders a compose UI (input + send button) for
+`mode:'inline'` (shadow DOM). Without `allowWrite` the widget stays read-only
+(no behaviour change from previous releases).
+
+Note: `mode:'iframe'` named-write support is not yet implemented (W5). Setting
+`allowWrite:true` with `mode:'iframe'` logs a console warning and the compose UI
+is not shown.
 
 New `WidgetConfig` fields:
 - `allowWrite?: boolean` — enable named-write compose UI (default: false)
@@ -25,7 +29,7 @@ New events on `<oxpulse-chat>`:
 
 New `WidgetErrorCode` values:
 - `WRITE_MINT_FAILED` — emitted when the write-token mint request fails
-- `WRITE_SEND_FAILED` — reserved for future send-level error classification
+- `WRITE_SEND_FAILED` — emitted via `oxpulse-chat:write-error` when a named-write send fails
 
 The write token is kept separate from the read JWT (different capability level).
 `allow-write` can be combined with `allow-anon-read` — the widget creates two SDK

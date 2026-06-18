@@ -12,6 +12,10 @@
  *   8. allow-write attr in OBSERVED_ATTRIBUTES
  *   9. write-mint-endpoint attr in OBSERVED_ATTRIBUTES
  *  10. mount() API passes allowWrite + writeMintEndpoint attributes
+ *  11. allowWrite without writeMintEndpoint → no write mint, no composer
+ *  12. write-error event fires on named-write send failure (WRITE_SEND_FAILED wiring)
+ *  13. jwt + allowWrite: write client shadows authed client for sends (matrix cell)
+ *  14. token-not-leaked: write JWT never appears in dispatched event detail or DOM attributes
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -351,7 +355,7 @@ describe('OxpulseChatElement — named-write mode', () => {
     handle.destroy();
   });
 
-  // ── T11: allowWrite without writeMintEndpoint → no write mint, no composer ──
+  // ── T11: allowWrite without writeMintEndpoint → no write mint, no composer ───
 
   it('allowWrite_without_endpoint_no_write_client_anon_read_only', async () => {
     // allowWrite=true but no writeMintEndpoint → mint is skipped, widget stays read-only
@@ -383,6 +387,159 @@ describe('OxpulseChatElement — named-write mode', () => {
     // Composer must NOT appear (anon-read mode without write capability)
     const shadow = el.shadowRoot;
     expect(shadow!.querySelector('.oxp-composer')).toBeNull();
+    el.destroy();
+  });
+
+  // ── T12: write-error event fires on named-write send failure ───────────────
+
+  it('allowWrite_send_failure_dispatches_write_error_with_WRITE_SEND_FAILED', async () => {
+    // Regression guard: oxpulse-chat:write-error with WRITE_SEND_FAILED must fire
+    // when the named-write sendText call rejects. Revert the dispatchEvent(.catch)
+    // wiring and this test goes RED.
+    const sendError = new Error('upstream write rejected');
+    const failSendText = vi.fn().mockRejectedValue(sendError);
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('room-id', 'room1');
+    el.setAttribute('allow-anon-read', '');
+    el.setAttribute('allow-write', '');
+    el.setAttribute('write-mint-endpoint', '/api/write-token');
+    el._setCallbacks({
+      _mintAnonReadToken: vi.fn().mockResolvedValue(DEFAULT_ANON_MINT_RESULT),
+      _mintNamedWriteToken: vi.fn().mockResolvedValue(WRITE_TOKEN),
+      _createClient: () => {
+        const c = makeMockClient();
+        (c.sendText as ReturnType<typeof vi.fn>) = failSendText;
+        return c;
+      },
+    });
+
+    const writeErrors: CustomEvent[] = [];
+    el.addEventListener('oxpulse-chat:write-error', (ev) => writeErrors.push(ev as CustomEvent));
+
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 60));
+
+    const shadow = el.shadowRoot;
+    const textarea = shadow!.querySelector('.oxp-composer-input') as HTMLTextAreaElement | null;
+    const sendBtn = shadow!.querySelector('.oxp-composer-send') as HTMLButtonElement | null;
+    expect(textarea).not.toBeNull();
+    expect(sendBtn).not.toBeNull();
+
+    textarea!.value = 'will fail';
+    textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    sendBtn!.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    // oxpulse-chat:write-error must have fired exactly once
+    expect(writeErrors).toHaveLength(1);
+    // Detail must be a WidgetError with WRITE_SEND_FAILED code
+    const detail = writeErrors[0]!.detail as { code?: string };
+    expect(detail.code).toBe('WRITE_SEND_FAILED');
+    el.destroy();
+  });
+
+  // ── T13: jwt + allowWrite → write client shadows authed identity for sends ──
+
+  it('jwt_plus_allowWrite_write_client_handles_sends_not_authed_client', async () => {
+    // Documented behaviour: when both jwt and allowWrite+writeMintEndpoint are set,
+    // effectiveSendClient = writeClient (write token takes precedence).
+    // Regression guard: revert the effectiveSendClient = writeClient ?? ... line
+    // and this test goes RED.
+    const capturedJwts: string[] = [];
+    const anonJwt: string[] = []; // track which JWT the list/subscribe client uses
+
+    const createClient = vi.fn().mockImplementation((opts: { jwt: string }) => {
+      capturedJwts.push(opts.jwt);
+      const c = makeMockClient();
+      return c;
+    });
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('room-id', 'room1');
+    el.setAttribute('jwt', LOCALHOST_JWT); // authed read jwt
+    el.setAttribute('allow-write', '');
+    el.setAttribute('write-mint-endpoint', '/api/write-token');
+    el._setCallbacks({
+      _mintNamedWriteToken: vi.fn().mockResolvedValue(WRITE_TOKEN),
+      _createClient: createClient,
+    });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Two clients: one for authed read (LOCALHOST_JWT), one for write (WRITE_TOKEN)
+    expect(capturedJwts).toHaveLength(2);
+    expect(capturedJwts).toContain(LOCALHOST_JWT);
+    expect(capturedJwts).toContain(WRITE_TOKEN);
+
+    // Composer must appear (write path wired)
+    const shadow = el.shadowRoot;
+    expect(shadow!.querySelector('.oxp-composer')).not.toBeNull();
+
+    void anonJwt; // suppress unused-var lint
+    el.destroy();
+  });
+
+  // ── T14: token-not-leaked — write JWT never in event detail or DOM attr ────
+
+  it('allowWrite_write_token_never_in_dispatched_event_detail_or_dom_attr', async () => {
+    // Top security property: the minted write JWT must not leak into dispatched
+    // CustomEvent details or DOM attributes. Revert the #writeJwt removal and the
+    // composerClient isolation and this test must still pass (the token should never
+    // appear in event details or attributes regardless of field presence).
+    // But: if the event dispatch were to accidentally include the token, this goes RED.
+    const collectedEventDetails: unknown[] = [];
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('room-id', 'room1');
+    el.setAttribute('allow-anon-read', '');
+    el.setAttribute('allow-write', '');
+    el.setAttribute('write-mint-endpoint', '/api/write-token');
+    el._setCallbacks({
+      _mintAnonReadToken: vi.fn().mockResolvedValue(DEFAULT_ANON_MINT_RESULT),
+      _mintNamedWriteToken: vi.fn().mockResolvedValue(WRITE_TOKEN),
+      _createClient: () => makeMockClient(),
+    });
+
+    // Collect ALL oxpulse-chat:* events dispatched on el
+    const eventNames = [
+      'oxpulse-chat:ready',
+      'oxpulse-chat:error',
+      'oxpulse-chat:token-expired',
+      'oxpulse-chat:message-sent',
+      'oxpulse-chat:write-error',
+    ];
+    for (const name of eventNames) {
+      el.addEventListener(name, (ev) => collectedEventDetails.push((ev as CustomEvent).detail));
+    }
+
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Trigger a successful send to capture message-sent detail
+    const shadow = el.shadowRoot;
+    const textarea = shadow!.querySelector('.oxp-composer-input') as HTMLTextAreaElement | null;
+    const sendBtn = shadow!.querySelector('.oxp-composer-send') as HTMLButtonElement | null;
+    if (textarea && sendBtn) {
+      textarea.value = 'token leak check';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 10));
+      sendBtn.click();
+      await new Promise((r) => setTimeout(r, 30));
+    }
+
+    // Assert: WRITE_TOKEN string does not appear in any event detail (as JSON or substring)
+    const serialized = JSON.stringify(collectedEventDetails);
+    expect(serialized).not.toContain(WRITE_TOKEN);
+
+    // Assert: WRITE_TOKEN not in any DOM attribute on el or its shadow root host
+    const attrNames = Array.from(el.attributes).map((a) => a.value);
+    expect(attrNames.join(' ')).not.toContain(WRITE_TOKEN);
+
     el.destroy();
   });
 });

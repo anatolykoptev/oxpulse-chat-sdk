@@ -96,6 +96,10 @@ export interface WidgetConfig {
    *
    * The write token is separate from the read `jwt` — it is minted with
    * named-identity write capability via the Phase B grant flow.
+   *
+   * **Supported modes:** `mode:'inline'` (shadow DOM) only. Setting `allowWrite:true`
+   * with `mode:'iframe'` logs a console warning and the compose UI is not shown
+   * (iframe named-write support is planned for W5).
    */
   allowWrite?: boolean;
 

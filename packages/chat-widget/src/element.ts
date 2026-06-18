@@ -72,8 +72,6 @@ export class OxpulseChatElement extends HTMLElement {
   #subscribeOnError: ((err: unknown) => void) | null = null;
   /** Timer ID for anon-read token pre-expiry re-mint. */
   #anonRenewTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Named-write JWT — minted at bootstrap when allowWrite is true, stored for iframe init. */
-  #writeJwt: string | null = null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -97,7 +95,6 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList?.destroy();
     this.#messageList = null;
     this.#styleEl = null;
-    this.#writeJwt = null;
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -195,7 +192,6 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList?.destroy();
     this.#messageList = null;
     this.#styleEl = null;
-    this.#writeJwt = null;
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -238,7 +234,6 @@ export class OxpulseChatElement extends HTMLElement {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
     }
-    this.#writeJwt = null;
     this.#composer?.destroy();
     this.#composer = null;
     this.#messageList?.destroy();
@@ -310,6 +305,12 @@ export class OxpulseChatElement extends HTMLElement {
     // Origin check passed — dispatch ready event
     if (config.mode === 'iframe') {
       // M6: iframe mode — create sandboxed iframe inside shadow root
+      if (config.allowWrite) {
+        // Named-write in iframe mode is not yet implemented (W5).
+        // Warn loudly rather than silently doing nothing.
+        // eslint-disable-next-line no-console
+        console.warn('[oxpulse-chat-widget] allowWrite=true is not supported in mode:"iframe" yet (W5). The compose UI will not be shown. Use mode:"inline" for named-write.');
+      }
       this.#mountIframe(config);
     } else {
       // Inline mode: W2.2 — mount real message list UI
@@ -424,7 +425,6 @@ export class OxpulseChatElement extends HTMLElement {
           return;
         }
         if (signal.aborted) return;
-        this.#writeJwt = resolvedWriteJwt;
       }
 
       const clientOpts = {
@@ -626,16 +626,37 @@ export class OxpulseChatElement extends HTMLElement {
         // Write path only wired when there is a capable JWT (named-write or standard authed).
         // senderUid: config.selfUid if present; the server authorizes by the JWT sub, not sender_uid.
         const capturedSendClient = effectiveSendClient;
+        // isNamedWritePath: true when effectiveSendClient is the dedicated writeClient.
+        // Used to dispatch the specific oxpulse-chat:write-error event on send failure
+        // (in addition to the generic oxpulse-chat:error the Composer fires internally).
+        const isNamedWritePath = writeClient !== null && capturedSendClient === writeClient;
+        const self = this;
         const composerClient = {
           sendText: (roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }> =>
             capturedSendClient.sendText(roomId, { senderUid: config.selfUid ?? '', text }).then((res) => {
               // Dispatch message-sent event on success
-              this.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
+              self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                 bubbles: true,
                 composed: true,
                 detail: { roomId, msgId: res.msgId },
               }));
               return res;
+            }).catch((err: unknown) => {
+              // For the named-write path: dispatch oxpulse-chat:write-error with
+              // WRITE_SEND_FAILED so integrators can distinguish write failures from
+              // generic widget errors. The Composer's own catch still fires
+              // oxpulse-chat:error and renders the inline error chip — we do not swallow.
+              if (isNamedWritePath) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                const writeErr = new WidgetError('WRITE_SEND_FAILED', errMsg);
+                self.dispatchEvent(new CustomEvent('oxpulse-chat:write-error', {
+                  bubbles: true,
+                  composed: true,
+                  detail: writeErr,
+                }));
+              }
+              // Re-throw so the Composer's catch path fires (renders error chip + generic error event).
+              throw err;
             }),
         };
         this.#composer = new Composer({
