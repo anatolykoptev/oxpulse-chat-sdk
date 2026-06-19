@@ -162,21 +162,26 @@ jobs:
 
       # ── CDN publish (Phase 3) ────────────────────────────────────────────────
       # Runs ONLY on the publish phase (no pending changesets → packages were
-      # just bumped and npm-published). Gated on the same condition that gates
-      # the npm publish step above.
+      # just bumped and npm-published). Gated on steps.changesets.outputs.published
+      # == 'true', which is set by changesets/action when the publish script emits
+      # "New tag: <pkg>@<version>" lines (release-npm-packages.mjs now emits these
+      # on every successful OIDC publish).
       #
       # Soft-skip: if CDN_DEPLOY_KEY secret is absent the publisher logs a
       # clear message and exits 0 — the release is not failed.  This lets the
       # workflow merge safely BEFORE the operator installs the deploy key.
       #
-      # Atomic deploy: the publisher rsyncs dist-cdn/ to a .tmp-<version>-<runid>/
-      # directory on the box, then issues an `ssh … mv` to place it atomically.
-      # This avoids a window where Caddy (Cache-Control: immutable, 1y) serves
-      # a partial upload and caches the 404 forever.
+      # Deploy strategy: rsync-only (no ssh mv, no ssh rm-rf).  The authorized_keys
+      # jail is command="rrsync -wo …",restrict — rrsync rejects any
+      # SSH_ORIGINAL_COMMAND whose first token is not "rsync".  Shell commands
+      # (mv, rm, cat) are unconditionally refused.
       #
-      # Append-only guard: if widget/<version>/index.js already exists on the
-      # remote with a DIFFERENT sha256, the publisher exits 1 and aborts.
-      # Identical sha256 → idempotent no-op, exit 0.
+      # Immutability: widget/<version>/ is deployed with rsync --ignore-existing.
+      # Files already present on the remote are not overwritten — a re-publish of
+      # the same version is a no-op at the byte level.
+      #
+      # latest/: deployed with plain rsync overwrite (intentionally mutable pointer).
+      # Only advanced for stable releases.
       #
       # Operator setup required (one-time, before this step goes live):
       #   1. Generate ed25519 key pair:

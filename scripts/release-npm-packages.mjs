@@ -224,6 +224,13 @@ async function publishPackageOidc(pkg, localVersion) {
 		if (res.status !== 0) {
 			fail(1, `npm publish (OIDC) failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 		}
+
+		// Emit the "New tag:" line that changesets/action's runPublish() parses
+		// (regex: /New tag:\s+(@[^/]+\/[^@]+|[^/]+)@([^\s]+)/, run.ts:101).
+		// Without this line, changesets/action sets outputs.published='false' and
+		// the CDN publish steps (gated on published=='true') are permanently skipped.
+		// This also enables automatic GitHub Release creation by the action.
+		console.log(`New tag: ${pkg.name}@${localVersion}`);
 	} finally {
 		try { rmSync(scratch, { recursive: true, force: true }); } catch {}
 	}

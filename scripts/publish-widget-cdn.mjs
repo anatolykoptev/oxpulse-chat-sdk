@@ -2,21 +2,35 @@
 // CDN publisher for @oxpulse/chat-widget.
 //
 // Publishes the esbuild CDN bundle (dist-cdn/) to the krolik box file-server
-// via SSH + rsync.  Assumes `build:cdn` has already run (dist-cdn/ exists).
+// via rsync.  Assumes `build:cdn` has already run (dist-cdn/ exists).
 //
 // Key properties:
-//   Append-only:   if widget/<version>/index.js already exists on the remote
-//                  with a DIFFERENT sha256 → exit 1, abort (immutable URL contract).
-//                  Identical hash → no-op, exit 0 (idempotent re-run safe).
-//   Atomic deploy: rsync to a temp dir, then `ssh … mv` into place so a
-//                  client never sees a half-written version dir.  This also
-//                  avoids a 404-with-Cache-Control:immutable window during rsync.
-//   latest/:       refreshed ONLY if this version is the highest stable semver
-//                  among all dirs in widget/ on the remote.  Mutable, staged
-//                  then mv'd atomically as well.
+//   Immutability:  widget/<version>/ is deployed with rsync --ignore-existing.
+//                  This means a re-run of the same version is a no-op — rrsync
+//                  permits rsync writes, and --ignore-existing refuses to touch
+//                  any file already present on the remote.  No read probe is
+//                  needed: if the bytes are already there they are not overwritten.
+//   latest/:       refreshed ONLY if this version is the highest stable semver.
+//                  Deployed with a plain rsync overwrite (intentionally mutable
+//                  pointer — no --ignore-existing).
 //   Soft-skip:     if CDN_DEPLOY_KEY is absent → log + exit 0 (pipeline safe
 //                  before the operator installs the key).
 //   DRY_RUN=1:     does everything EXCEPT remote writes — prints the exact plan.
+//
+// Deploy is rsync-ONLY (no ssh mv, no ssh rm-rf, no read probes).  The
+// authorized_keys jail is command="rrsync -wo …",restrict — rrsync refuses
+// any SSH_ORIGINAL_COMMAND whose first token is not "rsync" (rrsync:159-160),
+// so shell commands (mv, rm, cat) are unconditionally rejected.  rsync writes
+// are the only operations the jail allows.
+//
+// 404-cache window note: a versioned path is not embedded in any client page
+// until the release is announced (the URL is new, so no warmed CDN/browser
+// cache exists for it before the rsync completes).  In practice, mid-rsync
+// requests to a new versioned path do not occur.  If true server-side atomicity
+// is later required, an alternative is a custom server-side forced-command script
+// that takes <version> as argv and does the mv server-side — this would not
+// weaken the jail (the forced command is still fixed), but adds server-side
+// complexity.  Not implemented; documented here for future reference.
 //
 // Required env:
 //   CDN_SSH_HOST    box hostname or IP (e.g. "192.9.243.148")
@@ -29,10 +43,11 @@
 // SSH authorised_keys line the operator must install on the box:
 //   command="rrsync -wo /home/krolik/deploy/krolik-server/files/cdn-oxpulse",restrict ssh-ed25519 <PUBKEY> cdn-deploy@oxpulse-chat-sdk
 //
-// This jails the key to write-only access on the CDN directory via rrsync.
+// This jails the key to write-only rsync access on the CDN directory via rrsync.
 // The key can rsync files in but cannot read or delete any existing content.
+// rsync --ignore-existing is the immutability enforcer for versioned dirs.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,19 +90,6 @@ function semverParse(v) {
 	const m = v.match(/^(\d+)\.(\d+)\.(\d+)(-(.+))?$/);
 	if (!m) return null;
 	return { major: +m[1], minor: +m[2], patch: +m[3], pre: m[5] ?? null };
-}
-
-function semverCompare(a, b) {
-	const pa = semverParse(a);
-	const pb = semverParse(b);
-	if (!pa || !pb) return 0;
-	for (const k of ['major', 'minor', 'patch']) {
-		if (pa[k] !== pb[k]) return pa[k] - pb[k];
-	}
-	// stable > prerelease
-	if (!pa.pre && pb.pre) return 1;
-	if (pa.pre && !pb.pre) return -1;
-	return 0;
 }
 
 function isStable(version) {
@@ -142,10 +144,6 @@ const SSH_TARGET = `${CDN_SSH_USER}@${CDN_SSH_HOST}`;
 const REMOTE_WIDGET_BASE = 'widget';
 const REMOTE_VERSION_DIR = `${REMOTE_WIDGET_BASE}/${VERSION}`;
 const REMOTE_LATEST_DIR = `${REMOTE_WIDGET_BASE}/latest`;
-// Temp dirs on remote for atomic deploy
-const RUN_ID = process.env.GITHUB_RUN_ID || `local-${Date.now()}`;
-const REMOTE_VERSION_TMP = `${REMOTE_WIDGET_BASE}/.tmp-${VERSION}-${RUN_ID}`;
-const REMOTE_LATEST_TMP = `${REMOTE_WIDGET_BASE}/.tmp-latest-${RUN_ID}`;
 
 // ── Write deploy key to tmp file ──────────────────────────────────────────────
 
@@ -166,8 +164,10 @@ const SSH_OPTS = [
 	'-o', 'ConnectTimeout=30',
 ];
 
-function rsync(args, description) {
-	const cmd = ['rsync', '-az', '--no-perms', '-e', `ssh ${SSH_OPTS.join(' ')}`, ...args];
+// rsync helper. extraArgs are inserted after the base flags.
+// The rrsync jail (command="rrsync -wo …",restrict) only allows rsync — no ssh mv/rm.
+function rsync(extraArgs, src, dest, description) {
+	const cmd = ['rsync', '-az', '--no-perms', '-e', `ssh ${SSH_OPTS.join(' ')}`, ...extraArgs, src, dest];
 	log(`rsync plan: ${cmd.join(' ')}`);
 	if (DRY_RUN) {
 		log(`DRY_RUN — skipping rsync (${description})`);
@@ -177,127 +177,32 @@ function rsync(args, description) {
 	if (res.status !== 0) fail(`rsync failed (${description}): exit ${res.status}`);
 }
 
-function ssh(remoteCmd, description) {
-	const args = [...SSH_OPTS, SSH_TARGET, remoteCmd];
-	log(`ssh plan: ssh ${args.join(' ')}`);
-	if (DRY_RUN) {
-		log(`DRY_RUN — skipping ssh (${description})`);
-		return '';
-	}
-	const res = spawnSync('ssh', args, { encoding: 'utf8' });
-	if (res.status !== 0) fail(`ssh failed (${description}): ${res.stderr}`);
-	return res.stdout.trim();
-}
-
-// ── Append-only guard ─────────────────────────────────────────────────────────
-// If widget/<version>/index.js already exists on the remote, compare sha256.
-// Identical → idempotent no-op exit 0.
-// Different → exit 1 (immutable URL contract violation, abort).
-
-function appendOnlyGuard() {
-	if (DRY_RUN) {
-		log(`DRY_RUN — skipping append-only guard remote check (remote hash unknown)`);
-		log(`Append-only guard logic: if remote sha256 == local sha256 → no-op; if different → exit 1`);
-		return 'not-exists'; // assume new in dry-run
-	}
-
-	// rrsync in -wo (write-only) mode does not allow reads, so we cannot
-	// directly `cat` the remote file. Instead, we rsync just index.js to a
-	// dedicated check-tmp dir and compare locally, then clean up.
-	// Alternative: use a separate read-only SSH key for verification. That is
-	// overkill; write-only rrsync naturally prevents mutation — the guard is a
-	// belt-and-suspenders local-vs-remote hash comparison using a tmp rsync.
-	//
-	// To avoid any ambiguity: we use --ignore-existing on the actual deploy rsync.
-	// The guard here uses a probe rsync of just the existing file (if it exists)
-	// to detect content drift.
-
-	const probeTmp = join(tmpdir(), `cdn-probe-${Date.now()}`);
-	mkdirSync(probeTmp, { recursive: true });
-	try {
-		// Attempt to fetch the existing index.js. If the version dir does not
-		// exist yet, rsync exits 23 (partial transfer, no files). We detect by
-		// file presence, not exit code.
-		const res = spawnSync('rsync', [
-			'-az', '--no-perms',
-			'-e', `ssh ${SSH_OPTS.join(' ')}`,
-			// source is a single file; if missing, rsync exits non-zero
-			`${SSH_TARGET}:${REMOTE_VERSION_DIR}/index.js`,
-			`${probeTmp}/`,
-		], { encoding: 'utf8' });
-
-		const probedFile = join(probeTmp, 'index.js');
-		if (!existsSync(probedFile)) {
-			// File does not exist on remote → new deploy, proceed.
-			log(`Append-only guard: ${REMOTE_VERSION_DIR}/index.js not found on remote → new version`);
-			return 'not-exists';
-		}
-
-		const remoteSha256 = createHash('sha256').update(readFileSync(probedFile)).digest('hex');
-		if (remoteSha256 === localSha256) {
-			log(`Append-only guard: sha256 match (${localSha256}) → idempotent re-run, nothing to do`);
-			return 'same';
-		}
-
-		// Different content for the same version → immutable contract violation.
-		fail(
-			`Append-only guard: ${REMOTE_VERSION_DIR}/index.js ALREADY EXISTS with different sha256.\n` +
-			`  remote sha256: ${remoteSha256}\n` +
-			`  local  sha256: ${localSha256}\n` +
-			`Refusing to overwrite a published immutable version. ` +
-			`If this is a legitimate re-build, bump the version number first.`
-		);
-	} finally {
-		try { rmSync(probeTmp, { recursive: true, force: true }); } catch {}
-	}
-}
+// ── Immutability note ─────────────────────────────────────────────────────────
+// widget/<version>/ is deployed with rsync --ignore-existing (see main()).
+// rrsync -wo allows rsync writes but refuses any read (pull/list) from the
+// sender (rrsync:170-171: "reading from write-only server is not allowed").
+// Therefore we cannot probe the remote for an existing file to compare hashes.
+// --ignore-existing is the enforcer: rsync skips every file that already
+// exists on the remote regardless of content, making a re-publish of the same
+// version a no-op at the byte level. A re-publish with DIFFERENT bytes (same
+// version, changed content) will also be a no-op — the immutable URL contract
+// is preserved. Bump the version to publish changed bytes.
 
 // ── Determine if this version should advance `latest/` ───────────────────────
-// Fetch all existing widget/<v>/ directory names from the remote, pick the
-// highest stable semver. If the current version is higher → update latest/.
+// The rrsync -wo jail blocks reads (rsync --list-only is refused: it acts as
+// a sender, which -wo forbids). We cannot query the remote for existing versions.
+// Conservative policy: update latest/ for every stable release. This is correct
+// because the release pipeline (changesets) processes one release at a time in
+// semver order — a stable publish is always the newest stable at publish time.
+// Prerelease versions never advance latest/.
 
 function shouldUpdateLatest() {
 	if (!isStable(VERSION)) {
 		log(`Version ${VERSION} is a prerelease — skipping latest/ update`);
 		return false;
 	}
-
-	if (DRY_RUN) {
-		log(`DRY_RUN — assuming ${VERSION} is the highest stable (no remote query)`);
-		return true;
-	}
-
-	// List widget/ entries on remote (just dir names).
-	// rrsync in write-only mode blocks reads. We list via rsync --list-only.
-	const res = spawnSync('rsync', [
-		'--list-only',
-		'-e', `ssh ${SSH_OPTS.join(' ')}`,
-		`${SSH_TARGET}:${REMOTE_WIDGET_BASE}/`,
-	], { encoding: 'utf8' });
-
-	if (res.status !== 0) {
-		// Remote widget/ might not exist yet — treat as "no existing versions".
-		log(`Could not list remote widget/ (${res.stderr.trim()}) — treating as first deploy; will update latest/`);
-		return true;
-	}
-
-	// Parse dir names from rsync --list-only output.
-	// Each line looks like: drwxr-xr-x          4,096 2026/06/18 10:00:00 0.3.0
-	const existing = res.stdout
-		.split('\n')
-		.map(l => l.trim().split(/\s+/).pop())
-		.filter(name => name && /^\d+\.\d+\.\d+/.test(name));
-
-	const allVersions = [...new Set([...existing, VERSION])];
-	const highestStable = allVersions
-		.filter(v => isStable(v))
-		.sort((a, b) => semverCompare(a, b))
-		.pop();
-
-	log(`Existing versions on remote: ${existing.join(', ') || '(none)'}`);
-	log(`Highest stable: ${highestStable}`);
-
-	return highestStable === VERSION;
+	log(`Version ${VERSION} is stable — will update latest/`);
+	return true;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -306,72 +211,48 @@ async function main() {
 	log(`Starting CDN publish — version=${VERSION} dry_run=${DRY_RUN}`);
 	log(`Target: ${SSH_TARGET}:${REMOTE_VERSION_DIR}/`);
 
-	// Write key file (skipped in dry-run but we still need structure for plan printing)
+	// Write key file (skipped in dry-run)
 	if (!DRY_RUN) {
 		writeFileSync(keyFile, CDN_DEPLOY_KEY + (CDN_DEPLOY_KEY.endsWith('\n') ? '' : '\n'), { mode: 0o600 });
 	}
 
 	try {
-		// 1. Append-only guard
-		const guardResult = appendOnlyGuard();
-		if (guardResult === 'same') {
-			log(`Version ${VERSION} already on CDN with matching content — nothing to do`);
-			log(`SRI: ${sriAttr}`);
-			return;
-		}
-
 		const updateLatest = shouldUpdateLatest();
 
-		// 2. Atomic deploy of version dir
-		// Rsync dist-cdn/ → remote tmp dir, then ssh mv tmp → version dir.
+		// 1. Deploy versioned dir with --ignore-existing (immutability enforcer).
+		//    rrsync -wo allows rsync writes; --ignore-existing refuses to touch any
+		//    file already present on the remote — a re-publish of the same version
+		//    is a byte-level no-op.  No read probe needed (reads are blocked by -wo).
 		log(`\n── Plan: version dir deploy ──`);
-		log(`  rsync ${DIST_CDN}/ → ${SSH_TARGET}:${REMOTE_VERSION_TMP}/`);
-		log(`  ssh mv ${REMOTE_VERSION_TMP} → ${REMOTE_VERSION_DIR}`);
+		log(`  rsync --ignore-existing ${DIST_CDN}/ → ${SSH_TARGET}:${REMOTE_VERSION_DIR}/`);
 
 		rsync(
-			[
-				`${DIST_CDN}/`,
-				`${SSH_TARGET}:${REMOTE_VERSION_TMP}/`,
-			],
-			`upload dist-cdn/ → ${REMOTE_VERSION_TMP}`
+			['--ignore-existing'],
+			`${DIST_CDN}/`,
+			`${SSH_TARGET}:${REMOTE_VERSION_DIR}/`,
+			`upload dist-cdn/ → widget/${VERSION}/ (immutable, --ignore-existing)`
 		);
 
-		// Atomic mv on the remote: rename tmp → version dir.
-		// If widget/<version>/ already exists (guard passed as 'not-exists' due to
-		// dry-run or race), mv will fail — the guard is the primary safety net.
-		ssh(
-			`mv '${REMOTE_VERSION_TMP}' '${REMOTE_VERSION_DIR}'`,
-			`atomic mv tmp → ${REMOTE_VERSION_DIR}`
-		);
+		log(`widget/${VERSION}/ deployed`);
 
-		log(`widget/${VERSION}/ deployed atomically`);
-
-		// 3. Update latest/ (if this is the highest stable version)
+		// 2. Update latest/ (stable versions only; mutable pointer — no --ignore-existing).
 		if (updateLatest) {
 			log(`\n── Plan: latest/ update ──`);
-			log(`  rsync ${DIST_CDN}/ → ${SSH_TARGET}:${REMOTE_LATEST_TMP}/`);
-			log(`  ssh rm -rf ${REMOTE_LATEST_DIR} && mv ${REMOTE_LATEST_TMP} → ${REMOTE_LATEST_DIR}`);
+			log(`  rsync ${DIST_CDN}/ → ${SSH_TARGET}:${REMOTE_LATEST_DIR}/`);
 
 			rsync(
-				[
-					`${DIST_CDN}/`,
-					`${SSH_TARGET}:${REMOTE_LATEST_TMP}/`,
-				],
-				`upload dist-cdn/ → latest tmp`
-			);
-
-			// Atomic swap: remove old latest, mv tmp → latest.
-			ssh(
-				`rm -rf '${REMOTE_LATEST_DIR}' && mv '${REMOTE_LATEST_TMP}' '${REMOTE_LATEST_DIR}'`,
-				`atomic swap latest/`
+				[],
+				`${DIST_CDN}/`,
+				`${SSH_TARGET}:${REMOTE_LATEST_DIR}/`,
+				`upload dist-cdn/ → widget/latest/ (mutable pointer)`
 			);
 
 			log(`widget/latest/ updated → ${VERSION}`);
 		} else {
-			log(`Skipping latest/ update (${VERSION} is not the highest stable)`);
+			log(`Skipping latest/ update (${VERSION} is a prerelease)`);
 		}
 
-		// 4. Final summary
+		// 3. Final summary
 		log(`\n── CDN publish complete ──`);
 		log(`URL: https://cdn.oxpulse.chat/widget/${VERSION}/index.js`);
 		log(`SRI: <script type="module"`);
