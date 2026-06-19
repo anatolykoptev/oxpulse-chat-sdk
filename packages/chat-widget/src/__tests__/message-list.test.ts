@@ -248,8 +248,9 @@ describe('MessageList', () => {
     expect(bubble).not.toBeNull();
     const label = bubble!.getAttribute('aria-label');
     expect(label).not.toBeNull();
-    // Should include sender, time, and body excerpt
-    expect(label).toContain('u1');
+    // Should include sender, time, and body excerpt.
+    // T18: own messages (selfUid === senderUid) render as "You" in aria-label.
+    expect(label).toContain('You');
     expect(label).toContain('Hello world');
     ml.destroy();
   });

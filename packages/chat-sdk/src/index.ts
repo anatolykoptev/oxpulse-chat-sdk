@@ -52,6 +52,11 @@ export type { AnonReadMintResult, AnonReadMintErrorCode } from './anon-read.js';
 export { mintNamedWriteToken, NamedWriteMintError } from './named-write.js';
 export type { MintNamedWriteOptions, NamedWriteMintErrorCode } from './named-write.js';
 
+// ─── Roster (T18) ────────────────────────────────────────────────────────────
+
+export { fetchRoster, rosterDisplayName } from './roster.js';
+export type { FetchRosterOptions } from './roster.js';
+
 // ─── Wire-codec re-exports (compression API) ─────────────────────────────────
 // Production-safe symbols only. Test-only helpers (_evictDictForTesting,
 // _resetLoaderForTesting) are intentionally excluded.

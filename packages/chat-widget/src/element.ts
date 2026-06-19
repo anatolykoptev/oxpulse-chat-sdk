@@ -21,7 +21,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer } from './ui/composer.js';
 import { isAuthError } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError } from '@oxpulse/chat-sdk';
+import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 
 const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
@@ -341,6 +341,8 @@ export class OxpulseChatElement extends HTMLElement {
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+        /** T18: roster fetch. Optional — when absent roster is disabled. */
+        getRoster?(appId: string, roomId: string): Promise<Map<string, string>>;
       }
 
       // ── Anon-read mode: mint token when allow-anon-read is set and no jwt provided ──
@@ -509,6 +511,7 @@ export class OxpulseChatElement extends HTMLElement {
           onMessage: (row: MessageRow) => void;
           onMutation?: (event: WidgetMutationEvent) => void;
           onReaction?: (event: WidgetReactionEvent) => void;
+          onRosterSignal?: () => void;
         }) => {
           return sdkClient.subscribe(roomId, {
             onMessage: args.onMessage,
@@ -552,6 +555,17 @@ export class OxpulseChatElement extends HTMLElement {
 
         removeReaction: (roomId: string, msgId: string, emoji: string) =>
           sdkClient.removeReaction?.(roomId, msgId, emoji) ?? Promise.resolve(),
+
+        // T18: roster — fetch names for OTHER writers via the same JWT.
+        // Uses the real fetchRoster helper (injected for tests via _createClient mock).
+        getRoster: sdkClient.getRoster
+          ? (roomId: string) => sdkClient.getRoster!(config.appId, roomId)
+          : (roomId: string) => fetchRoster({
+              baseUrl: resolvedBaseUrl,
+              appId: config.appId,
+              roomId,
+              jwt: resolvedJwt,
+            }),
       };
 
       // F3: Remove placeholder in a single explicit pass — keeps #styleEl, removes all else.
