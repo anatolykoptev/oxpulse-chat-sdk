@@ -24,7 +24,7 @@ import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
 import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 
-const WIDGET_VERSION = '0.1.0';
+const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
 const ELEMENT_TAG = 'oxpulse-chat';
 
 // ── OxpulseChatElement ────────────────────────────────────────────────────────

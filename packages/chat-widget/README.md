@@ -4,10 +4,16 @@ Embeddable OxPulse chat widget — `<oxpulse-chat>` Custom Element + iframe mode
 
 ## Quickstart
 
-### Script tag (zero config)
+### Script tag (CDN — primary embed channel)
+
+Load from the versioned CDN path with [Subresource Integrity](https://developer.mozilla.org/en-US/docs/Web/Security/Subresource_Integrity)
+for production. The `crossorigin` attribute is **required** when `integrity` is present.
 
 ```html
-<script type="module" src="https://cdn.oxpulse.chat/widget/0.1.0/index.js"></script>
+<script type="module"
+  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
+  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  crossorigin="anonymous"></script>
 
 <oxpulse-chat
   app-id="your-app-id"
@@ -15,6 +21,25 @@ Embeddable OxPulse chat widget — `<oxpulse-chat>` Custom Element + iframe mode
   room-id="chat-room-id">
 </oxpulse-chat>
 ```
+
+**Versioning.** Pin to a specific version path (`/widget/0.3.0/`) in production.
+`/widget/latest/` resolves to the current release and is provided for convenience only —
+do not use it where SRI or reproducible deployments matter.
+
+**CSP.** A consumer page loading the widget needs at minimum:
+
+```
+Content-Security-Policy:
+  script-src https://cdn.oxpulse.chat;
+  connect-src https://cdn.oxpulse.chat <your-api-origin>;
+```
+
+`zstd.wasm` is fetched lazily from the same versioned CDN path on first compressed frame.
+If your policy restricts `wasm-unsafe-eval` or `script-src` to a `'nonce-…'`-only list,
+add `https://cdn.oxpulse.chat` explicitly or use the npm+bundler path instead.
+
+> **Note:** The npm package channel (`@oxpulse/chat-widget` on npmjs.com) is not yet
+> bootstrapped. The CDN `<script>` tag is the primary embed channel for 0.x.
 
 ### React
 
