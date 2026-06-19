@@ -9,13 +9,71 @@ Both modes require a scoped JWT from your backend. See [quickstart.md](./quickst
 
 ---
 
+## CDN delivery (primary embed channel)
+
+The widget is distributed as a self-contained single-file ES module from `cdn.oxpulse.chat`.
+This is the **primary embed channel** for 0.x — the npm package channel is not yet bootstrapped.
+
+### Versioned path (production — recommended)
+
+Pin to an exact version. Use the versioned URL with Subresource Integrity so the browser
+verifies the file has not changed since it was built:
+
+```html
+<script type="module"
+  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
+  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  crossorigin="anonymous"></script>
+```
+
+`crossorigin="anonymous"` is **required** whenever `integrity` is present — the browser
+performs a CORS fetch to read the bytes for hash verification, and the CDN already
+responds with `Access-Control-Allow-Origin: *`.
+
+A sibling `zstd.wasm` file is fetched lazily from the same versioned path on the first
+compressed frame. No action required; it resolves automatically via the same CORS policy.
+
+### `latest/` path (convenience only)
+
+`https://cdn.oxpulse.chat/widget/latest/index.js` always resolves to the current release.
+Do **not** use it in production alongside an `integrity` attribute: the hash would mismatch
+after every release. `latest/` is suitable for quick prototypes and documentation examples
+where reproducibility is not required.
+
+### Required CSP headers
+
+A page embedding the widget needs at minimum:
+
+```
+Content-Security-Policy:
+  script-src https://cdn.oxpulse.chat;
+  connect-src https://cdn.oxpulse.chat <your-api-origin>;
+```
+
+If you restrict `script-src` to a nonce-only list, add `https://cdn.oxpulse.chat` as an
+additional allowed origin. The `zstd.wasm` fetch is covered by `connect-src` in modern
+browsers (Chromium 112+, Firefox 115+). Safari requires `script-src` to also permit the
+wasm origin; the CDN URL covers both.
+
+### Architecture note
+
+`cdn.oxpulse.chat` is served by Caddy `file_server` behind an nginx SNI front on the
+OxPulse infrastructure. Immutable versioned paths (`/widget/0.3.0/`) receive
+`Cache-Control: public, max-age=31536000, immutable`. The `latest/` symlink is served
+without `immutable`.
+
+---
+
 ## Custom Element mode
 
 ### 1. Include the script
 
 ```html
-<!-- From a CDN (replace with your preferred CDN URL or self-hosted path) -->
-<script type="module" src="https://cdn.example.com/@oxpulse/chat-widget/dist/index.js"></script>
+<!-- CDN (versioned, with SRI) — recommended -->
+<script type="module"
+  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
+  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  crossorigin="anonymous"></script>
 
 <!-- Or npm + bundler -->
 <!-- import '@oxpulse/chat-widget'; -->
@@ -239,3 +297,104 @@ Full list of available properties (sourced from `packages/chat-widget/src/ui/the
 All color tokens pass WCAG 2.1 AA contrast requirements in both built-in themes.
 
 Theme switching at runtime: set the `theme` attribute to `'light'`, `'dark'`, or `'auto'`. The widget applies `data-theme` to the host element immediately without re-bootstrapping.
+
+---
+
+## Named-write mode (`allow-write`) — T8
+
+Named-write mode lets your page POST new messages through the widget using a short-lived
+write token minted by your backend. The widget remains read-only by default; enabling
+`allow-write` and providing `write-mint-endpoint` unlocks the inline compose UI.
+
+**Scope:** inline mode only. The iframe allow-write path is deferred to a later release.
+
+### Attributes
+
+| Attribute | Required | Description |
+|---|---|---|
+| `allow-write` | Yes (boolean) | Present → enable named-write compose. Absent → read-only. |
+| `write-mint-endpoint` | Yes with `allow-write` | URL your backend exposes to mint a write token. The widget POSTs `{ roomId }` to this URL and expects `{ token: string }` in return. |
+
+### Minimal host-page setup
+
+```html
+<!-- 1. Load the widget (CDN or npm+bundler) -->
+<script type="module"
+  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
+  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  crossorigin="anonymous"></script>
+
+<!-- 2. Add the element with allow-write -->
+<oxpulse-chat
+  app-id="YOUR_APP_ID"
+  jwt="READ_JWT_FROM_YOUR_BACKEND"
+  room-id="demo-room"
+  allow-write
+  write-mint-endpoint="/api/write-token">
+</oxpulse-chat>
+```
+
+Your backend's `/api/write-token` endpoint must:
+
+1. Authenticate the request (session cookie, header token, etc.).
+2. Call `POST /api/sdk/named-write/mint` on the OxPulse server with the room ID.
+3. Return `{ "token": "<named-write-token>" }`.
+
+See [`packages/chat-sdk/src/named-write.ts`](../packages/chat-sdk/src/named-write.ts) for
+the `mintNamedWriteToken` helper if you build the backend step in TypeScript.
+
+### Programmatic mount
+
+```js
+import { mount } from '@oxpulse/chat-widget';
+
+const widget = mount(document.getElementById('chat-container'), {
+  appId: 'YOUR_APP_ID',
+  jwt: readJwt,
+  roomId: 'demo-room',
+  allowWrite: true,
+  writeMintEndpoint: '/api/write-token',
+  onMessageSent: ({ roomId, msgId }) => {
+    console.log('sent', msgId, 'in', roomId);
+  },
+  onWriteError: (err) => console.error(err.code, err.message),
+});
+```
+
+### Events
+
+The element dispatches two additional events in named-write mode:
+
+| Event | Detail | When |
+|---|---|---|
+| `oxpulse-chat:message-sent` | `{ roomId: string; msgId: string }` | Named-write send succeeded. |
+| `oxpulse-chat:write-error` | `WidgetError` (`.code`, `.message`) | Named-write send failed after the error chip was shown. |
+
+```js
+const el = document.querySelector('oxpulse-chat');
+
+el.addEventListener('oxpulse-chat:message-sent', (ev) => {
+  console.log('sent msg', ev.detail.msgId, 'in room', ev.detail.roomId);
+});
+
+el.addEventListener('oxpulse-chat:write-error', (ev) => {
+  console.error('write failed:', ev.detail.code, ev.detail.message);
+});
+```
+
+### Error codes
+
+| Code | When |
+|---|---|
+| `WRITE_MINT_FAILED` | The `write-mint-endpoint` fetch failed or returned a non-`{ token }` body. |
+| `WRITE_SEND_FAILED` | The named-write message send to the OxPulse server failed. |
+
+These extend the existing `WidgetErrorCode` union — you can handle them in the same
+`oxpulse-chat:error` listener or via the dedicated `oxpulse-chat:write-error` event above.
+
+### Combining with anon-read
+
+`allow-write` and `allow-anon-read` can be set together. The widget uses two separate
+clients: the anon-read client subscribes to the room (no `jwt` required), while the write
+client uses the minted write token for sends. This is the recommended setup for publicly
+visible rooms with moderated posting.
