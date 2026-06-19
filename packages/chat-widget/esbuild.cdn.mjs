@@ -26,7 +26,6 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-const buildDate = new Date().toISOString().slice(0, 10);
 
 const gzipAsync = promisify(gzip);
 
@@ -43,7 +42,21 @@ function findZstdWasm(startDir) {
     // pnpm virtual store: node_modules/.pnpm/@bokuweb+zstd-wasm@*/node_modules/@bokuweb/zstd-wasm
     const pnpmStore = path.join(dir, 'node_modules', '.pnpm');
     if (fs.existsSync(pnpmStore)) {
-      const entries = fs.readdirSync(pnpmStore).filter(e => e.startsWith('@bokuweb+zstd-wasm@'));
+      const entries = fs.readdirSync(pnpmStore)
+        .filter(e => e.startsWith('@bokuweb+zstd-wasm@'))
+        .sort(); // deterministic: lexicographic order (semver-safe for same-major)
+
+      // Guard: two distinct versions in the store would pick an arbitrary one and
+      // could mismatch the version esbuild bundled → fail loudly instead.
+      const versions = new Set(entries.map(e => e.replace(/^@bokuweb\+zstd-wasm@/, '')));
+      if (versions.size > 1) {
+        console.error(
+          `[build:cdn] FAIL: multiple @bokuweb/zstd-wasm versions in pnpm store: ${[...versions].join(', ')}. ` +
+          'Deduplicate before building to ensure the copied wasm matches the bundled JS.'
+        );
+        process.exit(1);
+      }
+
       for (const entry of entries) {
         const candidate = path.join(pnpmStore, entry, 'node_modules', '@bokuweb', 'zstd-wasm', 'dist', 'web', 'zstd.wasm');
         if (fs.existsSync(candidate)) return candidate;
@@ -67,7 +80,6 @@ if (!zstdWasmSrc) {
 const banner = [
   '/*!',
   ` * @oxpulse/chat-widget v${pkg.version}`,
-  ` * Built: ${buildDate}`,
   ` * License: AGPL-3.0-or-later (https://www.gnu.org/licenses/agpl-3.0.html)`,
   ` * Copyright (c) OxPulse contributors`,
   ' */',
