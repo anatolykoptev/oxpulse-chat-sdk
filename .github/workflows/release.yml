@@ -133,6 +133,7 @@ jobs:
       - name: Create Version PR or Publish
         # SHA-pinned. v1.9.0
         # Source: https://github.com/changesets/action/releases/tag/v1.9.0
+        id: changesets
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d
         with:
           # version: runs `changeset version` inside the action to bump
@@ -158,3 +159,50 @@ jobs:
           # NPM_PROVENANCE: intentionally absent — provenance requires a PUBLIC
           # source repo. Set NPM_PROVENANCE=1 here when this repo goes public.
           TRUSTED_PUBLISH: '1'
+
+      # ── CDN publish (Phase 3) ────────────────────────────────────────────────
+      # Runs ONLY on the publish phase (no pending changesets → packages were
+      # just bumped and npm-published). Gated on steps.changesets.outputs.published
+      # == 'true', which is set by changesets/action when the publish script emits
+      # "New tag: <pkg>@<version>" lines (release-npm-packages.mjs now emits these
+      # on every successful OIDC publish).
+      #
+      # Soft-skip: if CDN_DEPLOY_KEY secret is absent the publisher logs a
+      # clear message and exits 0 — the release is not failed.  This lets the
+      # workflow merge safely BEFORE the operator installs the deploy key.
+      #
+      # Deploy strategy: rsync-only (no ssh mv, no ssh rm-rf).  The authorized_keys
+      # jail is command="rrsync -wo …",restrict — rrsync rejects any
+      # SSH_ORIGINAL_COMMAND whose first token is not "rsync".  Shell commands
+      # (mv, rm, cat) are unconditionally refused.
+      #
+      # Immutability: widget/<version>/ is deployed with rsync --ignore-existing.
+      # Files already present on the remote are not overwritten — a re-publish of
+      # the same version is a no-op at the byte level.
+      #
+      # latest/: deployed with plain rsync overwrite (intentionally mutable pointer).
+      # Only advanced for stable releases.
+      #
+      # Operator setup required (one-time, before this step goes live):
+      #   1. Generate ed25519 key pair:
+      #        ssh-keygen -t ed25519 -f cdn_deploy_key -C "cdn-deploy@oxpulse-chat-sdk" -N ""
+      #   2. Install public key on the box (~/.ssh/authorized_keys), jailed to
+      #      the CDN dir via rrsync:
+      #        command="rrsync -wo /home/krolik/deploy/krolik-server/files/cdn-oxpulse",restrict ssh-ed25519 <PUBKEY> cdn-deploy@oxpulse-chat-sdk
+      #   3. Add GH secrets (repo → Settings → Secrets → Actions):
+      #        CDN_DEPLOY_KEY   — content of cdn_deploy_key (private key, PEM)
+      #        CDN_SSH_HOST     — 192.9.243.148
+      #        CDN_SSH_USER     — krolik
+
+      - name: Build CDN bundle
+        if: steps.changesets.outputs.published == 'true'
+        run: pnpm --filter @oxpulse/chat-widget build:cdn
+
+      - name: Publish widget bundle to cdn.oxpulse.chat
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+          CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+          CDN_DEPLOY_KEY: ${{ secrets.CDN_DEPLOY_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node scripts/publish-widget-cdn.mjs
