@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageList } from '../ui/message-list.js';
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
+import { OxpulseChatElement, defineElement } from '../element.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -243,5 +244,125 @@ describe('MessageList — roster (T18)', () => {
     const senderAfter = container.querySelector('.oxp-bubble-sender');
     expect(senderAfter!.textContent).toBe('Alice Updated');
     ml.destroy();
+  });
+});
+
+// ── Element-level integration: onRosterSignal forwarded through real adapter ──
+
+/**
+ * MAJOR-2 regression guard.
+ *
+ * The prior bug: element.ts `widgetClient.subscribe` accepted `onRosterSignal`
+ * in its arg type but did NOT forward it to `sdkClient.subscribe`. The message-list
+ * tests (above) never caught this because `makeMockClient().subscribe` captures args
+ * directly — it bypasses the element.ts adapter entirely.
+ *
+ * This test drives the REAL element.ts adapter path:
+ *   OxpulseChatElement → element.ts widgetClient.subscribe → sdkClient.subscribe
+ * and asserts that firing `onRosterSignal` from the sdkClient's captured args
+ * triggers a second fetchRoster (roster re-fetch) in the assembled widget.
+ *
+ * Red-on-revert: remove `onRosterSignal: args.onRosterSignal` from the
+ * sdkClient.subscribe call in element.ts and this test goes RED because
+ * fetchRosterImpl is called only once (mount-time), not twice.
+ */
+describe('OxpulseChatElement — roster signal forwarded through element adapter (MAJOR-2 guard)', () => {
+  function makeJwt(payload: Record<string, unknown>): string {
+    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    const body = btoa(JSON.stringify(payload))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    return `${header}.${body}.fakesig`;
+  }
+
+  const LOCALHOST_JWT = makeJwt({ aud_origins: ['http://localhost:*'], sub: 'ep_test' });
+
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    defineElement();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+  });
+
+  it('type:"roster" SSE event triggers second fetchRoster through the real element adapter', async () => {
+    // Capture args that the element.ts adapter passes to sdkClient.subscribe.
+    // These are the BRIDGED args produced by element.ts, not MessageList's raw args —
+    // this is the seam the original bug lived in.
+    let capturedSdkSubscribeArgs: {
+      onRosterSignal?: () => void;
+      [k: string]: unknown;
+    } | null = null;
+
+    // Track roster endpoint HTTP calls via globalThis.fetch mock.
+    // fetchRoster in the element uses globalThis.fetch (injected to roster.ts via
+    // fetchImpl ?? globalThis.fetch). In jsdom, vi.spyOn(globalThis, 'fetch') intercepts it.
+    let rosterFetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string | URL | Request) => {
+      const urlStr = String(url instanceof URL ? url.toString() : url instanceof Request ? url.url : url);
+      if (urlStr.includes('/api/sdk/roster')) {
+        rosterFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ roster: {} }),
+        } as unknown as Response;
+      }
+      // Passthrough for anything else (shouldn't hit in this test).
+      return originalFetch(url as Parameters<typeof originalFetch>[0]);
+    });
+
+    // Inject a real-shaped sdkClient stub whose subscribe captures the bridged args.
+    const sdkClientStub = {
+      list: vi.fn().mockResolvedValue({ items: [], hasNext: false }),
+      subscribe: vi.fn().mockImplementation((_roomId: string, args: Record<string, unknown>) => {
+        capturedSdkSubscribeArgs = args as typeof capturedSdkSubscribeArgs;
+        return () => {};
+      }),
+      sendText: vi.fn().mockResolvedValue({ msgId: 'msg-1' }),
+      getReactions: vi.fn().mockResolvedValue({ counts: {}, users: {}, truncated: false }),
+    };
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({
+      // Cast through unknown: stub satisfies the RawClient contract within element.ts.
+      // The _createClient type in WidgetConfig uses the public MessageRow import;
+      // the runtime shape is what matters, not the full nominal type.
+      _createClient: () => sdkClientStub as unknown as Parameters<typeof el._setCallbacks>[0] extends { _createClient?: (o: infer _O) => infer R } ? R : never,
+    });
+    container.appendChild(el);
+
+    // Wait for bootstrap (list + subscribe + roster fetch).
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Mount-time: element fetched the roster once via fetchRoster().
+    expect(rosterFetchCount).toBe(1);
+
+    // The real element adapter must have forwarded onRosterSignal to sdkClient.subscribe.
+    // If element.ts drops the callback, this is undefined and the test fails here.
+    expect(capturedSdkSubscribeArgs?.onRosterSignal).toBeDefined();
+
+    // Simulate the SSE type:"roster" event by calling the callback the SDK would invoke.
+    capturedSdkSubscribeArgs!.onRosterSignal!();
+
+    // Wait for debounce (100ms) + re-fetch.
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Re-fetch must have fired: rosterFetchCount must be 2.
+    // Red-on-revert: remove `onRosterSignal: args.onRosterSignal` from element.ts
+    // sdkClient.subscribe → capturedSdkSubscribeArgs.onRosterSignal is undefined →
+    // test fails at the expect above, or rosterFetchCount stays at 1.
+    expect(rosterFetchCount).toBe(2);
+
+    el.destroy();
+    globalThis.fetch = originalFetch;
   });
 });

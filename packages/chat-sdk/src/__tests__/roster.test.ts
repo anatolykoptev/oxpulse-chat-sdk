@@ -11,13 +11,23 @@
  *   7. rosterDisplayName — returns name from map
  *   8. rosterDisplayName — miss returns first 8 chars of epid
  *   9. type:"roster" SSE signal — fires onRosterSignal callback
- *  10. FF5 (issuer-disjointness): grant-issuer token !== SDK-issuer token (CI guard)
- *  11. FF6 (alg-pin): client never constructs alg:none or alg:HS256 grant tokens
+ *
+ * NOTE — FF5 issuer-disjointness: issuer-disjointness (grant iss=<app_id> vs
+ * SDK iss=oxpulse) is enforced SERVER-SIDE by the /api/sdk/tokens exchange
+ * endpoint (Validation::new(EdDSA) + iss check). The client has no mechanism to
+ * distinguish issuers — it receives opaque string tokens and forwards them. A
+ * client-side tautology asserting 'piter-now' !== 'oxpulse' on literal objects
+ * provides no coverage against a real regression. Tests belong where enforcement
+ * lives: server integration tests for the /api/sdk/tokens exchange. Removed.
+ *
+ *  10. FF6 (alg-pin): mintNamedWriteToken rejects alg:none and alg:HS256 tokens
+ *      returned by the mint endpoint — real production guard, red-on-revert.
  */
 
 import { describe, it, expect, vi } from 'vitest';
 import { fetchRoster, rosterDisplayName } from '../roster.js';
 import { SDKChatError } from '../errors.js';
+import { mintNamedWriteToken, NamedWriteMintError } from '../named-write.js';
 
 const BASE_URL = 'https://chat.example.com';
 const APP_ID = 'app-demo';
@@ -141,140 +151,86 @@ describe('rosterDisplayName', () => {
   });
 });
 
-// ── FF5: issuer-disjointness guard ────────────────────────────────────────────
+// ── FF6: alg-pin guard (real production guard in mintNamedWriteToken) ─────────
 
-describe('FF5 issuer-disjointness', () => {
+describe('FF6 alg-pin: mintNamedWriteToken rejects alg:none and alg:HS256 from mint endpoint', () => {
   /**
-   * The grant JWT (minted by the embedding client's backend) uses iss=<app_id>
-   * (e.g. iss="piter-now").  The SDK JWT (minted by OxPulse's /api/sdk/tokens)
-   * uses iss="oxpulse".  These MUST be disjoint — a grant-issuer token must
-   * never be accepted where an SDK-issuer token is required.
+   * Defense-in-depth: the server enforces EdDSA at the /api/sdk/tokens exchange
+   * (T2 Validation::new(EdDSA)), but mintNamedWriteToken ALSO inspects the returned
+   * token's header and throws NamedWriteMintError('mint_failed') for any alg ≠ EdDSA.
    *
-   * This test asserts the structural invariant at the client layer: the widget
-   * resolves TWO separate JWTs from two separate mint paths.  If the two tokens
-   * share the same issuer, they are indistinguishable at the call-site.
+   * These tests call the REAL mintNamedWriteToken via a mock fetch that simulates
+   * a misconfigured mint endpoint returning a non-EdDSA token.
    *
-   * Red-on-revert: remove the separate mint call for writeJwt (collapse to one
-   * token) and this test goes RED because the two captured tokens become equal.
-   */
-  it('grant-JWT iss (app-id) and SDK-JWT iss (oxpulse) must differ', () => {
-    // Representative examples: grant JWT carries iss matching the app identifier;
-    // SDK JWT carries iss="oxpulse" per the server mint contract.
-    const grantPayload = { iss: 'piter-now', sub: 'ep_goldentest001', name: 'Alice', room: 'room1' };
-    const sdkPayload   = { iss: 'oxpulse',  sub: 'ep_goldentest001', scope: 'chat:read:room1' };
-
-    // Structural: issuers are disjoint.
-    expect(grantPayload.iss).not.toBe(sdkPayload.iss);
-    // Guard: neither issuer is blank or undefined (a blank issuer string would
-    // silently pass JWT parsers that accept empty iss — known class of bug).
-    expect(grantPayload.iss.length).toBeGreaterThan(0);
-    expect(sdkPayload.iss.length).toBeGreaterThan(0);
-  });
-
-  /**
-   * Disjointness must hold across arbitrary app IDs — not just "piter-now".
-   * The SDK-issuer "oxpulse" must not coincide with any valid app_id used as
-   * a grant issuer.
-   */
-  it('SDK issuer string "oxpulse" must not be a valid app_id for grant tokens', () => {
-    // Structural: "oxpulse" is reserved for SDK JWTs.
-    // An app_id of "oxpulse" would collapse the two namespaces.
-    const sdkIssuer = 'oxpulse';
-    const exampleAppIds = ['piter-now', 'demo-marketplace', 'partner-acme', 'event-app-001'];
-    for (const appId of exampleAppIds) {
-      expect(appId).not.toBe(sdkIssuer);
-    }
-  });
-});
-
-// ── FF6: alg-pin guard ────────────────────────────────────────────────────────
-
-describe('FF6 alg-pin: named-write / grant path must reject alg:none and alg:HS256', () => {
-  /**
-   * The grant token and the exchange for an SDK JWT MUST use EdDSA only.
-   * alg:none and alg:HS256 must never be accepted.
-   *
-   * At the client layer, `mintNamedWriteToken` only sends the raw grant token to
-   * the server's exchange endpoint — the server enforces alg-pin.  The client's
-   * role is to never CONSTRUCT a non-EdDSA token itself.
-   *
-   * This test asserts that:
-   *  1. The client never sets alg:none or alg:HS256 in a locally-crafted header.
-   *  2. A token with alg:none in its header can be detected and rejected before
-   *     forwarding to the server.
-   *
-   * Red-on-revert: add code that constructs or forwards a token with alg=none/HS256
-   * and the test goes RED.
+   * Red-on-revert: remove the parseJwtAlg + alg-pin check from named-write.ts and
+   * these tests go RED (no NamedWriteMintError thrown for the bad-alg tokens).
    */
 
-  function parseJwtHeader(token: string): Record<string, unknown> {
-    const [headerB64] = token.split('.');
-    if (!headerB64) throw new Error('malformed JWT');
-    // URL-safe base64 → standard base64
-    const std = headerB64.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = std + '='.repeat((4 - (std.length % 4)) % 4);
-    return JSON.parse(atob(padded)) as Record<string, unknown>;
-  }
-
-  function isEdDSA(header: Record<string, unknown>): boolean {
-    return header['alg'] === 'EdDSA';
-  }
-
-  it('alg:none token is rejected by EdDSA alg-pin check', () => {
-    // Construct a JWT with alg:none (the CVE-2015-9235 class attack).
-    const noneHeader = btoa(JSON.stringify({ alg: 'none', typ: 'JWT' }))
+  /** Build a JWT with a given alg field for use as a mock mint response. */
+  function makeFakeToken(alg: string): string {
+    const header = btoa(JSON.stringify({ alg, typ: 'JWT' }))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     const payload = btoa(JSON.stringify({ iss: 'piter-now', sub: 'ep_x' }))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    const noneToken = `${noneHeader}.${payload}.`;
+    return `${header}.${payload}.fakesig`;
+  }
 
-    const header = parseJwtHeader(noneToken);
-    // The alg-pin check rejects anything that is not EdDSA.
-    expect(isEdDSA(header)).toBe(false);
-    expect(header['alg']).toBe('none');
+  const EDDSA_TOKEN =
+    'eyJhbGciOiJFZERTQSIsImtpZCI6InBpdGVyLXYxIiwidHlwIjoiSldUIn0.' + // gitleaks:allow
+    'eyJpc3MiOiJwaXRlci1ub3ciLCJzdWIiOiJlcF9nb2xkZW50ZXN0MDAxIn0.' +
+    'fakesig';
+
+  function makeMintFetch(token: string): typeof fetch {
+    return vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ token }),
+    } as unknown as Response);
+  }
+
+  it('rejects alg:none token returned by mint endpoint', async () => {
+    const noneToken = makeFakeToken('none');
+    const fetchImpl = makeMintFetch(noneToken);
+
+    await expect(
+      mintNamedWriteToken({
+        mintEndpoint: 'https://example.com/mint',
+        roomId: 'room1',
+        fetchImpl,
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(NamedWriteMintError);
+      expect((err as NamedWriteMintError).code).toBe('mint_failed');
+      return true;
+    });
   });
 
-  it('alg:HS256 token is rejected by EdDSA alg-pin check', () => {
-    // Construct a JWT with alg:HS256 (HMAC confusion attack).
-    const hs256Header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    const payload = btoa(JSON.stringify({ iss: 'piter-now', sub: 'ep_x' }))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    const hs256Token = `${hs256Header}.${payload}.fakesig`;
+  it('rejects alg:HS256 token returned by mint endpoint', async () => {
+    const hs256Token = makeFakeToken('HS256');
+    const fetchImpl = makeMintFetch(hs256Token);
 
-    const header = parseJwtHeader(hs256Token);
-    expect(isEdDSA(header)).toBe(false);
-    expect(header['alg']).toBe('HS256');
+    await expect(
+      mintNamedWriteToken({
+        mintEndpoint: 'https://example.com/mint',
+        roomId: 'room1',
+        fetchImpl,
+      }),
+    ).rejects.toSatisfy((err: unknown) => {
+      expect(err).toBeInstanceOf(NamedWriteMintError);
+      expect((err as NamedWriteMintError).code).toBe('mint_failed');
+      return true;
+    });
   });
 
-  it('EdDSA token passes the alg-pin check', () => {
-    // The golden vector from the plan — alg=EdDSA.
-    const eddsaToken =
-      'eyJhbGciOiJFZERTQSIsImtpZCI6InBpdGVyLXYxIiwidHlwIjoiSldUIn0' +
-      '.eyJpc3MiOiJwaXRlci1ub3ciLCJzdWIiOiJlcF9nb2xkZW50ZXN0MDAxIn0' +
-      '.fakesig';
+  it('accepts EdDSA token returned by mint endpoint', async () => {
+    const fetchImpl = makeMintFetch(EDDSA_TOKEN);
 
-    const header = parseJwtHeader(eddsaToken);
-    expect(isEdDSA(header)).toBe(true);
-    expect(header['alg']).toBe('EdDSA');
-  });
-
-  it('golden vector header has alg:EdDSA and kid:piter-v1', () => {
-    // Full golden vector from Phase B plan §T5 (W1 review carry-forward).
-    const goldenToken =
-      'eyJhbGciOiJFZERTQSIsImtpZCI6InBpdGVyLXYxIiwidHlwIjoiSldUIn0.' +
-      'eyJpc3MiOiJwaXRlci1ub3ciLCJzdWIiOiJlcF9nb2xkZW50ZXN0MDAxIiwiZXhwIjox' +
-      'NzUwMDAwMTIwLCJpYXQiOjE3NTAwMDAwMDAsIm5hbWUiOiLQkNC90LDRgtC-0LvQuNC5' +
-      'Iiwicm9vbSI6ImV2ZW50LXNwYi0yMDI2LXN1bW1lciJ9.' +
-      'bOj_BX7WXF2rXBvSWD8r4cB-lW3OooR8ra8OKw2xpG8HdFVeCaaAajY95vbUCHt2VLi-' +
-      'sHmUmHiniXVu5yseCg';
-
-    const header = parseJwtHeader(goldenToken);
-    expect(header['alg']).toBe('EdDSA');
-    expect(header['kid']).toBe('piter-v1');
-    expect(header['typ']).toBe('JWT');
-    // Structural: NOT alg:none and NOT alg:HS256
-    expect(header['alg']).not.toBe('none');
-    expect(header['alg']).not.toBe('HS256');
+    const result = await mintNamedWriteToken({
+      mintEndpoint: 'https://example.com/mint',
+      roomId: 'room1',
+      fetchImpl,
+    });
+    // Returns the raw token string — no error thrown.
+    expect(result).toBe(EDDSA_TOKEN);
   });
 });

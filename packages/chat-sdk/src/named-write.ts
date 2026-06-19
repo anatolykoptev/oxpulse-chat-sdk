@@ -41,6 +41,26 @@ export class NamedWriteMintError extends Error {
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
+/**
+ * Parse the `alg` field from a JWT header without validating the signature.
+ * Returns the alg string, or null if the header is malformed.
+ */
+function parseJwtAlg(token: string): string | null {
+  const dot = token.indexOf('.');
+  if (dot === -1) return null;
+  const headerB64 = token.slice(0, dot);
+  // URL-safe base64 → standard base64
+  const std = headerB64.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = std + '='.repeat((4 - (std.length % 4)) % 4);
+  try {
+    const header = JSON.parse(atob(padded)) as Record<string, unknown>;
+    const alg = header['alg'];
+    return typeof alg === 'string' ? alg : null;
+  } catch {
+    return null;
+  }
+}
+
 function statusToCode(status: number): NamedWriteMintErrorCode {
   if (status === 401) return 'unauthorized';
   if (status === 403) return 'forbidden';
@@ -98,6 +118,18 @@ export async function mintNamedWriteToken(opts: MintNamedWriteOptions): Promise<
     throw new NamedWriteMintError(
       'mint_failed',
       'named-write-mint: response missing or invalid token field',
+      response.status,
+    );
+  }
+
+  // Defense-in-depth alg-pin: the server-side exchange enforces EdDSA (T2
+  // Validation::new(EdDSA)), but the client guards here as well so a misconfigured
+  // mint endpoint returning alg:none or alg:HS256 is caught before the token is used.
+  const algHeader = parseJwtAlg(body.token);
+  if (algHeader !== 'EdDSA') {
+    throw new NamedWriteMintError(
+      'mint_failed',
+      `named-write-mint: token alg must be EdDSA, got ${String(algHeader)}`,
       response.status,
     );
   }

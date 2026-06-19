@@ -334,6 +334,7 @@ export class OxpulseChatElement extends HTMLElement {
         subscribe(roomId: string, args: {
           onMessage: (row: MessageRow) => void;
           onError?: (err: unknown) => void;
+          onRosterSignal?: () => void;
           onMutation?: (event: SDKMutationEvent) => void;
           onReaction?: (event: SDKReactionEvent) => void;
         }): () => void;
@@ -341,8 +342,6 @@ export class OxpulseChatElement extends HTMLElement {
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
-        /** T18: roster fetch. Optional — when absent roster is disabled. */
-        getRoster?(appId: string, roomId: string): Promise<Map<string, string>>;
       }
 
       // ── Anon-read mode: mint token when allow-anon-read is set and no jwt provided ──
@@ -516,6 +515,7 @@ export class OxpulseChatElement extends HTMLElement {
           return sdkClient.subscribe(roomId, {
             onMessage: args.onMessage,
             onError: handleSubscribeError,
+            onRosterSignal: args.onRosterSignal,
             onMutation: args.onMutation
               ? (sdkEv: SDKMutationEvent): void => {
                   // Widget MutationEvent shape is compatible with SDK's (same fields used).
@@ -557,15 +557,12 @@ export class OxpulseChatElement extends HTMLElement {
           sdkClient.removeReaction?.(roomId, msgId, emoji) ?? Promise.resolve(),
 
         // T18: roster — fetch names for OTHER writers via the same JWT.
-        // Uses the real fetchRoster helper (injected for tests via _createClient mock).
-        getRoster: sdkClient.getRoster
-          ? (roomId: string) => sdkClient.getRoster!(config.appId, roomId)
-          : (roomId: string) => fetchRoster({
-              baseUrl: resolvedBaseUrl,
-              appId: config.appId,
-              roomId,
-              jwt: resolvedJwt,
-            }),
+        getRoster: (roomId: string) => fetchRoster({
+          baseUrl: resolvedBaseUrl,
+          appId: config.appId,
+          roomId,
+          jwt: resolvedJwt,
+        }),
       };
 
       // F3: Remove placeholder in a single explicit pass — keeps #styleEl, removes all else.

@@ -76,6 +76,7 @@ export interface WidgetConfig {
     subscribe(roomId: string, args: {
       onMessage: (row: import('./ui/message-list.js').MessageRow) => void;
       onError?: (err: unknown) => void;
+      onRosterSignal?: () => void;
       onMutation?: (event: { msgId: string; op: string; deletedAt?: string; editedAt?: string; [k: string]: unknown }) => void;
       onReaction?: (event: { msgId: string; op: 'reaction_add' | 'reaction_remove'; reaction: string; userId: string; [k: string]: unknown }) => void;
     }): () => void;
