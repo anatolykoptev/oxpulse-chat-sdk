@@ -17,7 +17,7 @@ import { sendToParent, setParentOrigin, onParentMessage } from './postmessage.js
 import { checkOrigin } from './bootstrap.js';
 import { WidgetError, type WidgetConfig } from './types.js';
 
-const WIDGET_VERSION = '0.1.0';
+const WIDGET_VERSION = __WIDGET_VERSION__;
 
 /**
  * Bootstrap the iframe-mode widget.
