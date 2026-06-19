@@ -133,6 +133,7 @@ jobs:
       - name: Create Version PR or Publish
         # SHA-pinned. v1.9.0
         # Source: https://github.com/changesets/action/releases/tag/v1.9.0
+        id: changesets
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d
         with:
           # version: runs `changeset version` inside the action to bump
@@ -158,3 +159,45 @@ jobs:
           # NPM_PROVENANCE: intentionally absent — provenance requires a PUBLIC
           # source repo. Set NPM_PROVENANCE=1 here when this repo goes public.
           TRUSTED_PUBLISH: '1'
+
+      # ── CDN publish (Phase 3) ────────────────────────────────────────────────
+      # Runs ONLY on the publish phase (no pending changesets → packages were
+      # just bumped and npm-published). Gated on the same condition that gates
+      # the npm publish step above.
+      #
+      # Soft-skip: if CDN_DEPLOY_KEY secret is absent the publisher logs a
+      # clear message and exits 0 — the release is not failed.  This lets the
+      # workflow merge safely BEFORE the operator installs the deploy key.
+      #
+      # Atomic deploy: the publisher rsyncs dist-cdn/ to a .tmp-<version>-<runid>/
+      # directory on the box, then issues an `ssh … mv` to place it atomically.
+      # This avoids a window where Caddy (Cache-Control: immutable, 1y) serves
+      # a partial upload and caches the 404 forever.
+      #
+      # Append-only guard: if widget/<version>/index.js already exists on the
+      # remote with a DIFFERENT sha256, the publisher exits 1 and aborts.
+      # Identical sha256 → idempotent no-op, exit 0.
+      #
+      # Operator setup required (one-time, before this step goes live):
+      #   1. Generate ed25519 key pair:
+      #        ssh-keygen -t ed25519 -f cdn_deploy_key -C "cdn-deploy@oxpulse-chat-sdk" -N ""
+      #   2. Install public key on the box (~/.ssh/authorized_keys), jailed to
+      #      the CDN dir via rrsync:
+      #        command="rrsync -wo /home/krolik/deploy/krolik-server/files/cdn-oxpulse",restrict ssh-ed25519 <PUBKEY> cdn-deploy@oxpulse-chat-sdk
+      #   3. Add GH secrets (repo → Settings → Secrets → Actions):
+      #        CDN_DEPLOY_KEY   — content of cdn_deploy_key (private key, PEM)
+      #        CDN_SSH_HOST     — 192.9.243.148
+      #        CDN_SSH_USER     — krolik
+
+      - name: Build CDN bundle
+        if: steps.changesets.outputs.published == 'true'
+        run: pnpm --filter @oxpulse/chat-widget build:cdn
+
+      - name: Publish widget bundle to cdn.oxpulse.chat
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+          CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+          CDN_DEPLOY_KEY: ${{ secrets.CDN_DEPLOY_KEY }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node scripts/publish-widget-cdn.mjs
