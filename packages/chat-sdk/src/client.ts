@@ -747,6 +747,11 @@ export class SDKChatClient {
           };
           // W6: dispatch transient events that arrive on the default channel.
           if (data.type && data.type !== 'message') {
+            // T18: roster invalidation signal — carries no data, just a re-fetch trigger.
+            if (data.type === 'roster') {
+              args.onRosterSignal?.();
+              return;
+            }
             dispatchTransient(data.type, data as unknown as Record<string, unknown>, args);
             return;
           }

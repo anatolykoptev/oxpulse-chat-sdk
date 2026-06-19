@@ -68,11 +68,17 @@ export interface MessageListClient {
     onMessage: (row: MessageRow) => void;
     onMutation?: (event: MutationEvent) => void;
     onReaction?: (event: ReactionEvent) => void;
+    onRosterSignal?: () => void;
   }): () => void;
   /** Optional — reactions support. If absent, reactions are disabled. */
   getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
   sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
   removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+  /**
+   * T18: Fetch roster for the room.
+   * Returns a Map<epid, displayName>.  Optional — when absent roster is disabled.
+   */
+  getRoster?(roomId: string): Promise<Map<string, string>>;
 }
 
 // ── Constructor options ───────────────────────────────────────────────────────
@@ -274,6 +280,13 @@ export class MessageList {
   #shadowHost?: ShadowRoot;
   /** W2.2 slice 5: highest seq value seen — used for resume token on reconnect. */
   #lastSeq = 0;
+  /**
+   * T18: Roster cache — epid → display_name.
+   * Populated on mount via getRoster() and refreshed on `type:"roster"` SSE signal.
+   * Debounce timer: coalesces rapid SSE roster signals (avoid N concurrent fetches).
+   */
+  #roster: Map<string, string> = new Map();
+  #rosterDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -338,6 +351,11 @@ export class MessageList {
     this.#order = [];
     this.#reactions.clear();
     this.#inflight.clear();
+    this.#roster.clear();
+    if (this.#rosterDebounceTimer !== null) {
+      clearTimeout(this.#rosterDebounceTimer);
+      this.#rosterDebounceTimer = null;
+    }
     if (this.#listEl && this.#listEl.parentNode) {
       this.#listEl.parentNode.removeChild(this.#listEl);
     }
@@ -345,6 +363,41 @@ export class MessageList {
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * T18: Fetch (or re-fetch) the roster and store in #roster.
+   * Re-renders all visible bubbles to update sender names.
+   * Called on mount and on SSE `type:"roster"` signal.
+   */
+  async #fetchRoster(): Promise<void> {
+    if (!this.#client.getRoster) return;
+    try {
+      const map = await this.#client.getRoster(this.#roomId);
+      if (this.#signal.aborted) return;
+      this.#roster = map;
+      // Re-render all bubbles so sender names update immediately.
+      this.#renderAll();
+    } catch (err) {
+      // Non-critical: roster miss → fallback rendering still works.
+      console.warn('[MessageList] fetchRoster failed:', err);
+    }
+  }
+
+  /**
+   * T18: Debounced roster refresh triggered by SSE `type:"roster"` signals.
+   * Coalesces rapid bursts (e.g. N writers joining within 100ms) into one fetch.
+   */
+  #scheduleRosterRefresh(): void {
+    if (this.#rosterDebounceTimer !== null) {
+      clearTimeout(this.#rosterDebounceTimer);
+    }
+    this.#rosterDebounceTimer = setTimeout(() => {
+      this.#rosterDebounceTimer = null;
+      if (!this.#signal.aborted) {
+        void this.#fetchRoster();
+      }
+    }, 100);
+  }
 
   /** Batch-fetch reactions for all currently visible messages. */
   async #fetchAllReactions(): Promise<void> {
@@ -673,8 +726,11 @@ export class MessageList {
     el.setAttribute('data-msg-id', row.msgId);
     if (chained) el.setAttribute('data-chained', 'true');
 
-    // B4: aria-label for screen readers
-    const senderLabel = `User ${row.senderUid.slice(-6)}`;
+    // B4: aria-label for screen readers.
+    // T18: use roster name for other writers; "You" for self.
+    // escapeHtml on roster name in case it contains special chars in the attribute context.
+    const rosterName = isSelf ? 'You' : (this.#roster.get(row.senderUid) ?? row.senderUid.slice(0, 8));
+    const senderLabel = escapeHtml(rosterName);
     const timeText = formatTime(rowTime(row));
     const plainBody = decodeText(row).replace(/\n/g, ' ').slice(0, 200);
     el.setAttribute('aria-label', `Message from ${senderLabel} at ${timeText}: ${plainBody}`);
@@ -685,15 +741,27 @@ export class MessageList {
 
   /** Populate or update the interior of a bubble element. */
   #populateBubble(el: HTMLElement, row: MessageRow, chained: boolean): void {
+    const isSelf = row.senderUid === this.#selfUid;
+
     // Preserve existing reaction cluster if present (reactions are managed separately)
     const existingCluster = el.querySelector('.oxp-bubble-reactions');
 
     el.innerHTML = '';
 
-    // Sender label (hidden when chained via CSS)
+    // Sender label (hidden when chained via CSS).
+    // T18: resolve name from roster for OTHER writers (not selfUid).
+    // XSS-safe: always textContent, never innerHTML (SEC-CR-003 / FF3).
     const senderEl = document.createElement('div');
     senderEl.className = 'oxp-bubble-sender';
-    senderEl.textContent = `User ${row.senderUid.slice(-6)}`;
+    if (isSelf) {
+      // Own messages: show "You" or selfUid short-form — not from attacker-controlled roster.
+      senderEl.textContent = 'You';
+    } else {
+      // Other writers: resolve from roster map; miss → epid short-form (first 8 chars).
+      const rosterName = this.#roster.get(row.senderUid);
+      // SEC-CR-003: textContent assignment is XSS-safe — no innerHTML or attribute sink.
+      senderEl.textContent = rosterName ?? row.senderUid.slice(0, 8);
+    }
     el.appendChild(senderEl);
 
     // Body
@@ -893,10 +961,17 @@ export class MessageList {
       onMessage: (row) => this.#handleNewMessage(row),
       onMutation: (event) => this.#handleMutation(event),
       onReaction: (event) => this.#handleReaction(event),
+      // T18: roster SSE invalidation signal — re-fetch roster on debounce.
+      onRosterSignal: () => this.#scheduleRosterRefresh(),
     });
 
     if (this.#client.getReactions && this.#order.length > 0) {
       void this.#fetchAllReactions();
+    }
+
+    // T18: fetch roster on mount so initial history has names immediately.
+    if (this.#client.getRoster) {
+      void this.#fetchRoster();
     }
   }
 

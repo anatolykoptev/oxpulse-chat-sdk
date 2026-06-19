@@ -21,7 +21,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer } from './ui/composer.js';
 import { isAuthError } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError } from '@oxpulse/chat-sdk';
+import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 
 const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
@@ -334,6 +334,7 @@ export class OxpulseChatElement extends HTMLElement {
         subscribe(roomId: string, args: {
           onMessage: (row: MessageRow) => void;
           onError?: (err: unknown) => void;
+          onRosterSignal?: () => void;
           onMutation?: (event: SDKMutationEvent) => void;
           onReaction?: (event: SDKReactionEvent) => void;
         }): () => void;
@@ -509,10 +510,12 @@ export class OxpulseChatElement extends HTMLElement {
           onMessage: (row: MessageRow) => void;
           onMutation?: (event: WidgetMutationEvent) => void;
           onReaction?: (event: WidgetReactionEvent) => void;
+          onRosterSignal?: () => void;
         }) => {
           return sdkClient.subscribe(roomId, {
             onMessage: args.onMessage,
             onError: handleSubscribeError,
+            onRosterSignal: args.onRosterSignal,
             onMutation: args.onMutation
               ? (sdkEv: SDKMutationEvent): void => {
                   // Widget MutationEvent shape is compatible with SDK's (same fields used).
@@ -552,6 +555,14 @@ export class OxpulseChatElement extends HTMLElement {
 
         removeReaction: (roomId: string, msgId: string, emoji: string) =>
           sdkClient.removeReaction?.(roomId, msgId, emoji) ?? Promise.resolve(),
+
+        // T18: roster — fetch names for OTHER writers via the same JWT.
+        getRoster: (roomId: string) => fetchRoster({
+          baseUrl: resolvedBaseUrl,
+          appId: config.appId,
+          roomId,
+          jwt: resolvedJwt,
+        }),
       };
 
       // F3: Remove placeholder in a single explicit pass — keeps #styleEl, removes all else.

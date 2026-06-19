@@ -426,6 +426,12 @@ export interface SubscribeArgs {
    * Clients should update local reaction state on receipt.
    */
   onReaction?: (event: ReactionEvent) => void;
+  /**
+   * T18: called when a `type:"roster"` invalidation signal arrives on the SSE stream.
+   * The event carries NO data — clients must re-fetch GET /api/sdk/roster to get the
+   * updated map.  This is an intentional signal-only design (no data in the event).
+   */
+  onRosterSignal?: () => void;
 }
 
 // SDKChatErrorCode lives in errors.ts since 2026-06-05 (cycle break). We
