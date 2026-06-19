@@ -14,11 +14,46 @@
 
   <p>Replace the placeholder values below with real credentials.</p>
 
-  <div id="chat-container">
+  <!-- Example 1: Read-only (anon) mode — no auth required from the visitor -->
+  <h2>Read-only (anon) mode</h2>
+  <div id="chat-container-read" style="height:300px;border:1px solid #ddd;border-radius:8px;overflow:hidden;margin-bottom:24px;">
     <oxpulse-chat
       app-id="YOUR_APP_ID"
-      jwt="YOUR_JWT_FROM_BACKEND"
       room-id="demo-room"
+      allow-anon-read
+      theme="auto">
+    </oxpulse-chat>
+  </div>
+
+  <!-- Example 2: Named-write (allow-write) mode — visitor can post as a named identity -->
+  <!--
+    How it works:
+    1. Your backend mints a named-write JWT via POST /api/sdk/auth/group-grant-mint.
+    2. The widget calls write-mint-endpoint on YOUR server (e.g. /api/oxpulse-write-token).
+    3. Your server verifies the session, calls OxPulse to exchange the grant, returns { token }.
+    4. The widget uses the returned JWT to send messages as the authenticated user.
+
+    Minimal host integration:
+      <oxpulse-chat
+        app-id="..."
+        room-id="..."
+        allow-anon-read
+        allow-write
+        write-mint-endpoint="/api/oxpulse-write-token">
+      </oxpulse-chat>
+
+    Backend endpoint shape (POST /api/oxpulse-write-token):
+      Body:    { room_id: string }
+      Returns: { token: string }  // the named-write SDK JWT
+  -->
+  <h2>Named-write mode</h2>
+  <div id="chat-container-write" style="height:400px;border:1px solid #ddd;border-radius:8px;overflow:hidden;">
+    <oxpulse-chat
+      app-id="YOUR_APP_ID"
+      room-id="demo-room"
+      allow-anon-read
+      allow-write
+      write-mint-endpoint="/api/oxpulse-write-token"
       theme="auto">
     </oxpulse-chat>
   </div>
@@ -31,23 +66,32 @@
     // Load widget (auto-registers <oxpulse-chat>)
     import '../dist/index.js';
 
-    // Event listeners
-    const el = document.querySelector('oxpulse-chat');
+    // Shared event listener setup
+    for (const el of document.querySelectorAll('oxpulse-chat')) {
+      el.addEventListener('oxpulse-chat:ready', (ev) => {
+        console.log('Widget ready — room:', ev.detail.roomId);
+      });
 
-    el.addEventListener('oxpulse-chat:ready', (ev) => {
-      console.log('Widget ready — room:', ev.detail.roomId);
-    });
+      el.addEventListener('oxpulse-chat:error', (ev) => {
+        console.error('Widget error:', ev.detail.code, ev.detail.message);
+      });
 
-    el.addEventListener('oxpulse-chat:error', (ev) => {
-      console.error('Widget error:', ev.detail.code, ev.detail.message);
-    });
+      el.addEventListener('oxpulse-chat:token-expired', async (ev) => {
+        console.log('Token expired, refreshing...');
+        // In production: fetch a fresh JWT from your backend
+        // const newJwt = await fetch('/api/refresh-token').then(r => r.json()).then(d => d.jwt);
+        // el.refreshToken(newJwt);
+      });
 
-    el.addEventListener('oxpulse-chat:token-expired', async (ev) => {
-      console.log('Token expired, refreshing...');
-      // In production: fetch a fresh JWT from your backend
-      // const newJwt = await fetch('/api/refresh-token').then(r => r.json()).then(d => d.jwt);
-      // el.refreshToken(newJwt);
-    });
+      // Named-write events (only fires when allow-write is set)
+      el.addEventListener('oxpulse-chat:message-sent', (ev) => {
+        console.log('Message sent — msgId:', ev.detail.msgId, 'room:', ev.detail.roomId);
+      });
+
+      el.addEventListener('oxpulse-chat:write-error', (ev) => {
+        console.error('Write error:', ev.detail.code, ev.detail.message);
+      });
+    }
   </script>
 </body>
 </html>

@@ -21,7 +21,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer } from './ui/composer.js';
 import { isAuthError } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, mintAnonReadToken, AnonReadMintError } from '@oxpulse/chat-sdk';
+import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 
 const WIDGET_VERSION = '0.1.0';
@@ -116,8 +116,8 @@ export class OxpulseChatElement extends HTMLElement {
       applyTheme(this, value);
     }
 
-    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read)
-    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read') {
+    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint)
+    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint') {
       // 1H: debounce via queueMicrotask — N synchronous setAttribute calls collapse into 1 bootstrap.
       // Abort the current bootstrap immediately (prevents stale state mutation).
       this.#abortController?.abort();
@@ -210,7 +210,7 @@ export class OxpulseChatElement extends HTMLElement {
    * Not exposed as attributes — only via the JS API.
    * @internal
    */
-  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken'>): void {
+  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken'>): void {
     this.#config = {
       ...(this.#config ?? { appId: '', jwt: '', roomId: '' }),
       ...config,
@@ -305,6 +305,12 @@ export class OxpulseChatElement extends HTMLElement {
     // Origin check passed — dispatch ready event
     if (config.mode === 'iframe') {
       // M6: iframe mode — create sandboxed iframe inside shadow root
+      if (config.allowWrite) {
+        // Named-write in iframe mode is not yet implemented (W5).
+        // Warn loudly rather than silently doing nothing.
+        // eslint-disable-next-line no-console
+        console.warn('[oxpulse-chat-widget] allowWrite=true is not supported in mode:"iframe" yet (W5). The compose UI will not be shown. Use mode:"inline" for named-write.');
+      }
       this.#mountIframe(config);
     } else {
       // Inline mode: W2.2 — mount real message list UI
@@ -391,6 +397,36 @@ export class OxpulseChatElement extends HTMLElement {
         }, renewAfterMs);
       }
 
+      // ── Named-write mode: mint write token when allow-write + writeMintEndpoint set ──
+      // The write JWT is kept separate from the read JWT (different capability level).
+      // Even in anon-read mode, allowWrite can be enabled to let a named user write
+      // while reading via the anon token (two separate clients).
+      let resolvedWriteJwt: string | null = null;
+      if (config.allowWrite && config.writeMintEndpoint) {
+        const mintWriteFn = config._mintNamedWriteToken ?? mintNamedWriteToken;
+        try {
+          resolvedWriteJwt = await mintWriteFn({
+            mintEndpoint: config.writeMintEndpoint,
+            roomId: config.roomId,
+          });
+        } catch (err) {
+          if (signal.aborted) return;
+          const mintErrMsg = err instanceof NamedWriteMintError
+            ? `Named-write token mint failed (${err.code}): ${err.message}`
+            : `Named-write token mint failed: ${err instanceof Error ? err.message : String(err)}`;
+          const widgetErr = new WidgetError('WRITE_MINT_FAILED', mintErrMsg);
+          this.#renderError(widgetErr.message);
+          if (this.#config?.onError) {
+            this.#config.onError(widgetErr);
+          }
+          this.dispatchEvent(new CustomEvent('oxpulse-chat:error', {
+            bubbles: true, composed: true, detail: widgetErr,
+          }));
+          return;
+        }
+        if (signal.aborted) return;
+      }
+
       const clientOpts = {
         baseUrl: resolvedBaseUrl,
         jwt: resolvedJwt,
@@ -399,6 +435,21 @@ export class OxpulseChatElement extends HTMLElement {
       const sdkClient: RawClient = config._createClient
         ? (config._createClient(clientOpts) as unknown as RawClient)
         : new SDKChatClient({ ...clientOpts, compression: 'none', cryptoMode: 'plaintext' }) as unknown as RawClient;
+
+      // When allowWrite is true with a write token, build a separate write client
+      // using the named-write JWT. In non-anon authed mode (jwt present, no allowWrite)
+      // the existing sdkClient handles sends directly.
+      let writeClient: RawClient | null = null;
+      if (resolvedWriteJwt !== null) {
+        const writeClientOpts = {
+          baseUrl: resolvedBaseUrl,
+          jwt: resolvedWriteJwt,
+          appId: config.appId,
+        };
+        writeClient = config._createClient
+          ? (config._createClient(writeClientOpts) as unknown as RawClient)
+          : new SDKChatClient({ ...writeClientOpts, compression: 'none', cryptoMode: 'plaintext' }) as unknown as RawClient;
+      }
 
       // Adapt the real SDK client to the widget's duck-typed MessageListClient interface.
       // The widget components use stable narrow interfaces defined in their own files;
@@ -562,16 +613,51 @@ export class OxpulseChatElement extends HTMLElement {
       subscribeFnRef = subscribeFn;
 
       // Composer sits at the bottom of widgetRoot.
-      // In anon-read mode the token is read-only — hide the composer entirely.
-      // Showing a write UI with a token that 403s on send is broken UX.
-      if (!isAnonMode) {
+      // Decision matrix:
+      //   isAnonMode && !writeClient → read-only (composer hidden, capability-based block)
+      //   isAnonMode && writeClient  → named-write JWT available; wire composer to writeClient
+      //   !isAnonMode               → authed path; standard JWT handles sends via sdkClient
+      //                               UNLESS allowWrite + writeClient: use write client instead
+      // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
+      const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
+
+      if (effectiveSendClient !== null) {
         // ComposerClient adapter — bridges (roomId, text) → SDK { senderUid, text }.
-        // Constructed ONLY in authed mode: an anon token is read-only, so the write
-        // path is never wired (capability-based block, not merely UI-hidden).
+        // Write path only wired when there is a capable JWT (named-write or standard authed).
         // senderUid: config.selfUid if present; the server authorizes by the JWT sub, not sender_uid.
+        const capturedSendClient = effectiveSendClient;
+        // isNamedWritePath: true when effectiveSendClient is the dedicated writeClient.
+        // Used to dispatch the specific oxpulse-chat:write-error event on send failure
+        // (in addition to the generic oxpulse-chat:error the Composer fires internally).
+        const isNamedWritePath = writeClient !== null && capturedSendClient === writeClient;
+        const self = this;
         const composerClient = {
           sendText: (roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }> =>
-            sdkClient.sendText(roomId, { senderUid: config.selfUid ?? '', text }),
+            capturedSendClient.sendText(roomId, { senderUid: config.selfUid ?? '', text }).then((res) => {
+              // Dispatch message-sent event on success
+              self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
+                bubbles: true,
+                composed: true,
+                detail: { roomId, msgId: res.msgId },
+              }));
+              return res;
+            }).catch((err: unknown) => {
+              // For the named-write path: dispatch oxpulse-chat:write-error with
+              // WRITE_SEND_FAILED so integrators can distinguish write failures from
+              // generic widget errors. The Composer's own catch still fires
+              // oxpulse-chat:error and renders the inline error chip — we do not swallow.
+              if (isNamedWritePath) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                const writeErr = new WidgetError('WRITE_SEND_FAILED', errMsg);
+                self.dispatchEvent(new CustomEvent('oxpulse-chat:write-error', {
+                  bubbles: true,
+                  composed: true,
+                  detail: writeErr,
+                }));
+              }
+              // Re-throw so the Composer's catch path fires (renders error chip + generic error event).
+              throw err;
+            }),
         };
         this.#composer = new Composer({
           client: composerClient,
@@ -632,6 +718,8 @@ export class OxpulseChatElement extends HTMLElement {
     const jwt = this.getAttribute('jwt');
     const roomId = this.getAttribute('room-id');
     const allowAnonRead = this.hasAttribute('allow-anon-read');
+    const allowWrite = this.hasAttribute('allow-write');
+    const writeMintEndpoint = this.getAttribute('write-mint-endpoint') ?? undefined;
 
     // jwt is required unless allow-anon-read is set (anon mode mints its own token)
     if (!appId || !roomId) return null;
@@ -653,12 +741,15 @@ export class OxpulseChatElement extends HTMLElement {
       selfUid: selfUid ?? undefined,
       baseUrl,
       allowAnonRead,
+      allowWrite,
+      writeMintEndpoint,
       // Merge stored callbacks + test factory overrides
       onTokenExpired: this.#config?.onTokenExpired,
       onError: this.#config?.onError,
       allowLegacyToken: this.#config?.allowLegacyToken,
       _createClient: this.#config?._createClient,
       _mintAnonReadToken: this.#config?._mintAnonReadToken,
+      _mintNamedWriteToken: this.#config?._mintNamedWriteToken,
     };
   }
 
@@ -728,6 +819,8 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
   if (config.selfUid) el.setAttribute('self-uid', config.selfUid);
   if (config.baseUrl) el.setAttribute('base-url', config.baseUrl);
   if (config.allowAnonRead) el.setAttribute('allow-anon-read', '');
+  if (config.allowWrite) el.setAttribute('allow-write', '');
+  if (config.writeMintEndpoint) el.setAttribute('write-mint-endpoint', config.writeMintEndpoint);
 
   // Store callbacks + test factory overrides (not representable as attributes)
   el._setCallbacks({
@@ -736,6 +829,7 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
     allowLegacyToken: config.allowLegacyToken,
     _createClient: config._createClient,
     _mintAnonReadToken: config._mintAnonReadToken,
+    _mintNamedWriteToken: config._mintNamedWriteToken,
   });
 
   target.appendChild(el);
