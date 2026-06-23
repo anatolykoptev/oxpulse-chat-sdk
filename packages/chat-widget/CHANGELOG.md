@@ -1,5 +1,18 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.3.1
+
+### Patch Changes
+
+- fix(ui): pin the composer to the bottom of the widget. The flex rule
+  targeted `.oxp-message-list` (the inner list element) but the growing
+  child is the `.oxp-message-list-wrapper` div (element.ts), which stayed
+  at `flex-grow:0` and collapsed to content height — so the composer rode
+  up under the last message, leaving dead space below on tall / mobile
+  fullscreen hosts (e.g. /biz/demo at 390px). Added `flex:1` + column to
+  the wrapper. CDN hotfix published as `widget/0.3.1/`; the pending T18
+  roster changeset still lands the next minor (0.4.0).
+
 ## 0.3.0
 
 ### Minor Changes

@@ -302,6 +302,14 @@ export const THEME_CSS = `
 
 /* ── Widget root + composer (slice 2) ── */
 .oxp-widget-root { display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; }
+/* The wrapper div (element.ts) sits between the root and the message list; it
+ * must be the flex-growing child so the composer is pinned to the bottom. The
+ * rule previously targeted only the inner list element (oxp-message-list),
+ * leaving the wrapper at flex-grow:0 so it collapsed to content height and the
+ * composer rode up under the last row (dead space below on a tall/mobile
+ * fullscreen host). flex:1 + column on the wrapper, flex:1 on the inner list.
+ * NB keep this comment backtick-free — this string is a JS template literal. */
+.oxp-widget-root .oxp-message-list-wrapper { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .oxp-widget-root .oxp-message-list { flex: 1; min-height: 0; }
 
 .oxp-composer {
