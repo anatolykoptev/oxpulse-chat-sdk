@@ -228,14 +228,26 @@ describe('SEC-CR-001 per-room poison isolation (one room downgrade must not bric
 });
 
 // ---------------------------------------------------------------------------
-// RED 5 — a poisoned room refuses EVERY send entrypoint (fail-closed completeness)
-// batchAppend + sendProductCard are direct-fetch sends; a poisoned room must refuse them too.
+// RED 5 — a poisoned room refuses EVERY content-bearing send entrypoint.
+// (Exhaustive gate: send/sendText/batchAppend/sendProductCard/updateMessage/sendFile —
+//  the writes that transmit a message/file payload the room's crypto_mode governs.
+//  A future content-write method added without #assertRoomNotPoisoned should be added
+//  to this enumeration and will fail here if left ungated.)
 // ---------------------------------------------------------------------------
 
-describe('SEC-CR-001 poisoned room refuses every send entrypoint', () => {
+describe('SEC-CR-001 poisoned room refuses every content-bearing send entrypoint', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('batchAppend and sendProductCard on a poisoned room throw crypto_mode_poisoned', async () => {
+  async function poisonRoom(client: SDKChatClient, getLastController: () => { emitNamed(t: string, d: string): void } | null) {
+    client.subscribe(ROOM_ID, { onMessage: () => {}, onError: () => {} });
+    await flush();
+    getLastController()!.emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
+    await flush();
+  }
+
+  const isPoisoned = (e: unknown) => e instanceof SDKChatError && e.code === 'crypto_mode_poisoned';
+
+  it('batchAppend / sendProductCard / updateMessage / sendFile all throw crypto_mode_poisoned', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       status: 200,
@@ -245,20 +257,14 @@ describe('SEC-CR-001 poisoned room refuses every send entrypoint', () => {
 
     const provider = makeSpyCryptoProvider();
     const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    await poisonRoom(client, getLastController);
 
-    client.subscribe(ROOM_ID, { onMessage: () => {}, onError: () => {} });
-    await flush();
-    // Server downgrade → poison THIS room.
-    getLastController()!.emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
-    await flush();
-
+    // send()/sendText() are already covered above; here the direct-fetch content writes:
     await expect(
       client.batchAppend(ROOM_ID, [
         { msgId: 'm1', sealed: new TextEncoder().encode('x').buffer as ArrayBuffer },
       ]),
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof SDKChatError && e.code === 'crypto_mode_poisoned',
-    );
+    ).rejects.toSatisfy(isPoisoned);
 
     await expect(
       client.sendProductCard(ROOM_ID, {
@@ -272,9 +278,91 @@ describe('SEC-CR-001 poisoned room refuses every send entrypoint', () => {
         },
         senderUid: SENDER_UID,
       }),
-    ).rejects.toSatisfy(
-      (e: unknown) => e instanceof SDKChatError && e.code === 'crypto_mode_poisoned',
+    ).rejects.toSatisfy(isPoisoned);
+
+    await expect(
+      client.updateMessage(ROOM_ID, 'm1', {
+        sealed: new TextEncoder().encode('edited').buffer as ArrayBuffer,
+      }),
+    ).rejects.toSatisfy(isPoisoned);
+
+    await expect(
+      client.sendFile(ROOM_ID, new Blob(['file-bytes']), {
+        senderUid: SENDER_UID,
+        sealed: new TextEncoder().encode('sealed').buffer as ArrayBuffer,
+        sha256: 'deadbeef',
+      }),
+    ).rejects.toSatisfy(isPoisoned);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RED 6 — per-room crypto state lifecycle: discovered-mode evicted on last teardown,
+// poison stays sticky (bounds unbounded growth without weakening fail-closed).
+// ---------------------------------------------------------------------------
+
+describe('SEC-CR-001 per-room crypto state lifecycle (evict mode on teardown, poison sticky)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('discovered crypto-mode is evicted on last teardown AND a post-eviction send re-seals', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: unknown) => {
+      if (String(url) === SEND_URL) return makeOkSendResponse();
+      return { ok: true, status: 200, json: async () => ({ ticket: 'test-ticket' }) } as unknown as Response;
+    });
+    const { getLastController } = installMockEventSource();
+
+    const provider = makeSpyCryptoProvider();
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+
+    const unsub = client.subscribe(ROOM_ID, { onMessage: () => {}, onError: () => {} });
+    await flush();
+    // Honest server mode → room discovers sframe-static (NOT poisoned).
+    getLastController()!.emitNamed('connected', JSON.stringify({ crypto_mode: 'sframe-static' }));
+    await flush();
+
+    expect(client._roomCryptoStateSize().modes).toBe(1);
+    expect(client._roomCryptoStateSize().poisoned).toBe(0);
+
+    unsub();
+    await flush();
+
+    // Last subscriber gone → discovered-mode entry released (bounded growth).
+    expect(client._roomCryptoStateSize().modes).toBe(0);
+
+    // NIT-2 security corollary: after eviction, effectiveMode falls back to the
+    // sframe-static DEFAULT (not plaintext) — a send still SEALS, never leaks cleartext.
+    await client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: SECRET });
+    expect(provider.sealSpy).toHaveBeenCalled();
+    const sendCall = fetchSpy.mock.calls.find(isSendCall);
+    expect(sendCall).toBeDefined();
+    const { asText } = decodeSentBody(sendCall![1] as RequestInit);
+    expect(asText).not.toBe(SECRET);
+  });
+
+  it('poison survives teardown and re-subscribe (sticky fail-closed)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ticket: 'test-ticket' }),
+    } as unknown as Response);
+    const { getLastController } = installMockEventSource();
+
+    const provider = makeSpyCryptoProvider();
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+
+    // Downgrade → poison. The mismatch tears the subscription down internally.
+    client.subscribe(ROOM_ID, { onMessage: () => {}, onError: () => {} });
+    await flush();
+    getLastController()!.emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
+    await flush();
+
+    expect(client._roomCryptoStateSize().poisoned).toBe(1);
+
+    // Poison is client-lifetime sticky: re-subscribing the poisoned room fails closed.
+    expect(() => client.subscribe(ROOM_ID, { onMessage: () => {}, onError: () => {} })).toThrow(
+      SDKChatError,
     );
+    expect(client._roomCryptoStateSize().poisoned).toBe(1); // NOT evicted
   });
 });
 

@@ -489,6 +489,15 @@ export class SDKChatClient {
   }
 
   /**
+   * @internal test-only: current sizes of the per-room crypto-state collections.
+   * Lets tests assert eviction (discovered-mode entries released on last teardown)
+   * and poison stickiness without exposing the private fields. Not exported/stable.
+   */
+  _roomCryptoStateSize(): { modes: number; poisoned: number } {
+    return { modes: this.#activeCryptoModeByRoom.size, poisoned: this.#poisonedRooms.size };
+  }
+
+  /**
    * W6 E2EE: encrypt text and send as a sealed message.
    *
    * Requires e2ee to be configured in the constructor options.
@@ -1112,6 +1121,16 @@ export class SDKChatClient {
       if (this.#cryptoProvider !== null && !chainReleased) {
         chainReleased = true;
         this.#decryptChain.release(roomId);
+        // SEC-CR-001 memory hygiene: when the LAST subscriber for this room tears down
+        // (chain refCount hit 0), evict the room's DISCOVERED crypto-mode so the per-room
+        // Map is bounded to live rooms (reuses the decrypt-chain refcount as the
+        // last-subscriber signal). #poisonedRooms is intentionally NOT evicted — a
+        // poisoned room stays fail-closed for the client's lifetime ("recreate the client
+        // to retry"), and it only ever grows under an ACTIVE downgrade attack, never in
+        // normal operation, so its growth is bounded by the attack surface, not room count.
+        if (this.#decryptChain.refCountOf(roomId) === 0) {
+          this.#activeCryptoModeByRoom.delete(roomId);
+        }
       }
     };
 
@@ -1589,6 +1608,9 @@ export class SDKChatClient {
    * Scope: chat:write:<room_id>.
    */
   async updateMessage(roomId: string, msgId: string, args: UpdateMessageArgs): Promise<void> {
+    // SEC-CR-001: fail-CLOSED — updateMessage transmits new sealed_b64 CONTENT to the
+    // room, so a room with a proven-tampered crypto_mode must refuse edits too.
+    this.#assertRoomNotPoisoned(roomId);
     const body = {
       sealed_b64: arrayBufferToBase64(args.sealed),
     };
@@ -1884,6 +1906,10 @@ export class SDKChatClient {
     blob: Blob,
     args: SendFileArgs,
   ): Promise<{ seq: number; msgId: string }> {
+    // SEC-CR-001: fail-CLOSED — sendFile presigns + uploads a file BODY for the room
+    // (sendFileHelper → presign POST + PUT + send()); a proven-tampered room must refuse
+    // it. Gate here in the wrapper so the presign never fires for a poisoned room.
+    this.#assertRoomNotPoisoned(roomId);
     // nosemgrep: javascript.express.security.audit.express-res-sendfile.express-res-sendfile
     return sendFileHelper(this, roomId, blob, args);
   }
