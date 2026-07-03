@@ -1,5 +1,5 @@
 ---
-"@oxpulse/wire-codec": patch
+"@oxpulse/wire-codec": minor
 ---
 
 fix(wire-codec): brand `encodeHttpBody`/`decodeHttpBody` output as `HttpWireBytes`, distinct from `WireBytes`
@@ -18,3 +18,8 @@ a `Uint8Array` exactly like `WireBytes` was.
 (rather than `decodeHttpBody(encodeHttpBody(...))` round-trips, which are unaffected), switch the lift
 to the new `asHttpWireBytes(bytes)` export. `@oxpulse/chat-sdk`'s `SDKChatClient` already does this
 internally — no action needed for consumers who only use the client.
+
+Bumped `minor` rather than `patch`: pre-1.0, the package's `^0.3.1` caret range auto-upgrades through
+all `0.3.x` releases, so a `patch` (`0.3.2`) would silently pull this compile-breaking type narrowing
+into any caret-pinned consumer's next install. A `minor` (`0.4.0`) sits outside the caret range and
+requires an explicit consumer opt-in.

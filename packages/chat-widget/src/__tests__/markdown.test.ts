@@ -41,6 +41,17 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('a_hi_b')).not.toContain('<em>');
   });
 
+  it('does NOT italicize underscores inside Cyrillic snake_case identifiers', () => {
+    // Plain \w (no /u flag) matches only [A-Za-z0-9_] — Cyrillic letters are
+    // NOT word chars to JS regex, so a \w-based word-boundary guard is a
+    // no-op for this SDK's primary (Russian-speaking) userbase: it still
+    // wrongly italicizes a Cyrillic snake_case identifier the same way the
+    // original doubled-backslash bug did. The fix must use \p{L}\p{N}_ with
+    // the /u flag to be Unicode-aware.
+    expect(renderMarkdown('тестовый_юзер_профиль')).not.toContain('<em>');
+    expect(renderMarkdown('слово_ещё_слово')).not.toContain('<em>');
+  });
+
   it('renders ~~strike~~ as <del>', () => {
     expect(renderMarkdown('~~gone~~')).toContain('<del>gone</del>');
   });
