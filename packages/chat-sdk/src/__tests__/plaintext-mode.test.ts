@@ -18,106 +18,27 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
 import { SDKChatError } from '../errors.js';
-import type { CryptoProvider } from '../types.js';
+import {
+  TEST_BASE_URL as BASE_URL,
+  TEST_JWT as JWT,
+  TEST_SENDER_UID as SENDER_UID,
+  makeOkSendResponse,
+  makeListResponse as sharedMakeListResponse,
+  installMockEventSource,
+  makeSpyCryptoProvider,
+  flush,
+} from './helpers.js';
 
-const BASE_URL = 'http://x';
-const JWT = 'test-token';
 const ROOM_ID = 'room-plaintext-test';
-const SENDER_UID = 'user-test-1';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeOkSendResponse(seq = 1, msgId = 'msg-001'): Response {
-  return {
-    ok: true,
-    status: 200,
-    json: async () => ({ seq, msg_id: msgId }),
-  } as unknown as Response;
-}
-
+// Thin wrappers over the shared helpers keep this file's existing call sites stable.
 function makeListResponse(sealedB64: string, cryptoMode?: string): Response {
-  const body: Record<string, unknown> = {
-    items: [
-      {
-        seq: 1,
-        msg_id: 'msg-001',
-        sender_uid: SENDER_UID,
-        sealed_b64: sealedB64,
-        created_at: '2026-05-27T00:00:00Z',
-        thread_root_msg_id: null,
-        product_ref: null,
-        product_meta: null,
-      },
-    ],
-    has_more: false,
-    next_cursor: null,
-  };
-  if (cryptoMode !== undefined) {
-    body['crypto_mode'] = cryptoMode;
-  }
-  return new Response(JSON.stringify(body), { status: 200 });
+  return sharedMakeListResponse(sealedB64, { cryptoMode });
 }
-
-function makeCustomCryptoProvider(): CryptoProvider & { sealSpy: ReturnType<typeof vi.fn> } {
-  const sealSpy = vi.fn(async (plain: ArrayBuffer) => plain);
-  const provider: CryptoProvider & { sealSpy: ReturnType<typeof vi.fn> } = {
-    sealSpy,
-    seal: sealSpy,
-    unseal: vi.fn(async (cipher: ArrayBuffer) => cipher),
-  };
-  return provider;
-}
-
-// Mock EventSource controller for subscribe tests.
-interface MockESController {
-  emitNamed(type: string, data: string): void;
-  emitMessage(data: string): void;
-  emitError(): void;
-}
-
-function installMockEventSource(): { getLastController: () => MockESController | null } {
-  let lastController: MockESController | null = null;
-
-  class MockES {
-    onmessage: ((ev: MessageEvent) => void) | null = null;
-    onerror: ((ev: Event) => void) | null = null;
-    private _listeners: Map<string, Array<(ev: MessageEvent) => void>> = new Map();
-
-    constructor(_url: string) {
-      const self = this;
-      lastController = {
-        emitNamed: (type: string, data: string) => {
-          const cbs = self._listeners.get(type) ?? [];
-          const ev = Object.assign(new Event(type), { data }) as MessageEvent;
-          for (const cb of cbs) cb(ev);
-        },
-        emitMessage: (data: string) => {
-          self.onmessage?.({ data } as MessageEvent);
-        },
-        emitError: () => {
-          self.onerror?.(new Event('error'));
-        },
-      };
-    }
-
-    addEventListener(type: string, cb: (ev: MessageEvent) => void) {
-      const arr = this._listeners.get(type) ?? [];
-      arr.push(cb);
-      this._listeners.set(type, arr);
-    }
-
-    close() {}
-  }
-
-  vi.stubGlobal('EventSource', MockES);
-  return { getLastController: () => lastController };
-}
-
-// Flush microtasks N times.
-async function flush(rounds = 20): Promise<void> {
-  for (let i = 0; i < rounds; i++) await Promise.resolve();
+// Identity-seal provider (seal returns its input): this file asserts seal ARGS,
+// not sealed output, so the marker-byte default is unnecessary here.
+function makeCustomCryptoProvider() {
+  return makeSpyCryptoProvider(async (plain: ArrayBuffer) => plain);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,23 +49,22 @@ describe('send_plaintext_skips_seal_step', () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.restoreAllMocks());
 
-  it('sendText in plaintext mode does NOT call CryptoProvider.seal', async () => {
+  it('e2ee provider + explicit cryptoMode:plaintext is rejected at construct (SEC-CR-001)', () => {
     const provider = makeCustomCryptoProvider();
 
-    // Build client with both e2ee and cryptoMode=plaintext.
-    // cryptoMode option triggers the plaintext path immediately.
-    const client = new SDKChatClient({
-      baseUrl: BASE_URL,
-      jwt: JWT,
-      e2ee: { provider },
-      cryptoMode: 'plaintext',
-    });
-
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeOkSendResponse());
-
-    await client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: 'hello' });
-
-    // seal MUST NOT have been called — plaintext path bypasses E2EE.
+    // SEC-CR-001 (CWE-757): an encryption provider PLUS an explicit plaintext
+    // opt-out is a contradictory config. The SDK now fails CLOSED at construct
+    // instead of allowing a plaintext downgrade of an E2EE-configured client —
+    // so seal is never even reached.
+    expect(
+      () =>
+        new SDKChatClient({
+          baseUrl: BASE_URL,
+          jwt: JWT,
+          e2ee: { provider },
+          cryptoMode: 'plaintext',
+        }),
+    ).toThrow(SDKChatError);
     expect(provider.sealSpy).not.toHaveBeenCalled();
   });
 
@@ -480,32 +400,34 @@ describe('unknown_crypto_mode_value_rejected', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 11: send before discover with e2ee configured → throws crypto_mode_undiscovered
-// code-quality MAJOR: send-before-discover gate
+// Test 11: send before discover with e2ee configured → defaults to sframe-static
+// SEC-CR-001: downgrade defense is default-on, so an e2ee client seals by default
+// instead of blocking on discovery (the old crypto_mode_undiscovered contract).
 // ---------------------------------------------------------------------------
 
-describe('send_before_discover_with_e2ee_throws', () => {
+describe('send_with_e2ee_defaults_to_sframe_static', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('sendText throws crypto_mode_undiscovered when e2ee configured and no mode known', async () => {
+  it('sendText with e2ee (no explicit cryptoMode) defaults to sframe-static and seals', async () => {
     const provider = makeCustomCryptoProvider();
 
-    // No cryptoMode option (auto-detect), e2ee configured.
-    // No list() or subscribe() called — mode never discovered.
+    // No cryptoMode option, e2ee configured. SEC-CR-001: #cryptoMode defaults to
+    // 'sframe-static', so sending before any list()/subscribe() SEALS by default
+    // (fail-closed) rather than shipping plaintext or blocking on discovery.
     const client = new SDKChatClient({
       baseUrl: BASE_URL,
       jwt: JWT,
       e2ee: { provider },
     });
 
-    await expect(
-      client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: 'hello' }),
-    ).rejects.toSatisfy(
-      (err: unknown) => err instanceof SDKChatError && err.code === 'crypto_mode_undiscovered',
-    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeOkSendResponse());
 
-    // seal must NOT have been called — we rejected before reaching that code.
-    expect(provider.sealSpy).not.toHaveBeenCalled();
+    await client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: 'hello' });
+
+    // seal MUST have been called with the UTF-8 bytes — default-on downgrade defense.
+    expect(provider.sealSpy).toHaveBeenCalledOnce();
+    const sealArg = provider.sealSpy.mock.calls[0][0] as ArrayBuffer;
+    expect(new Uint8Array(sealArg)).toEqual(new TextEncoder().encode('hello'));
   });
 });
 
