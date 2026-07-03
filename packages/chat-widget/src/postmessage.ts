@@ -11,7 +11,7 @@
  *       event.origin does not match.
  */
 
-import type { ParentMessage, IframeMessage, WidgetConfig } from './types.js';
+import type { ParentMessage, IframeMessage } from './types.js';
 
 /** Namespace prefix on all postMessage payloads. */
 const NS = 'oxpulse-chat' as const;
@@ -100,18 +100,6 @@ function wrapParent(msg: ParentMessage): Record<string, unknown> {
 /** Wrap an IframeMessage with the namespace marker. */
 function wrapIframe(msg: IframeMessage): Record<string, unknown> {
   return { ns: NS, ...msg };
-}
-
-/**
- * Send an init message from the parent to a specific iframe.
- * Called by the parent page when setting up the iframe embed.
- */
-/** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
-export function sendInitToIframe(iframe: HTMLIFrameElement, config: WidgetConfig): void {
-  iframe.contentWindow?.postMessage(
-    wrapParent({ type: 'init', config }),
-    config.baseUrl ?? '*',
-  );
 }
 
 /**

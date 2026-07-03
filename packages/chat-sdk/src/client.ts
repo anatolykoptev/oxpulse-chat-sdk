@@ -16,7 +16,7 @@ import {
   decodeHttpBody,
   setDictLoader,
   setDictBaseUrl,
-  asWireBytes,
+  asHttpWireBytes,
 } from '@oxpulse/wire-codec';
 import type { DictName } from '@oxpulse/wire-codec';
 import type {
@@ -450,7 +450,7 @@ export class SDKChatClient {
         await ensureWireCodecReady();
       }
     }
-    return decodeHttpBody(asWireBytes(bytes));
+    return decodeHttpBody(asHttpWireBytes(bytes));
   }
 
   // ── W4: Public getters for attachment helpers ──────────────────────────────

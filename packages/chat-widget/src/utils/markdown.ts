@@ -23,7 +23,11 @@ const SPOILER_RE = /\|\|([^|]+)\|\|/g;
 const BOLD_RE = /\*\*(.+?)\*\*/g;
 const UNDERLINE_RE = /__(.+?)__/g;
 const STRIKE_RE = /~~(.+?)~~/g;
-const ITALIC_RE = /(?<![\\w])_(.+?)_(?![\\w])/g;
+// Unicode-aware word-boundary guard: plain \w matches only [A-Za-z0-9_], so a
+// non-/u regex would still mis-italicize Cyrillic (or any non-Latin) snake_case
+// identifiers — this SDK's primary userbase is Russian-speaking. \p{L}\p{N}_
+// with the /u flag treats any Unicode letter/number as a word char.
+const ITALIC_RE = /(?<![\p{L}\p{N}_])_(.+?)_(?![\p{L}\p{N}_])/gu;
 const LINK_RE = /\[([^\]]+)]\(([^)]+)\)/g;
 const AUTOLINK_RE = /(https?:\/\/[^\s<"')\]]+)/g;
 

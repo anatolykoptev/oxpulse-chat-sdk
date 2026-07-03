@@ -57,6 +57,12 @@ const obj = decode(frame);
 | `decode(bytes)` | Peer envelope decode (auto-detects magic byte) |
 | `encodeHttpBody(jsonBytes, dictName?)` | Server HTTP body: zstd-of-JSON, 2-byte BE dict-id, `0xC6`/`0xC7` magic |
 | `decodeHttpBody(bytes)` | Server HTTP body decode; returns parsed JSON value |
+| `asWireBytes(bytes)` | Lift a raw `Uint8Array` into the `WireBytes` domain (peer protocol: `encode()`/`decode()`) |
+| `WireBytes` | Phantom-branded type — peer-protocol pre-seal wire bytes |
+| `asHttpWireBytes(bytes)` | Lift a raw `Uint8Array` into the `HttpWireBytes` domain (SDK HTTP protocol: `encodeHttpBody()`/`decodeHttpBody()`) |
+| `HttpWireBytes` | Phantom-branded type — SDK-HTTP-protocol pre-seal wire bytes. Distinct brand from `WireBytes`: both share the `0xC7` magic byte but are binary-incompatible payloads (JSON vs CBOR) — the brand split turns a cross-feed into a compile error |
+| `asSealedBytes(bytes)` | Lift a raw `Uint8Array` into the `SealedBytes` domain (post-AEAD-seal, on the wire) |
+| `SealedBytes` | Phantom-branded type — post-seal, on-the-wire bytes |
 | `setDictLoader(loader)` | Plug in a custom dict fetch function |
 | `setDictBaseUrl(url)` | Set base URL for default `fetch`-based dict loader |
 | `ensureWireCodecReady()` | Async zstd-wasm init; idempotent — safe to call multiple times |

@@ -82,13 +82,13 @@ describe("WireCodecError class", () => {
 // ---------------------------------------------------------------------------
 
 import { decodeHttpBody, decode } from "../codec.js";
-import { asWireBytes } from "../brands.js";
+import { asWireBytes, asHttpWireBytes } from "../brands.js";
 
 describe("decodeHttpBody — EMPTY_INPUT", () => {
   it("throws WireCodecError with code EMPTY_INPUT on empty Uint8Array", () => {
-    expect(() => decodeHttpBody(asWireBytes(new Uint8Array(0)))).toThrow(WireCodecError);
+    expect(() => decodeHttpBody(asHttpWireBytes(new Uint8Array(0)))).toThrow(WireCodecError);
     try {
-      decodeHttpBody(asWireBytes(new Uint8Array(0)));
+      decodeHttpBody(asHttpWireBytes(new Uint8Array(0)));
     } catch (e) {
       expect(e).toBeInstanceOf(WireCodecError);
       expect((e as WireCodecError).code).toBe("EMPTY_INPUT");
@@ -99,9 +99,9 @@ describe("decodeHttpBody — EMPTY_INPUT", () => {
 describe("decodeHttpBody — PEER_ENVELOPE_FORMAT", () => {
   it("throws WireCodecError with code PEER_ENVELOPE_FORMAT for 0xC8 byte", () => {
     const bytes = new Uint8Array([0xc8, 0x00, 0x01]);
-    expect(() => decodeHttpBody(asWireBytes(bytes))).toThrow(WireCodecError);
+    expect(() => decodeHttpBody(asHttpWireBytes(bytes))).toThrow(WireCodecError);
     try {
-      decodeHttpBody(asWireBytes(bytes));
+      decodeHttpBody(asHttpWireBytes(bytes));
     } catch (e) {
       expect(e).toBeInstanceOf(WireCodecError);
       expect((e as WireCodecError).code).toBe("PEER_ENVELOPE_FORMAT");
@@ -112,9 +112,9 @@ describe("decodeHttpBody — PEER_ENVELOPE_FORMAT", () => {
 describe("decodeHttpBody — UNKNOWN_MAGIC", () => {
   it("throws WireCodecError with code UNKNOWN_MAGIC for unrecognized magic byte", () => {
     const bytes = new Uint8Array([0xDE, 0xAD]);
-    expect(() => decodeHttpBody(asWireBytes(bytes))).toThrow(WireCodecError);
+    expect(() => decodeHttpBody(asHttpWireBytes(bytes))).toThrow(WireCodecError);
     try {
-      decodeHttpBody(asWireBytes(bytes));
+      decodeHttpBody(asHttpWireBytes(bytes));
     } catch (e) {
       expect(e).toBeInstanceOf(WireCodecError);
       expect((e as WireCodecError).code).toBe("UNKNOWN_MAGIC");
@@ -132,9 +132,9 @@ describe("decodeHttpBody — paths requiring zstd init", () => {
 
   it("INVALID_DICT_ID_HEADER: truncated 0xC7 frame (< 3 bytes)", () => {
     const bytes = new Uint8Array([0xc7, 0x00]); // only 2 bytes, need ≥3
-    expect(() => decodeHttpBody(asWireBytes(bytes))).toThrow(WireCodecError);
+    expect(() => decodeHttpBody(asHttpWireBytes(bytes))).toThrow(WireCodecError);
     try {
-      decodeHttpBody(asWireBytes(bytes));
+      decodeHttpBody(asHttpWireBytes(bytes));
     } catch (e) {
       expect(e).toBeInstanceOf(WireCodecError);
       expect((e as WireCodecError).code).toBe("INVALID_DICT_ID_HEADER");
