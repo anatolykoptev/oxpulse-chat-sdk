@@ -412,4 +412,73 @@ describe('subscribe() reconnect replay — per-room decrypt chain (SEC-CR-14-01)
     await flushMicrotasks();
     teardownB();
   });
+
+  // MEDIUM (pr-review-council) — the exact SEC-CR-14-01 production trigger: TWO
+  // co-subscribers sharing ONE roomId, BOTH reconnecting/replaying at once (one
+  // server graceful restart drops every stream). The shared per-room chain must
+  // keep unseal serial across BOTH replay loops.
+  //
+  // RED at base 6babab7 comes from the REPLAY unseal being the second concurrent
+  // producer: the streamed path was ALREADY on-chain pre-#15 (PR #14 refcounted
+  // the shared chain), so a co-subscriber's streamed frame does not race — it is
+  // the off-chain list()-replay that #15 moves on-chain. At base both replay
+  // unseals run off-chain concurrently with the hung streamed unseal → maxInFlight
+  // >= 2; at HEAD both replays queue behind it → maxInFlight === 1.
+  it('two co-subscribers of one room reconnecting concurrently stay <=1 unseal in flight (replay path)', async () => {
+    const room = 'room-cosub-reconnect';
+    const provider = makeRoomTrackingProvider();
+    const instances = installMockEventSource();
+    let ticketCounter = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/subscribe-ticket')) {
+          ticketCounter += 1;
+          return new Response(JSON.stringify({ ticket: `t-${ticketCounter}` }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/sdk/messages?')) {
+          // Distinct replay seq per subscriber (keyed by their lastSeq) so both
+          // replay unseals are tracked independently, not resolver-collided.
+          const after = new URL(url).searchParams.get('after_seq');
+          const seq = after === '1' ? 2 : 30;
+          return new Response(
+            JSON.stringify({ items: [listRow(seq)], has_more: false, next_cursor: null }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }),
+    );
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    client.subscribe(room, { onMessage: vi.fn() }); // subscriber A
+    client.subscribe(room, { onMessage: vi.fn() }); // subscriber B (shared chain)
+    await settleInitialSubscribe();
+    expect(instances.length).toBe(2);
+
+    // A live frame on A → the shared room's streamed unseal starts and HANGS.
+    // (Already on-chain at base via PR #14.) A's lastSeq → 1; B's stays 0, so the
+    // fetch router hands A seq=2 and B seq=30 on replay.
+    instances[0]!.emit(frame(1));
+    await flushMicrotasks();
+    expect(provider.inFlightByRoom.get(room)).toBe(1);
+
+    // One server graceful restart → BOTH streams shut down → BOTH replay loops
+    // fire concurrently, each fetching a missed row for the SAME room.
+    instances[0]!.fireShutdown();
+    instances[1]!.fireShutdown();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    // INVARIANT: at most one unseal in flight for the shared room, across both
+    // co-subscribers' replay loops.
+    expect(provider.maxFor(room)).toBeLessThanOrEqual(1);
+
+    provider.releaseAll();
+    await flushMicrotasks();
+  });
 });
