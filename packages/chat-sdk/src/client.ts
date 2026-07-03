@@ -48,6 +48,7 @@ import type {
 } from './types.js';
 import { SDKChatBatchError, SDKChatError } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
+import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
 import { enqueue, dequeue, pending } from './outbox.js';
 import { sendFile as sendFileHelper, type SendFileArgs } from './attachments.js';
@@ -262,14 +263,15 @@ export class SDKChatClient {
    */
   readonly #cryptoProvider: CryptoProvider | null;
   /**
-   * W6 E2EE: per-room promise chain to serialize async decryptions in subscribe().
-   * Keyed by roomId. Each onmessage decrypt is chained onto the room's entry to
-   * preserve message order within that room. Independent per room — one stuck
-   * unseal in roomA does NOT stall roomB.
-   * Non-re-entrant serial queue (not a re-entrant mutex).
-   * Assumes at most one active subscriber per room.
+   * W6 E2EE: per-room serial decrypt queue for subscribe(). Each onmessage
+   * decrypt is appended onto the room's chain to preserve in-order unseal within
+   * a room (the SFrame ratchet/replay window desyncs on out-of-order unseal).
+   * Independent per room — one stuck unseal in roomA does NOT stall roomB.
+   * Refcounted so multiple concurrent subscribers of one roomId (widget remount,
+   * visibility re-subscribe, reconnect race) share one serial chain and teardown
+   * of any single subscriber does not destroy it — see room-decrypt-chain.ts.
    */
-  readonly #decryptChainByRoom: Map<string, Promise<void>> = new Map();
+  readonly #decryptChain: RoomDecryptChain = new RoomDecryptChain();
   /**
    * W6 E2EE: guard to warn once when sendOptimistic is called with e2ee configured.
    * Callers should use sendTextOptimistic instead.
@@ -699,6 +701,19 @@ export class SDKChatClient {
     let lastSeq = 0;
     let es: EventSource | null = null;
 
+    // W6 E2EE: register this subscriber on the room's shared serial decrypt
+    // chain. Refcounted so a co-subscriber (widget remount / reconnect race)
+    // sharing this roomId keeps the chain alive until the LAST teardown.
+    // Gated on cryptoProvider (readonly) so acquire/release stay balanced and
+    // plaintext rooms never touch the chain (matching prior behaviour).
+    // chainReleased makes teardown idempotent: a double-invoked unsubscribe must
+    // release this subscriber's refcount at most once (else it would decrement a
+    // co-subscriber's share and prematurely destroy the shared chain).
+    let chainReleased = false;
+    if (this.#cryptoProvider !== null) {
+      this.#decryptChain.acquire(roomId);
+    }
+
     const attach = (ticket: string) => {
       if (destroyed) return;
       const url = `${this.#baseUrl}/api/sdk/messages/subscribe?ticket=${encodeURIComponent(ticket)}&after_seq=${lastSeq}`;
@@ -708,6 +723,10 @@ export class SDKChatClient {
       // Carries crypto_mode for the room. Validate against configured option and
       // cache for the session. Mismatch → throw + destroy stream (SEC-CR-1694).
       es.addEventListener('connected', (ev: Event) => {
+        // Consistent with onmessage/onerror/shutdown: ignore a late prelude after
+        // teardown so a torn-down subscription cannot write client-level
+        // #activeCryptoMode (which subsequent list()/send() would then read).
+        if (destroyed) return;
         const msgEv = ev as MessageEvent;
         try {
           const data = JSON.parse(msgEv.data as string) as { crypto_mode?: string };
@@ -719,17 +738,19 @@ export class SDKChatClient {
           );
           this.#activeCryptoMode = resolved;
         } catch (err) {
-          // crypto_mode_mismatch — abort the stream and surface to caller.
-          es?.close();
-          es = null;
-          if (!destroyed) {
-            reportError(err);
-            destroyed = true;
-          }
+          // crypto_mode_mismatch — surface to caller, then fully tear down THIS
+          // subscription (closes the stream AND releases the decrypt-chain
+          // refcount, so the mismatch does not leak the room's chain entry).
+          if (!destroyed) reportError(err);
+          teardownSubscriber();
         }
       });
 
       es.onmessage = (ev) => {
+        // Consistent with onerror/shutdown: ignore frames after teardown so a
+        // queued message dispatched post-close cannot append a decrypt onto a
+        // released subscriber's chain.
+        if (destroyed) return;
         try {
           const data = JSON.parse(ev.data) as {
             type?: string;
@@ -767,27 +788,37 @@ export class SDKChatClient {
           // 5s timeout prevents a single stuck unseal from blocking all subsequent messages.
           if (this.#cryptoProvider !== null) {
             const provider = this.#cryptoProvider;
-            const chainKey = roomId;
-            const prev = this.#decryptChainByRoom.get(chainKey) ?? Promise.resolve();
-            const next = prev.then(async () => {
+            // Append onto the room's shared serial chain: unseal runs only after
+            // the prior frame's unseal settles, preserving in-order decrypt. The
+            // task NEVER rejects (unseal failure → unsealError; a throwing
+            // onMessage is caught) so a link can't poison the room's chain.
+            this.#decryptChain.append(roomId, async () => {
               const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
               const timeoutMs = 5000;
               const timeoutPromise = new Promise<ArrayBuffer>((_res, rej) =>
                 setTimeout(() => rej(new Error('unseal timeout')), timeoutMs),
               );
+              let out: MessageRow;
               try {
                 const plaintext = await Promise.race([
                   provider.unseal(mappedRow.sealed, ctx),
                   timeoutPromise,
                 ]);
-                args.onMessage({ ...mappedRow, plaintext });
+                out = { ...mappedRow, plaintext };
               } catch (err) {
                 const isTimeout = err instanceof Error && err.message === 'unseal timeout';
                 console.warn('[chat-sdk] subscribe(): unseal failed for seq', mappedRow.seq, err);
-                args.onMessage({ ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined });
+                out = { ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined };
+              }
+              // Deliver exactly once, AFTER the try/catch, so a throwing caller
+              // callback neither re-delivers the row as an unseal error nor
+              // rejects the link (which would wedge the room's serial chain).
+              try {
+                args.onMessage(out);
+              } catch (cbErr) {
+                console.warn('[chat-sdk] subscribe(): onMessage threw for seq', mappedRow.seq, cbErr);
               }
             });
-            this.#decryptChainByRoom.set(chainKey, next);
           } else {
             args.onMessage(mappedRow);
           }
@@ -959,6 +990,29 @@ export class SDKChatClient {
       }, delay);
     };
 
+    // Full teardown of THIS subscription. Idempotent (destroyed + chainReleased
+    // guards). Called from BOTH the returned unsubscribe handle AND the
+    // crypto_mode_mismatch abort path, so every destroyed=true balances its
+    // acquire() with exactly one release() — a mismatch no longer leaks the
+    // room's chain refcount for the client's lifetime.
+    const teardownSubscriber = () => {
+      destroyed = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      es?.close();
+      es = null;
+      // Deregister this subscriber from the room's shared serial decrypt chain.
+      // The chain entry is removed only when the LAST subscriber releases
+      // (refCount → 0), so a co-subscriber sharing this roomId keeps decrypting
+      // in order — teardown of one no longer destroys the shared chain.
+      if (this.#cryptoProvider !== null && !chainReleased) {
+        chainReleased = true;
+        this.#decryptChain.release(roomId);
+      }
+    };
+
     // Initial connection: fetch ticket then open EventSource.
     (async () => {
       if (destroyed) return;
@@ -973,20 +1027,7 @@ export class SDKChatClient {
       attach(ticket);
     })();
 
-    return () => {
-      destroyed = true;
-      if (reconnectTimer !== null) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      es?.close();
-      es = null;
-      // Clean up per-room decrypt chain entry to avoid accumulating stale
-      // Promise<void> entries for rooms that are no longer subscribed.
-      // Note: assumes one active subscriber per room — if two subscribers share
-      // a roomId, teardown of either will remove the shared chain entry.
-      this.#decryptChainByRoom.delete(roomId);
-    };
+    return teardownSubscriber;
   }
 
   // ── W6: Typing / Presence / Read receipts ─────────────────────────────────
