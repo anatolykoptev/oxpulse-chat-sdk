@@ -8,6 +8,7 @@
  */
 
 import { checkOrigin } from './bootstrap.js';
+import { sendRefreshTokenToIframe } from './postmessage.js';
 import {
   WidgetError,
   OriginNotAllowedError,
@@ -26,6 +27,8 @@ import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEve
 
 const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
 const ELEMENT_TAG = 'oxpulse-chat';
+/** Default OxPulse API base URL when no `base-url` override is set. Single source for the postMessage target origin. */
+const DEFAULT_BASE_URL = 'https://oxpulse.chat';
 
 // ── OxpulseChatElement ────────────────────────────────────────────────────────
 
@@ -72,6 +75,10 @@ export class OxpulseChatElement extends HTMLElement {
   #subscribeOnError: ((err: unknown) => void) | null = null;
   /** Timer ID for anon-read token pre-expiry re-mint. */
   #anonRenewTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Live sandboxed iframe (iframe mode only) — target for in-place token refresh. */
+  #iframe: HTMLIFrameElement | null = null;
+  /** Guard: true while refreshToken() syncs the jwt attribute in place — suppresses the remount. */
+  #suppressJwtReboot = false;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -95,6 +102,7 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList?.destroy();
     this.#messageList = null;
     this.#styleEl = null;
+    this.#iframe = null;
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -118,6 +126,9 @@ export class OxpulseChatElement extends HTMLElement {
 
     // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint)
     if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint') {
+      // In-place iframe refresh keeps the jwt attribute (remount source-of-truth) in
+      // sync but must NOT remount — refreshToken() applied the token via postMessage.
+      if (name === 'jwt' && this.#suppressJwtReboot) return;
       // 1H: debounce via queueMicrotask — N synchronous setAttribute calls collapse into 1 bootstrap.
       // Abort the current bootstrap immediately (prevents stale state mutation).
       this.#abortController?.abort();
@@ -160,10 +171,39 @@ export class OxpulseChatElement extends HTMLElement {
 
   /**
    * Provide a fresh JWT (called after 'oxpulse-chat:token-expired' event).
-   * Updates the jwt attribute and re-bootstraps.
+   *
+   * In-place path (iframe mode): posts the fresh JWT to the LIVE iframe over an
+   * origin-pinned postMessage — no remount, so the SSE stream, scroll position
+   * and decrypt state survive. The iframe re-authenticates internally without a
+   * document reload.
+   *
+   * Fallback (inline mode, the iframe is not present/ready, OR a remount is
+   * already pending): re-bootstrap with the fresh token. A pending remount
+   * (e.g. from a same-tick base-url/room change) would replace the current
+   * iframe, so an in-place post to it targets the OLD origin and the browser
+   * drops it (token lost) — instead we sync the attribute and let the pending
+   * remount deliver the fresh token. Inline uses a `readonly`-JWT SDKChatClient
+   * that can only be re-authed by reconstruction, so a re-bootstrap is required.
    */
   refreshToken(jwt: string): void {
-    // Only re-bootstrap if the value actually changes
+    const iframe = this.#iframe;
+    if (iframe?.contentWindow && !this.#bootstrapScheduled) {
+      const config = this.#resolveConfig();
+      if (config) {
+        // Same concrete origin the init path posts to — never '*'.
+        sendRefreshTokenToIframe(iframe, jwt, this.#resolveBaseUrl(config));
+        // Keep the jwt attribute (the remount source-of-truth) in sync so a later
+        // re-bootstrap uses the fresh token — WITHOUT triggering a remount here.
+        this.#suppressJwtReboot = true;
+        try {
+          this.setAttribute('jwt', jwt);
+        } finally {
+          this.#suppressJwtReboot = false;
+        }
+        return;
+      }
+    }
+    // Fallback: no live iframe → re-bootstrap (existing behaviour).
     if (this.getAttribute('jwt') !== jwt) {
       this.setAttribute('jwt', jwt);
       // attributeChangedCallback handles re-bootstrap
@@ -192,6 +232,7 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList?.destroy();
     this.#messageList = null;
     this.#styleEl = null;
+    this.#iframe = null;
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -238,6 +279,8 @@ export class OxpulseChatElement extends HTMLElement {
     this.#composer = null;
     this.#messageList?.destroy();
     this.#messageList = null;
+    // Drop the stale iframe ref; #mountIframe re-sets it in iframe mode, inline leaves it null.
+    this.#iframe = null;
     while (this.#shadow.firstChild) {
       this.#shadow.removeChild(this.#shadow.firstChild);
     }
@@ -345,7 +388,7 @@ export class OxpulseChatElement extends HTMLElement {
       }
 
       // ── Anon-read mode: mint token when allow-anon-read is set and no jwt provided ──
-      const resolvedBaseUrl = config.baseUrl ?? 'https://oxpulse.chat';
+      const resolvedBaseUrl = this.#resolveBaseUrl(config);
       let resolvedJwt = config.jwt;
       let isAnonMode = false;
 
@@ -700,7 +743,7 @@ export class OxpulseChatElement extends HTMLElement {
   #mountIframe(config: WidgetConfig): void {
     if (!this.#shadow) return;
 
-    const baseUrl = config.baseUrl ?? 'https://oxpulse.chat';
+    const baseUrl = this.#resolveBaseUrl(config);
     const parentOrigin = encodeURIComponent(
       typeof window !== 'undefined' ? window.location.origin : 'http://localhost',
     );
@@ -721,6 +764,32 @@ export class OxpulseChatElement extends HTMLElement {
     });
 
     this.#shadow.appendChild(iframe);
+    // Retain the live iframe so refreshToken() can post an in-place token
+    // refresh to it instead of remounting.
+    this.#iframe = iframe;
+  }
+
+  /**
+   * Resolve the widget's API base URL — the single authority for both the iframe
+   * src origin and the postMessage target origin (never '*').
+   *
+   * Validates `base-url` as an absolute http(s) URL: a missing, malformed, or
+   * non-http(s) value (e.g. `'*'`, `'javascript:…'`, garbage) falls back to the
+   * default rather than flowing a magic/injected value into `iframe.src` or a
+   * postMessage targetOrigin.
+   */
+  #resolveBaseUrl(config: WidgetConfig): string {
+    const raw = config.baseUrl;
+    if (!raw) return DEFAULT_BASE_URL;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return raw;
+    } catch {
+      // Not an absolute URL — fall through to the safe default.
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`[oxpulse-chat-widget] ignoring invalid base-url "${raw}" (must be an absolute http(s) URL) — using ${DEFAULT_BASE_URL}`);
+    return DEFAULT_BASE_URL;
   }
 
   /** Resolve WidgetConfig from element attributes + stored callbacks. Returns null if required attrs missing. */
