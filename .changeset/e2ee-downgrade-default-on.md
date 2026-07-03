@@ -29,3 +29,7 @@ mismatch/downgrade poisons only that room — sibling rooms on the same `SDKChat
 (no client-wide brick / DoS amplification via a single malicious `crypto_mode` for one room).
 
 No change for clients WITHOUT an `e2ee` provider: plaintext remains a valid auto-detected mode.
+
+Known follow-up (non-security): the per-room `crypto_mode` cache is evicted at subscription teardown,
+but rooms touched only via `list()` without a live subscription are not yet evicted — a client paging
+many distinct rooms accumulates a small (~100 B) per-room entry until it is recreated.
