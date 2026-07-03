@@ -86,6 +86,43 @@ describe('RoomDecryptChain', () => {
     expect(c.refCountOf(ROOM)).toBe(0);
   });
 
+  it('re-acquire while a task is in flight reuses the chain (deferred delete)', async () => {
+    const c = new RoomDecryptChain();
+    c.acquire(ROOM);
+
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((res) => { releaseFirst = res; });
+
+    // First subscriber appends a task that hangs, then fully tears down (rc → 0).
+    c.append(ROOM, async () => {
+      order.push('1-start');
+      await firstGate;
+      order.push('1-end');
+    });
+    c.release(ROOM);
+    expect(c.refCountOf(ROOM)).toBe(0);
+    await flush();
+    // Deferred delete has NOT fired (the in-flight task is still hanging).
+
+    // Resubscribe the same room: must reuse the still-present entry, not fork a
+    // fresh Promise.resolve() chain.
+    c.acquire(ROOM);
+    expect(c.refCountOf(ROOM)).toBe(1);
+    c.append(ROOM, async () => { order.push('2-run'); });
+    await flush();
+
+    // If the entry had been deleted, task 2 would start immediately. Because the
+    // chain was reused, task 2 is queued behind the hanging task 1.
+    expect(order).toEqual(['1-start']);
+
+    releaseFirst();
+    await flush();
+    expect(order).toEqual(['1-start', '1-end', '2-run']);
+
+    c.release(ROOM);
+  });
+
   it('rooms are independent: a stalled chain in one room does not block another', async () => {
     const c = new RoomDecryptChain();
     c.acquire('roomA');

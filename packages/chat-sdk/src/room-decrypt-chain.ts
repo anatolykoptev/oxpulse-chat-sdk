@@ -11,11 +11,16 @@
  * Refcounting (E2EE concurrency fix): more than one subscribe() can share a
  * roomId on one client (widget remount, visibility re-subscribe without awaiting
  * teardown, reconnect race). Each subscriber acquire()s on subscribe and
- * release()s on teardown; the shared chain entry is removed ONLY when the last
- * subscriber releases (refCount reaches 0). A previous version deleted the entry
- * on ANY teardown, so a surviving co-subscriber's next frame started a FRESH
- * chain from Promise.resolve() that ran concurrently with an in-flight unseal —
- * breaking the in-order guarantee the ratchet depends on.
+ * release()s on teardown; the shared chain entry is removed only when the last
+ * subscriber releases AND the chain has drained (see release()). A previous
+ * version deleted the entry on ANY teardown, so a surviving co-subscriber's next
+ * frame — or a same-room resubscribe after teardown — started a FRESH chain from
+ * Promise.resolve() that ran concurrently with an in-flight unseal, breaking the
+ * ratchet's ordering.
+ *
+ * Guarantee: at most ONE unseal task per room is in flight at any time, across
+ * every subscribe / teardown / resubscribe interleaving — the property a
+ * ratcheting AEAD needs. Rooms remain independent of each other.
  */
 
 interface ChainEntry {
@@ -44,8 +49,9 @@ export class RoomDecryptChain {
 
   /**
    * Append a decrypt task onto `roomId`'s serial chain. The task runs only after
-   * every previously-appended task for the room has settled, preserving in-order
-   * unseal across ALL live subscribers of the room.
+   * every previously-appended task for the room has settled, so at most one
+   * unseal is ever in flight for the room, preserving in-order decrypt across all
+   * of its live subscribers.
    *
    * No-op when the room has no live subscriber (already released): the frame is
    * dropped rather than started off a fresh, unsynchronized chain — matching the
@@ -61,17 +67,32 @@ export class RoomDecryptChain {
   }
 
   /**
-   * Deregister a subscriber for `roomId`. Removes the shared chain entry only
-   * when the last subscriber releases (refCount reaches 0). Safe to call for a
-   * room with no entry (no-op) so teardown is always idempotent.
+   * Deregister a subscriber for `roomId`. Safe to call for a room with no entry,
+   * or one already at refCount 0 (no-op) — release never drives the count below 0.
+   *
+   * When the last subscriber releases (refCount reaches 0) the shared chain entry
+   * is removed ONLY after its in-flight/queued decrypts DRAIN, not synchronously.
+   * A synchronous delete would orphan an in-flight unseal (the promise keeps
+   * running) while a same-room resubscribe's acquire() creates a FRESH chain that
+   * unseals concurrently with the orphan — the very ratchet-desync this class
+   * exists to prevent. Deferring lets a resubscribe re-acquire THIS entry (its
+   * acquire finds it still present) and append AFTER the orphan, staying serial.
+   * The drain callback re-checks identity + refCount: a resubscribe that
+   * re-acquired (refCount > 0) keeps the entry; only a still-idle entry is deleted.
+   * Relies on tasks settling (subscribe()'s 5s unseal timeout guarantees it).
    */
   release(roomId: string): void {
     const entry = this.#byRoom.get(roomId);
-    if (entry === undefined) return;
+    if (entry === undefined || entry.refCount <= 0) return;
     entry.refCount -= 1;
-    if (entry.refCount <= 0) {
-      this.#byRoom.delete(roomId);
-    }
+    if (entry.refCount > 0) return;
+    const draining = entry.chain; // tail resolves (tasks never reject — see append)
+    void draining.then(() => {
+      const current = this.#byRoom.get(roomId);
+      if (current === entry && current.refCount <= 0) {
+        this.#byRoom.delete(roomId);
+      }
+    });
   }
 
   /** Current live-subscriber count for `roomId` (0 when the room has no entry). */

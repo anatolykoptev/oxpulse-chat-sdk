@@ -260,4 +260,134 @@ describe('subscribe() per-room decrypt chain — shared-subscriber refcount', ()
 
     teardown();
   });
+
+  // Same ratchet-desync class, different trigger: FULL teardown (refCount 0) then
+  // a same-room resubscribe while an unseal from the old subscription is still in
+  // flight. A synchronous delete-at-zero would orphan that unseal and let the
+  // resubscribe fork a fresh concurrent chain → maxInFlight 2.
+  it('resubscribe after teardown must reuse the room chain while an unseal is in flight', async () => {
+    const provider = makeControllableProvider();
+    const instances = installMockEventSource();
+    stubTicketFetch();
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+
+    // Lone subscriber A.
+    const teardownA = client.subscribe(ROOM_ID, { onMessage: vi.fn() });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    // Frame 1 → A → unseal(1) starts and HANGS.
+    instances[0]!.emit(frame(1));
+    await flushMicrotasks();
+    expect(provider.inFlight).toBe(1);
+
+    // Full teardown of the ONLY subscriber (refCount → 0) while unseal(1) hangs.
+    teardownA();
+    await flushMicrotasks();
+
+    // Resubscribe the same room (widget remount) — the orphaned unseal(1) is
+    // still in flight, so the chain entry must survive and be reused.
+    const bMsgs: number[] = [];
+    const teardownB = client.subscribe(ROOM_ID, {
+      onMessage: (row) => { bMsgs.push(row.seq); },
+    });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    // Frame 2 → B. Must queue behind the still-in-flight unseal(1), not run concurrently.
+    instances[1]!.emit(frame(2));
+    await flushMicrotasks();
+    expect(provider.maxInFlight).toBeLessThanOrEqual(1);
+    expect(bMsgs).toEqual([]); // B's frame is held until unseal(1) settles
+
+    // Drain unseal(1) → unseal(2) may now run and B receives frame 2.
+    provider.releaseSeq(1);
+    await flushMicrotasks();
+    provider.releaseSeq(2);
+    await flushMicrotasks();
+    expect(bMsgs).toEqual([2]);
+    expect(provider.maxInFlight).toBe(1);
+
+    teardownB();
+  });
+
+  // Idempotency: a double-invoked unsubscribe of one co-subscriber must release
+  // its refcount at most once, else it steals the survivor's count and destroys
+  // the shared chain (the survivor's frames would then be dropped).
+  it('double-invoked teardown of one co-subscriber does not strand the survivor', async () => {
+    const provider = makeControllableProvider();
+    const instances = installMockEventSource();
+    stubTicketFetch();
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+
+    const teardownA = client.subscribe(ROOM_ID, { onMessage: vi.fn() });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    const bMsgs: number[] = [];
+    const teardownB = client.subscribe(ROOM_ID, {
+      onMessage: (row) => { bMsgs.push(row.seq); },
+    });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    // Tear A down TWICE (caller misuse) while B stays live.
+    teardownA();
+    teardownA();
+    await flushMicrotasks(); // let any (incorrect) deferred delete fire
+
+    // B is still subscribed → its frame must decrypt and deliver, not be dropped.
+    instances[1]!.emit(frame(7));
+    await flushMicrotasks();
+    provider.releaseSeq(7);
+    await flushMicrotasks();
+
+    expect(bMsgs).toEqual([7]);
+
+    teardownB();
+  });
+
+  // A throwing onMessage callback must not reject the chain link and permanently
+  // wedge the room's serial decrypt queue; delivery must happen exactly once.
+  it('a throwing onMessage callback does not wedge the room chain', async () => {
+    const provider = makeControllableProvider();
+    const instances = installMockEventSource();
+    stubTicketFetch();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+
+    const seen: number[] = [];
+    const teardown = client.subscribe(ROOM_ID, {
+      onMessage: (row) => {
+        seen.push(row.seq);
+        if (row.seq === 1) throw new Error('caller onMessage boom');
+      },
+    });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    const es = instances[0]!;
+    es.emit(frame(1));
+    es.emit(frame(2));
+    await flushMicrotasks();
+
+    provider.releaseSeq(1); // frame 1 unseals → onMessage throws (caught)
+    await flushMicrotasks();
+    provider.releaseSeq(2); // chain must NOT be wedged → frame 2 still unseals
+    await flushMicrotasks();
+
+    // Each frame delivered exactly once, in order; the throw did not wedge the chain.
+    expect(seen).toEqual([1, 2]);
+
+    warnSpy.mockRestore();
+    teardown();
+  });
 });
