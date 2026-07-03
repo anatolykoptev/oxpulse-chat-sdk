@@ -29,6 +29,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
 import type { CryptoProvider, SealContext } from '../types.js';
+import { installMockEventSource } from './helpers.js';
 
 const BASE_URL = 'http://x';
 const JWT = 'test-token';
@@ -122,37 +123,6 @@ function listRow(seq: number): Record<string, unknown> {
   };
 }
 
-interface FakeES {
-  url: string;
-  emit(data: string): void;
-}
-
-/** Install a mock EventSource collecting EVERY constructed instance in order. */
-function installMockEventSource(): FakeES[] {
-  const instances: FakeES[] = [];
-  class MockES {
-    onmessage: ((ev: MessageEvent) => void) | null = null;
-    onerror: (() => void) | null = null;
-    listeners: Record<string, (ev: MessageEvent) => void> = {};
-    constructor(url: string) {
-      const self = this;
-      instances.push({
-        url,
-        emit: (data: string) => self.onmessage?.({ data } as MessageEvent),
-      });
-    }
-    addEventListener(type: string, cb: (ev: MessageEvent) => void) {
-      this.listeners[type] = cb;
-    }
-    removeEventListener(type: string) {
-      delete this.listeners[type];
-    }
-    close() {}
-  }
-  vi.stubGlobal('EventSource', MockES);
-  return instances;
-}
-
 /**
  * Route fetch by URL/method:
  *   POST .../subscribe-ticket    → { ticket }
@@ -203,17 +173,17 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
   it('scrollback unseal must NOT run concurrently with an in-flight streamed unseal (subscribed room)', async () => {
     const room = 'room-scrollback';
     const provider = makeRoomTrackingProvider();
-    const instances = installMockEventSource();
+    const es = installMockEventSource();
     const pageByRoom = new Map<string, unknown[]>();
     installFetchRouter(pageByRoom);
 
     const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
     client.subscribe(room, { onMessage: vi.fn() });
     await settleInitialSubscribe();
-    expect(instances.length).toBe(1);
+    expect(es.getControllers().length).toBe(1);
 
     // Live frame seq=1 arrives → its unseal starts on the chain and HANGS.
-    instances[0]!.emit(frame(1));
+    es.getLastController()!.emitMessage(frame(1));
     await flushMicrotasks();
     expect(provider.inFlightByRoom.get(room)).toBe(1);
     expect(provider.maxFor(room)).toBe(1);
@@ -277,7 +247,7 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
   it('scrollback ordering preserved: multi-row page unseals in server order, serialized behind the live stream', async () => {
     const room = 'room-order';
     const provider = makeRoomTrackingProvider();
-    const instances = installMockEventSource();
+    const es = installMockEventSource();
     const pageByRoom = new Map<string, unknown[]>();
     installFetchRouter(pageByRoom);
 
@@ -286,7 +256,7 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
     await settleInitialSubscribe();
 
     // Live seq=1 unseal starts and hangs.
-    instances[0]!.emit(frame(1));
+    es.getLastController()!.emitMessage(frame(1));
     await flushMicrotasks();
     expect(provider.maxFor(room)).toBe(1);
 
@@ -331,14 +301,14 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
         throw new Error('bad tag');
       },
     };
-    const instances = installMockEventSource();
+    const es = installMockEventSource();
     const pageByRoom = new Map<string, unknown[]>();
     installFetchRouter(pageByRoom);
 
     const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
     client.subscribe(room, { onMessage: vi.fn() });
     await settleInitialSubscribe();
-    expect(instances.length).toBe(1);
+    expect(es.getControllers().length).toBe(1);
 
     // Subscription is live (refCount > 0) → scrollback routes on-chain.
     pageByRoom.set(room, [listRow(2), listRow(3)]);
@@ -355,7 +325,7 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
   it('subscription torn down mid-scrollback: already-queued scrollback rows still drain and deliver', async () => {
     const room = 'room-teardown-mid-scrollback';
     const provider = makeRoomTrackingProvider();
-    const instances = installMockEventSource();
+    const es = installMockEventSource();
     const pageByRoom = new Map<string, unknown[]>();
     installFetchRouter(pageByRoom);
 
@@ -364,7 +334,7 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
     await settleInitialSubscribe();
 
     // Live seq=1 unseal starts and hangs — keeps refCount > 0 during scrollback.
-    instances[0]!.emit(frame(1));
+    es.getLastController()!.emitMessage(frame(1));
     await flushMicrotasks();
 
     // Scrollback queued on-chain (refCount > 0 at dispatch).
@@ -387,5 +357,100 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
     expect(provider.maxFor(room)).toBeLessThanOrEqual(1);
     expect(res.items.map((r) => r.seq)).toEqual([2]);
     expect(res.items[0]!.unsealError).toBeUndefined();
+  });
+
+  it('on-chain scrollback: a row whose unseal exceeds the 5s timeout is bailed as unsealError (isTimeout branch), row not dropped', async () => {
+    const room = 'room-scrollback-timeout';
+    const provider = makeRoomTrackingProvider(); // unseal HANGS until released
+    const es = installMockEventSource();
+    const pageByRoom = new Map<string, unknown[]>();
+    installFetchRouter(pageByRoom);
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    client.subscribe(room, { onMessage: vi.fn() });
+    await settleInitialSubscribe();
+
+    // Subscribed (refCount > 0), chain empty → the scrollback unseal runs
+    // immediately and hangs. The on-chain 5s timeout (via #appendDecryptTask)
+    // must fire and bail the row — the off-chain path has no such timeout.
+    pageByRoom.set(room, [listRow(2)]);
+    const listPromise = client.list(room, { beforeSeq: 100 });
+    await flushMicrotasks();
+    expect(provider.inFlightByRoom.get(room)).toBe(1);
+
+    // Advance past the 5s timeout while the provider is still hung.
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushMicrotasks();
+
+    const res = await listPromise;
+    // Row preserved (not dropped), flagged with the timeout classification.
+    expect(res.items.map((r) => r.seq)).toEqual([2]);
+    expect(res.items[0]!.unsealError).toBe('unknown');
+    expect(res.items[0]!.plaintext).toBeUndefined();
+
+    provider.releaseAll();
+    await flushMicrotasks();
+  });
+
+  it('two concurrent list() calls on the same subscribed room stay <=1 unseal in flight', async () => {
+    const room = 'room-two-list';
+    const provider = makeRoomTrackingProvider();
+    const es = installMockEventSource();
+    // Route by before_seq so each list() gets a DISTINCT scrollback row (no
+    // resolver-collision) while both target the same room's shared chain.
+    let ticketCounter = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes('/subscribe-ticket')) {
+          ticketCounter += 1;
+          return new Response(JSON.stringify({ ticket: `t-${ticketCounter}` }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/sdk/messages?')) {
+          const before = new URL(url).searchParams.get('before_seq');
+          const seq = before === '100' ? 2 : 3;
+          return new Response(
+            JSON.stringify({ items: [listRow(seq)], has_more: false, next_cursor: null }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }),
+    );
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    client.subscribe(room, { onMessage: vi.fn() });
+    await settleInitialSubscribe();
+
+    // A live streamed unseal starts and hangs (holds the chain head).
+    es.getLastController()!.emitMessage(frame(1));
+    await flushMicrotasks();
+    expect(provider.maxFor(room)).toBe(1);
+
+    // Two scrollback list() calls on the SAME subscribed room: both pass the
+    // refCount check and append their row onto the SAME serial chain.
+    const p1 = client.list(room, { beforeSeq: 100 });
+    const p2 = client.list(room, { beforeSeq: 200 });
+    await flushMicrotasks();
+
+    // INVARIANT: both queue behind the hung stream unseal — never concurrent.
+    expect(provider.maxFor(room)).toBeLessThanOrEqual(1);
+
+    // Drain the head, then each scrollback row in turn — still serial throughout.
+    provider.release(room, 1);
+    await flushMicrotasks();
+    provider.release(room, 2);
+    await flushMicrotasks();
+    provider.release(room, 3);
+    await flushMicrotasks();
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(provider.maxFor(room)).toBe(1);
+    expect(r1.items.map((r) => r.seq)).toEqual([2]);
+    expect(r2.items.map((r) => r.seq)).toEqual([3]);
   });
 });

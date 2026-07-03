@@ -747,6 +747,14 @@ export class SDKChatClient {
       //       the entry lingers at refCount 0 while a torn-down subscriber's last
       //       streamed unseal is still draining (see RoomDecryptChain.release) —
       //       runs off-chain concurrently with that draining unseal.
+      //
+      // Timeout ASYMMETRY (by design, same list() call, different failure
+      // semantics by subscription state): the on-chain path (refCount > 0)
+      // inherits #appendDecryptTask's 5s per-row timeout — a stuck row bails with
+      // an unsealError so the chain drains — whereas the off-chain path
+      // (refCount 0) awaits provider.unseal with NO timeout and hangs the fetch
+      // indefinitely on a stuck row (unchanged from before this fix). See the
+      // changeset for the caller-facing note.
       if (this.#decryptChain.refCountOf(roomId) > 0) {
         items = await this.#unsealRowsOnChain(roomId, rawItems);
       } else {
@@ -788,9 +796,24 @@ export class SDKChatClient {
    * Append a per-room serial decrypt task onto the room's #decryptChain: unseal
    * `mappedRow` (5s timeout) then deliver via `onMessage`. The task NEVER rejects
    * (unseal failure → unsealError; a throwing onMessage is caught) so a link can't
-   * poison the room's chain. Shared by the live subscribe() SSE stream AND the
-   * reconnect replay path so BOTH serialize on the SAME queue — at most one unseal
-   * per room is ever in flight, across the reconnect boundary too (SEC-CR-14-01).
+   * poison the room's chain. Shared by the live subscribe() SSE stream, the
+   * reconnect replay path (SEC-CR-14-01), and list() scrollback (SEC-CR-14-02) so
+   * all three serialize on the SAME queue.
+   *
+   * The at-most-one-unseal-in-flight invariant holds for unseal calls that SETTLE
+   * within the 5s timeout. It is NOT categorical: the timeout is a `Promise.race`,
+   * which ABANDONS (does not cancel) a slow unseal — a >5s unseal keeps running
+   * detached while this task settles (as an unsealError) and the chain starts the
+   * next task's unseal, so two unseals can be in flight for the room. That residual
+   * is pre-existing across all three call sites, and is bounded to idempotent
+   * double-DELIVERY by sframe-ratchet's static per-(room,sender) key (NOT a replay
+   * or confidentiality break). A genuine AbortSignal cancel would need a
+   * CryptoProvider.unseal interface change across every implementer — tracked
+   * separately. The `isTimeout` branch below emits a DISTINCT warn so a real >5s
+   * abandonment is observable in prod, not silently folded into unsealError.
+   *
+   * `source` tags the log line (e.g. 'decrypt task' for the stream, 'list()
+   * scrollback' for pagination) so a failure's origin is legible in triage.
    *
    * No-op unless a crypto provider is configured (callers already gate on this;
    * the guard keeps the method self-contained). RoomDecryptChain.append gates on a
@@ -800,6 +823,7 @@ export class SDKChatClient {
     roomId: string,
     mappedRow: MessageRow,
     onMessage: (row: MessageRow) => void,
+    source = 'decrypt task',
   ): void {
     const provider = this.#cryptoProvider;
     if (provider === null) return;
@@ -818,7 +842,19 @@ export class SDKChatClient {
         out = { ...mappedRow, plaintext };
       } catch (err) {
         const isTimeout = err instanceof Error && err.message === 'unseal timeout';
-        console.warn('[chat-sdk] decrypt task: unseal failed for seq', mappedRow.seq, err);
+        if (isTimeout) {
+          // A real >5s timeout: the unseal was ABANDONED (Promise.race does not
+          // cancel it) and is still running detached, so the chain's next unseal
+          // may now start concurrently. Distinct signal (repo rule: a
+          // write/decrypt failure must log or bump a metric; the SDK has no
+          // metric seam, so a warn in the existing idiom) so this is not silent.
+          console.warn(
+            `[chat-sdk] ${source}: unseal TIMED OUT after ${timeoutMs}ms (abandoned, still running detached) for seq`,
+            mappedRow.seq,
+          );
+        } else {
+          console.warn(`[chat-sdk] ${source}: unseal failed for seq`, mappedRow.seq, err);
+        }
         out = { ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined };
       }
       // Deliver exactly once, AFTER the try/catch, so a throwing caller callback
@@ -827,7 +863,7 @@ export class SDKChatClient {
       try {
         onMessage(out);
       } catch (cbErr) {
-        console.warn('[chat-sdk] decrypt task: onMessage threw for seq', mappedRow.seq, cbErr);
+        console.warn(`[chat-sdk] ${source}: onMessage threw for seq`, mappedRow.seq, cbErr);
       }
     });
   }
@@ -858,7 +894,7 @@ export class SDKChatClient {
       rawItems.map(
         (row) =>
           new Promise<MessageRow>((resolve) => {
-            this.#appendDecryptTask(roomId, row, resolve);
+            this.#appendDecryptTask(roomId, row, resolve, 'list() scrollback');
           }),
       ),
     );
