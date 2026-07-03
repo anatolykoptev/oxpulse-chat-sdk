@@ -723,6 +723,10 @@ export class SDKChatClient {
       // Carries crypto_mode for the room. Validate against configured option and
       // cache for the session. Mismatch → throw + destroy stream (SEC-CR-1694).
       es.addEventListener('connected', (ev: Event) => {
+        // Consistent with onmessage/onerror/shutdown: ignore a late prelude after
+        // teardown so a torn-down subscription cannot write client-level
+        // #activeCryptoMode (which subsequent list()/send() would then read).
+        if (destroyed) return;
         const msgEv = ev as MessageEvent;
         try {
           const data = JSON.parse(msgEv.data as string) as { crypto_mode?: string };

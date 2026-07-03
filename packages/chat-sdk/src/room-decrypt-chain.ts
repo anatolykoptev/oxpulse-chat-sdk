@@ -107,9 +107,9 @@ export class RoomDecryptChain {
     if (entry === undefined || entry.refCount <= 0) return;
     entry.refCount -= 1;
     if (entry.refCount > 0) return;
-    const draining = entry.chain; // tail resolves (tasks never reject — see append)
+    const draining = entry.chain;
     const generationAtRelease = entry.generation;
-    void draining.then(() => {
+    const removeIfStillIdle = () => {
       const current = this.#byRoom.get(roomId);
       if (
         current === entry &&
@@ -118,7 +118,11 @@ export class RoomDecryptChain {
       ) {
         this.#byRoom.delete(roomId);
       }
-    });
+    };
+    // Run cleanup whether the tail resolves OR rejects — tasks are contracted to
+    // self-catch (never reject), but a rejected tail must still trigger removal
+    // rather than leak the entry + surface an unhandled rejection.
+    void draining.then(removeIfStillIdle, removeIfStillIdle);
   }
 
   /** Current live-subscriber count for `roomId` (0 when the room has no entry). */
