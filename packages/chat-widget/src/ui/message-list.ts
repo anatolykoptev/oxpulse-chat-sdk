@@ -12,7 +12,7 @@
 import { renderMarkdown } from '../utils/markdown.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl } from '../utils/attachments.js';
-import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText } from '../utils/list-helpers.js';
+import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText } from '../utils/list-helpers.js';
 import { reactionAriaLabel } from '../utils/reaction-types.js';
 import { ReactionPicker } from './reaction-picker.js';
 
@@ -733,32 +733,51 @@ export class MessageList {
     el.setAttribute('data-msg-id', row.msgId);
     if (chained) el.setAttribute('data-chained', 'true');
 
-    // B4: aria-label for screen readers.
+    this.#populateBubble(el, row, chained);
+    return el;
+  }
+
+  /**
+   * B4: Compute the bubble's aria-label for screen readers.
+   * review-fix HIGH#1: this is the SOLE aria-label computation — called from
+   * #populateBubble, which both #createBubble (initial render) AND
+   * #updateBubble (every live re-render: mutation SSE, dedupe/reclassify
+   * upsert) run through. Previously this lived only in #createBubble, so a
+   * message redelivered with a new unsealError/deletedAt after its first
+   * render kept announcing its ORIGINAL content — a live a11y + confidentiality
+   * -adjacent gap (a screen reader would speak stale plaintext of a message
+   * later flagged as tampered/replayed).
+   */
+  #ariaLabelFor(row: MessageRow): string {
+    const isSelf = row.senderUid === this.#selfUid;
     // T18: use roster name for other writers; "You" for self.
     // escapeHtml on roster name in case it contains special chars in the attribute context.
     const rosterName = isSelf ? 'You' : (this.#roster.get(row.senderUid) ?? row.senderUid.slice(0, 8));
     const senderLabel = escapeHtml(rosterName);
     const timeText = formatTime(rowTime(row));
-    // U2: a11y — announce the tombstone / failed-decrypt placeholder text instead
-    // of an empty body (plaintext is undefined in both cases, so decodeText()
+    // U2: announce the tombstone / failed-decrypt placeholder text instead of
+    // an empty body (plaintext is undefined in both cases, so decodeText()
     // would otherwise yield '' and the bubble would read as empty to a screen
     // reader). Priority MUST mirror #populateBubble's body-render order exactly
     // (deletedAt wins over unsealError) — divergent priority here would announce
     // a different state than what's visually shown for a row carrying both flags.
+    // U2 review-fix: aria uses the glyph-free variant (unsealErrorAriaText) —
+    // see its doc comment for why the lock emoji is dropped from speech.
     const plainBody = row.deletedAt
       ? tombstoneText('everyone')
       : row.unsealError
-        ? unsealErrorText()
+        ? unsealErrorAriaText()
         : decodeText(row).replace(/\n/g, ' ').slice(0, 200);
-    el.setAttribute('aria-label', `Message from ${senderLabel} at ${timeText}: ${plainBody}`);
-
-    this.#populateBubble(el, row, chained);
-    return el;
+    return `Message from ${senderLabel} at ${timeText}: ${plainBody}`;
   }
 
   /** Populate or update the interior of a bubble element. */
   #populateBubble(el: HTMLElement, row: MessageRow, chained: boolean): void {
     const isSelf = row.senderUid === this.#selfUid;
+
+    // review-fix HIGH#1: recompute aria-label every call so it stays in sync
+    // on live updates (#updateBubble), not just the initial #createBubble render.
+    el.setAttribute('aria-label', this.#ariaLabelFor(row));
 
     // Preserve existing reaction cluster if present (reactions are managed separately)
     const existingCluster = el.querySelector('.oxp-bubble-reactions');
@@ -805,8 +824,13 @@ export class MessageList {
     }
     el.appendChild(bodyEl);
 
-    // W2.2 slice 4: Render attachment bubbles
-    if (row.attachments && row.attachments.length > 0) {
+    // W2.2 slice 4: Render attachment bubbles.
+    // review-fix LOW#1: gate on !deletedAt && !unsealError — unreachable today
+    // (no code path sets row.attachments alongside either flag) but closes the
+    // same latent fall-through deletedAt already had: without this guard, a
+    // future wiring of attachment metadata onto a tombstoned or failed-decrypt
+    // row would render attachment links next to the placeholder text.
+    if (!row.deletedAt && !row.unsealError && row.attachments && row.attachments.length > 0) {
       const attachmentsEl = document.createElement('div');
       attachmentsEl.className = 'oxp-bubble-attachments';
       for (const att of row.attachments) {
