@@ -18,106 +18,27 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
 import { SDKChatError } from '../errors.js';
-import type { CryptoProvider } from '../types.js';
+import {
+  TEST_BASE_URL as BASE_URL,
+  TEST_JWT as JWT,
+  TEST_SENDER_UID as SENDER_UID,
+  makeOkSendResponse,
+  makeListResponse as sharedMakeListResponse,
+  installMockEventSource,
+  makeSpyCryptoProvider,
+  flush,
+} from './helpers.js';
 
-const BASE_URL = 'http://x';
-const JWT = 'test-token';
 const ROOM_ID = 'room-plaintext-test';
-const SENDER_UID = 'user-test-1';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeOkSendResponse(seq = 1, msgId = 'msg-001'): Response {
-  return {
-    ok: true,
-    status: 200,
-    json: async () => ({ seq, msg_id: msgId }),
-  } as unknown as Response;
-}
-
+// Thin wrappers over the shared helpers keep this file's existing call sites stable.
 function makeListResponse(sealedB64: string, cryptoMode?: string): Response {
-  const body: Record<string, unknown> = {
-    items: [
-      {
-        seq: 1,
-        msg_id: 'msg-001',
-        sender_uid: SENDER_UID,
-        sealed_b64: sealedB64,
-        created_at: '2026-05-27T00:00:00Z',
-        thread_root_msg_id: null,
-        product_ref: null,
-        product_meta: null,
-      },
-    ],
-    has_more: false,
-    next_cursor: null,
-  };
-  if (cryptoMode !== undefined) {
-    body['crypto_mode'] = cryptoMode;
-  }
-  return new Response(JSON.stringify(body), { status: 200 });
+  return sharedMakeListResponse(sealedB64, { cryptoMode });
 }
-
-function makeCustomCryptoProvider(): CryptoProvider & { sealSpy: ReturnType<typeof vi.fn> } {
-  const sealSpy = vi.fn(async (plain: ArrayBuffer) => plain);
-  const provider: CryptoProvider & { sealSpy: ReturnType<typeof vi.fn> } = {
-    sealSpy,
-    seal: sealSpy,
-    unseal: vi.fn(async (cipher: ArrayBuffer) => cipher),
-  };
-  return provider;
-}
-
-// Mock EventSource controller for subscribe tests.
-interface MockESController {
-  emitNamed(type: string, data: string): void;
-  emitMessage(data: string): void;
-  emitError(): void;
-}
-
-function installMockEventSource(): { getLastController: () => MockESController | null } {
-  let lastController: MockESController | null = null;
-
-  class MockES {
-    onmessage: ((ev: MessageEvent) => void) | null = null;
-    onerror: ((ev: Event) => void) | null = null;
-    private _listeners: Map<string, Array<(ev: MessageEvent) => void>> = new Map();
-
-    constructor(_url: string) {
-      const self = this;
-      lastController = {
-        emitNamed: (type: string, data: string) => {
-          const cbs = self._listeners.get(type) ?? [];
-          const ev = Object.assign(new Event(type), { data }) as MessageEvent;
-          for (const cb of cbs) cb(ev);
-        },
-        emitMessage: (data: string) => {
-          self.onmessage?.({ data } as MessageEvent);
-        },
-        emitError: () => {
-          self.onerror?.(new Event('error'));
-        },
-      };
-    }
-
-    addEventListener(type: string, cb: (ev: MessageEvent) => void) {
-      const arr = this._listeners.get(type) ?? [];
-      arr.push(cb);
-      this._listeners.set(type, arr);
-    }
-
-    close() {}
-  }
-
-  vi.stubGlobal('EventSource', MockES);
-  return { getLastController: () => lastController };
-}
-
-// Flush microtasks N times.
-async function flush(rounds = 20): Promise<void> {
-  for (let i = 0; i < rounds; i++) await Promise.resolve();
+// Identity-seal provider (seal returns its input): this file asserts seal ARGS,
+// not sealed output, so the marker-byte default is unnecessary here.
+function makeCustomCryptoProvider() {
+  return makeSpyCryptoProvider(async (plain: ArrayBuffer) => plain);
 }
 
 // ---------------------------------------------------------------------------

@@ -289,18 +289,24 @@ export class SDKChatClient {
   readonly #cryptoMode: CryptoMode | null;
 
   /**
-   * Phase 2: active crypto_mode for the current session.
-   * Populated on first list() or subscribe() prelude that carries a crypto_mode field.
-   * null = not yet discovered.
+   * Phase 2 + SEC-CR-001: active (server-discovered) crypto_mode, PER ROOM.
+   * Populated on the first list() or subscribe() prelude for a room that carries a
+   * crypto_mode field. Absent key = not yet discovered for that room.
+   *
+   * Scoped per-roomId (not client-wide) so one room's discovery/mismatch cannot
+   * change another room's mode. #cryptoMode (the configured expectation) stays
+   * client-level; only the discovered mode is per-room.
    */
-  #activeCryptoMode: CryptoMode | null = null;
+  readonly #activeCryptoModeByRoom = new Map<string, CryptoMode>();
 
   /**
-   * SEC-CR-1695-02: set to true when a crypto_mode_mismatch or unknown crypto_mode
-   * is detected. Once poisoned, all send/list/subscribe calls throw immediately.
-   * Callers must recreate the client instance to recover.
+   * SEC-CR-1695-02 + SEC-CR-001: set of roomIds poisoned by a crypto_mode_mismatch
+   * or unknown crypto_mode. A poisoned room fails send/list/subscribe CLOSED; OTHER
+   * rooms on the same client keep working. Scoped per-room (not a client-wide flag)
+   * so a malicious server downgrading room A cannot brick legitimate sibling room B
+   * (DoS-amplification defense). Callers recreate the client to retry a poisoned room.
    */
-  #cryptoModePoisoned: boolean = false;
+  readonly #poisonedRooms = new Set<string>();
 
   constructor(opts: SDKChatClientOptions) {
     if (opts.jwt.startsWith('Bearer ')) {
@@ -446,6 +452,42 @@ export class SDKChatClient {
     return this.#jwt;
   }
 
+  // ── Phase 2 + SEC-CR-001: per-room crypto_mode helpers ─────────────────────
+
+  /**
+   * SEC-CR-001: fail CLOSED for a single poisoned room. A room poisoned by a prior
+   * crypto_mode_mismatch refuses send/list/subscribe; sibling rooms are unaffected.
+   */
+  #assertRoomNotPoisoned(roomId: string): void {
+    if (this.#poisonedRooms.has(roomId)) {
+      throw new SDKChatError(
+        'crypto_mode_poisoned',
+        `room ${roomId} was poisoned by a prior crypto_mode_mismatch; recreate the client instance to retry this room`,
+      );
+    }
+  }
+
+  /**
+   * SEC-CR-001: validate a server-emitted crypto_mode for ONE room against the
+   * client-configured expectation (#cryptoMode) and cache the resolved mode for that
+   * room. On mismatch/unknown, validateAndResolveCryptoMode poisons ONLY this room
+   * (via the onPoison callback) and rethrows — so a downgrade signal for one room can
+   * never brick a sibling room, while each room STILL rejects its own downgrade.
+   * Returns the resolved mode (null = still undiscovered for this room).
+   */
+  #resolveRoomCryptoMode(roomId: string, received: string | undefined): CryptoMode | null {
+    const resolved = validateAndResolveCryptoMode(
+      this.#cryptoMode,
+      received,
+      this.#activeCryptoModeByRoom.get(roomId) ?? null,
+      () => { this.#poisonedRooms.add(roomId); },
+    );
+    if (resolved !== null) {
+      this.#activeCryptoModeByRoom.set(roomId, resolved);
+    }
+    return resolved;
+  }
+
   /**
    * W6 E2EE: encrypt text and send as a sealed message.
    *
@@ -461,20 +503,15 @@ export class SDKChatClient {
     roomId: string,
     args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: unknown },
   ): Promise<{ seq: number; msgId: string }> {
-    // SEC-CR-1695-02: fail-CLOSED if client was poisoned by a prior mismatch.
-    if (this.#cryptoModePoisoned) {
-      throw new SDKChatError(
-        'crypto_mode_poisoned',
-        'client was poisoned by prior crypto_mode_mismatch; recreate the client instance',
-      );
-    }
+    // SEC-CR-1695-02 + SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior mismatch.
+    this.#assertRoomNotPoisoned(roomId);
 
     // AD-1 downgrade defense (fail-closed backstop): refuse to send if e2ee is
-    // configured but no crypto_mode is known. SEC-CR-001 makes #cryptoMode default
-    // to 'sframe-static' whenever an e2ee provider is present, so in normal operation
-    // knownMode is never null here — this guard remains as a defense-in-depth invariant
-    // that a future refactor cannot silently seal-blind or downgrade past.
-    const knownMode = this.#activeCryptoMode ?? this.#cryptoMode;
+    // configured but no crypto_mode is known for this room. SEC-CR-001 makes #cryptoMode
+    // default to 'sframe-static' whenever an e2ee provider is present, so in normal
+    // operation knownMode is never null here — this guard remains as a defense-in-depth
+    // invariant that a future refactor cannot silently seal-blind or downgrade past.
+    const knownMode = this.#activeCryptoModeByRoom.get(roomId) ?? this.#cryptoMode;
     if (knownMode === null && this.#cryptoProvider !== null) {
       throw new SDKChatError(
         'crypto_mode_undiscovered',
@@ -486,8 +523,8 @@ export class SDKChatClient {
     const plainBytes = new TextEncoder().encode(args.text).buffer as ArrayBuffer;
 
     // Phase 2: plaintext mode — skip seal, send UTF-8 bytes directly.
-    // Prefer #activeCryptoMode (discovered from server) over #cryptoMode (configured).
-    const effectiveMode = this.#activeCryptoMode ?? this.#cryptoMode;
+    // Prefer this room's discovered mode over #cryptoMode (the configured expectation).
+    const effectiveMode = this.#activeCryptoModeByRoom.get(roomId) ?? this.#cryptoMode;
     if (effectiveMode === 'plaintext') {
       return this.send(roomId, {
         senderUid: args.senderUid,
@@ -518,13 +555,8 @@ export class SDKChatClient {
   }
 
   async send(roomId: string, args: SendArgs): Promise<{ seq: number; msgId: string }> {
-    // SEC-CR-1695-02: fail-CLOSED if client was poisoned by a prior mismatch.
-    if (this.#cryptoModePoisoned) {
-      throw new SDKChatError(
-        'crypto_mode_poisoned',
-        'client was poisoned by prior crypto_mode_mismatch; recreate the client instance',
-      );
-    }
+    // SEC-CR-1695-02 + SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior mismatch.
+    this.#assertRoomNotPoisoned(roomId);
     const msgId = args.msgId ?? crypto.randomUUID();
     const payload: Record<string, unknown> = {
       room_id: roomId,
@@ -584,13 +616,8 @@ export class SDKChatClient {
     roomId: string,
     args: ListArgs,
   ): Promise<{ rawItems: MessageRow[]; hasMore: boolean; nextCursor: number | null }> {
-    // SEC-CR-1695-02: fail-CLOSED if client was poisoned by a prior mismatch.
-    if (this.#cryptoModePoisoned) {
-      throw new SDKChatError(
-        'crypto_mode_poisoned',
-        'client was poisoned by prior crypto_mode_mismatch; recreate the client instance',
-      );
-    }
+    // SEC-CR-1695-02 + SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior mismatch.
+    this.#assertRoomNotPoisoned(roomId);
     const params = new URLSearchParams({
       room_id: roomId,
       after_seq: String(args.afterSeq ?? 0),
@@ -637,14 +664,9 @@ export class SDKChatClient {
       crypto_mode?: string;
     };
 
-    // Phase 2: validate and cache crypto_mode from list response.
-    // validateAndResolveCryptoMode throws SDKChatError('crypto_mode_mismatch') on mismatch or unknown.
-    this.#activeCryptoMode = validateAndResolveCryptoMode(
-      this.#cryptoMode,
-      json.crypto_mode,
-      this.#activeCryptoMode,
-      () => { this.#cryptoModePoisoned = true; },
-    );
+    // Phase 2 + SEC-CR-001: validate and cache crypto_mode from list response, PER ROOM.
+    // Throws SDKChatError('crypto_mode_mismatch') + poisons ONLY this room on mismatch/unknown.
+    this.#resolveRoomCryptoMode(roomId, json.crypto_mode);
 
     if (json.has_more && json.next_cursor == null) {
       throw new SDKChatError(
@@ -667,7 +689,7 @@ export class SDKChatClient {
     // - plaintext: base64-decode → UTF-8 string in plaintext field (no unseal).
     // - sframe-static (or not yet discovered): use CryptoProvider if configured.
     let items: MessageRow[];
-    if (this.#activeCryptoMode === 'plaintext') {
+    if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
       // Plaintext mode: sealed is raw UTF-8 bytes — just expose as plaintext.
       items = rawItems.map(aliasSealedAsPlaintext);
     } else if (this.#cryptoProvider !== null) {
@@ -781,13 +803,8 @@ export class SDKChatClient {
   }
 
   subscribe(roomId: string, args: SubscribeArgs): () => void {
-    // SEC-CR-1695-02: fail-CLOSED if client was poisoned by a prior mismatch.
-    if (this.#cryptoModePoisoned) {
-      throw new SDKChatError(
-        'crypto_mode_poisoned',
-        'client was poisoned by prior crypto_mode_mismatch; recreate the client instance',
-      );
-    }
+    // SEC-CR-1695-02 + SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior mismatch.
+    this.#assertRoomNotPoisoned(roomId);
     let destroyed = false;
     let lastSeq = 0;
     let es: EventSource | null = null;
@@ -815,19 +832,14 @@ export class SDKChatClient {
       // cache for the session. Mismatch → throw + destroy stream (SEC-CR-1694).
       es.addEventListener('connected', (ev: Event) => {
         // Consistent with onmessage/onerror/shutdown: ignore a late prelude after
-        // teardown so a torn-down subscription cannot write client-level
-        // #activeCryptoMode (which subsequent list()/send() would then read).
+        // teardown so a torn-down subscription cannot write this room's
+        // #activeCryptoModeByRoom entry (which subsequent list()/send() would read).
         if (destroyed) return;
         const msgEv = ev as MessageEvent;
         try {
           const data = JSON.parse(msgEv.data as string) as { crypto_mode?: string };
-          const resolved = validateAndResolveCryptoMode(
-            this.#cryptoMode,
-            data.crypto_mode,
-            this.#activeCryptoMode,
-            () => { this.#cryptoModePoisoned = true; },
-          );
-          this.#activeCryptoMode = resolved;
+          // SEC-CR-001: resolve + cache PER ROOM; mismatch poisons ONLY this room.
+          this.#resolveRoomCryptoMode(roomId, data.crypto_mode);
         } catch (err) {
           // crypto_mode_mismatch — surface to caller, then fully tear down THIS
           // subscription (closes the stream AND releases the decrypt-chain
@@ -870,7 +882,7 @@ export class SDKChatClient {
           lastSeq = data.seq;
           const mappedRow = rowToMessageRow(data);
           // Phase 2: plaintext mode — deliver directly with UTF-8 decode.
-          if (this.#activeCryptoMode === 'plaintext') {
+          if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
             args.onMessage(aliasSealedAsPlaintext(mappedRow));
             return;
           }
@@ -1012,7 +1024,7 @@ export class SDKChatClient {
         // chain (append gates on refCount, which a surviving co-subscriber keeps
         // > 0). Mirrors the live-stream guard in the onmessage handler.
         if (destroyed) return;
-        if (this.#activeCryptoMode === 'plaintext') {
+        if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
           for (const row of rawItems) {
             lastSeq = row.seq;
             args.onMessage(aliasSealedAsPlaintext(row));
@@ -2136,6 +2148,11 @@ export class SDKChatClient {
    * room_id is injected automatically; created_at is set server-side.
    */
   async batchAppend(roomId: string, items: BatchAppendItem[]): Promise<void> {
+    // SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior crypto_mode mismatch —
+    // gate-consistency with send/sendText/#fetchRows/subscribe (a poisoned room refuses
+    // ALL sends). batchAppend carries pre-sealed bytes, so this is completeness, not a
+    // cleartext leak, but a room with a proven-tampered crypto_mode must still refuse.
+    this.#assertRoomNotPoisoned(roomId);
     const payload = items.map((item) => ({
       room_id: roomId,
       msg_id: item.msgId,
@@ -2189,6 +2206,9 @@ export class SDKChatClient {
       senderUid: string;
     },
   ): Promise<MessageRow> {
+    // SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior crypto_mode mismatch
+    // (gate-consistency with the other send entrypoints).
+    this.#assertRoomNotPoisoned(roomId);
     const body: Record<string, unknown> = {
       room_id: roomId,
       msg_id: opts.msgId ?? crypto.randomUUID(),
