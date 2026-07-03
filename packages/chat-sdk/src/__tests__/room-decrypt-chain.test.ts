@@ -123,6 +123,91 @@ describe('RoomDecryptChain', () => {
     c.release(ROOM);
   });
 
+  // CRITICAL regression (pr-review-council): a deferred delete must not fire on a
+  // tail captured at an EARLIER release once newer work has been appended since.
+  // Two zero-crossings with the second release's work chained before the first
+  // release's captured tail resolves.
+  it('two zero-crossings: a stale-tail drain must not delete a chain with newer queued work', async () => {
+    const c = new RoomDecryptChain();
+    const active = new Set<string>();
+    let maxActive = 0;
+    const gates = new Map<string, () => void>();
+    const mkTask = (id: string) => async () => {
+      active.add(id);
+      maxActive = Math.max(maxActive, active.size);
+      await new Promise<void>((res) => { gates.set(id, () => { active.delete(id); res(); }); });
+    };
+
+    // Zero-crossing #1: acquire → append(t1, hangs) → release (refCount → 0),
+    // which schedules a drain on the SHORT tail (…t1).
+    c.acquire(ROOM);
+    c.append(ROOM, mkTask('t1'));
+    c.release(ROOM);
+
+    // Re-acquire the still-present entry, queue t2 behind t1, release again
+    // (zero-crossing #2). The chain tail is now LONGER (…t1.then(t2)) than the
+    // tail the first release captured.
+    c.acquire(ROOM);
+    c.append(ROOM, mkTask('t2'));
+    c.release(ROOM);
+
+    await flush();
+    expect([...active]).toEqual(['t1']); // t1 running, t2 queued behind it
+
+    // t1 settles → the first release's drain fires on its stale (short) tail.
+    // BUG: identity + refCount<=0 both hold → it DELETES the entry while t2 is
+    // only now dequeuing.
+    gates.get('t1')!();
+    await flush();
+
+    // Resubscribe the instant t1 settled and push t3.
+    c.acquire(ROOM);
+    c.append(ROOM, mkTask('t3'));
+    await flush();
+
+    // Serial invariant: with the entry intact, t3 queues behind the running t2.
+    // If the stale drain deleted the entry, t3 forks a fresh chain and runs
+    // concurrently with t2 → maxActive 2 (the ratchet-desync this PR closes).
+    expect(maxActive).toBeLessThanOrEqual(1);
+
+    gates.get('t2')?.();
+    await flush();
+    gates.get('t3')?.();
+    await flush();
+    c.release(ROOM);
+  });
+
+  // MEDIUM (pr-review-council): during the deferred-delete window (refCount 0,
+  // entry still present) a stray append must NOT run a decrypt for a released
+  // subscriber — append must gate on a LIVE subscriber, not Map presence.
+  it('append after release-to-zero (no re-acquire) is a no-op', async () => {
+    const c = new RoomDecryptChain();
+    c.acquire(ROOM);
+
+    let firstRan = false;
+    let strayRan = false;
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((res) => { releaseFirst = res; });
+
+    c.append(ROOM, async () => { firstRan = true; await gate; });
+    c.release(ROOM); // refCount → 0, entry lingers while its chain drains
+    await flush();
+
+    // Stray frame during the drain window (refCount already 0).
+    c.append(ROOM, async () => { strayRan = true; });
+    await flush();
+
+    expect(firstRan).toBe(true);
+    expect(strayRan).toBe(false); // not yet — either dropped, or queued behind first
+
+    // Complete the first (drained) task. If the stray had been chained (append
+    // gating only on Map presence), it would now RUN against a released
+    // subscriber. Gating on a live subscriber drops it → it never runs.
+    releaseFirst();
+    await flush();
+    expect(strayRan).toBe(false);
+  });
+
   it('rooms are independent: a stalled chain in one room does not block another', async () => {
     const c = new RoomDecryptChain();
     c.acquire('roomA');

@@ -28,6 +28,15 @@ interface ChainEntry {
   chain: Promise<void>;
   /** Number of live subscribers sharing this room's chain. */
   refCount: number;
+  /**
+   * Monotonic change counter, bumped on every acquire() and every append().
+   * A deferred delete scheduled by release() captures this value and removes the
+   * entry only if it still matches at drain time — so ANY subscriber or decrypt
+   * added AFTER that release (which advances the chain tail) cancels the now-stale
+   * delete. Without it, a delete scheduled on an EARLIER release's short tail could
+   * fire while newer queued work is still draining and wrongly remove the entry.
+   */
+  generation: number;
 }
 
 export class RoomDecryptChain {
@@ -41,9 +50,10 @@ export class RoomDecryptChain {
   acquire(roomId: string): void {
     const entry = this.#byRoom.get(roomId);
     if (entry === undefined) {
-      this.#byRoom.set(roomId, { chain: Promise.resolve(), refCount: 1 });
+      this.#byRoom.set(roomId, { chain: Promise.resolve(), refCount: 1, generation: 1 });
     } else {
       entry.refCount += 1;
+      entry.generation += 1;
     }
   }
 
@@ -53,16 +63,19 @@ export class RoomDecryptChain {
    * unseal is ever in flight for the room, preserving in-order decrypt across all
    * of its live subscribers.
    *
-   * No-op when the room has no live subscriber (already released): the frame is
-   * dropped rather than started off a fresh, unsynchronized chain — matching the
-   * intent that a torn-down room delivers nothing.
+   * No-op unless the room has a LIVE subscriber (refCount > 0). During the
+   * deferred-delete window a released entry lingers (refCount 0) while its chain
+   * drains; a stray frame arriving then must be dropped, not queued to run a
+   * decrypt for an already-released subscriber. Gating on refCount (not mere Map
+   * presence) enforces the "a torn-down room delivers nothing" intent.
    *
    * `task` MUST NOT reject (it must catch internally); the chain is a plain
    * `.then` sequence and a rejected link would poison the room's queue.
    */
   append(roomId: string, task: () => Promise<void>): void {
     const entry = this.#byRoom.get(roomId);
-    if (entry === undefined) return;
+    if (entry === undefined || entry.refCount <= 0) return;
+    entry.generation += 1;
     entry.chain = entry.chain.then(task);
   }
 
@@ -77,8 +90,16 @@ export class RoomDecryptChain {
    * unseals concurrently with the orphan — the very ratchet-desync this class
    * exists to prevent. Deferring lets a resubscribe re-acquire THIS entry (its
    * acquire finds it still present) and append AFTER the orphan, staying serial.
-   * The drain callback re-checks identity + refCount: a resubscribe that
-   * re-acquired (refCount > 0) keeps the entry; only a still-idle entry is deleted.
+   *
+   * The drain callback deletes only if entry identity + refCount<=0 STILL hold AND
+   * the generation is unchanged since this release. The generation guard is load-
+   * bearing: the callback awaits the tail captured at THIS release, but append()
+   * mutates entry.chain in place, so on a second release-to-zero the FIRST
+   * release's (shorter) tail can resolve while the SECOND release's newer work is
+   * still queued — without the guard the stale callback would delete an entry that
+   * still has draining work, re-opening the concurrent-unseal hole. Any acquire()
+   * or append() after a release bumps the generation and cancels its pending
+   * delete; the later release schedules the delete that actually fires.
    * Relies on tasks settling (subscribe()'s 5s unseal timeout guarantees it).
    */
   release(roomId: string): void {
@@ -87,9 +108,14 @@ export class RoomDecryptChain {
     entry.refCount -= 1;
     if (entry.refCount > 0) return;
     const draining = entry.chain; // tail resolves (tasks never reject — see append)
+    const generationAtRelease = entry.generation;
     void draining.then(() => {
       const current = this.#byRoom.get(roomId);
-      if (current === entry && current.refCount <= 0) {
+      if (
+        current === entry &&
+        current.refCount <= 0 &&
+        current.generation === generationAtRelease
+      ) {
         this.#byRoom.delete(roomId);
       }
     });

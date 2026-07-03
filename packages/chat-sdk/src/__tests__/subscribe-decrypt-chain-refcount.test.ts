@@ -315,8 +315,9 @@ describe('subscribe() per-room decrypt chain — shared-subscriber refcount', ()
   });
 
   // Idempotency: a double-invoked unsubscribe of one co-subscriber must release
-  // its refcount at most once, else it steals the survivor's count and destroys
-  // the shared chain (the survivor's frames would then be dropped).
+  // its refcount at most once, else it steals the survivor's count, drives the
+  // shared chain to refCount 0, and the survivor's next frame is dropped (append
+  // gates on a live subscriber). B has a frame IN FLIGHT at the double-teardown.
   it('double-invoked teardown of one co-subscriber does not strand the survivor', async () => {
     const provider = makeControllableProvider();
     const instances = installMockEventSource();
@@ -337,19 +338,91 @@ describe('subscribe() per-room decrypt chain — shared-subscriber refcount', ()
     await vi.advanceTimersByTimeAsync(1);
     await flushMicrotasks();
 
-    // Tear A down TWICE (caller misuse) while B stays live.
-    teardownA();
-    teardownA();
-    await flushMicrotasks(); // let any (incorrect) deferred delete fire
-
-    // B is still subscribed → its frame must decrypt and deliver, not be dropped.
-    instances[1]!.emit(frame(7));
+    // B's frame 1 is IN FLIGHT (unseal hangs) at the moment A is torn down twice.
+    instances[1]!.emit(frame(1));
     await flushMicrotasks();
-    provider.releaseSeq(7);
+    expect(provider.inFlight).toBe(1);
+
+    teardownA();
+    teardownA(); // caller misuse — must release A's refcount at most once
     await flushMicrotasks();
 
-    expect(bMsgs).toEqual([7]);
+    // A second frame arrives on the still-live B.
+    instances[1]!.emit(frame(2));
+    await flushMicrotasks();
+    expect(bMsgs).toEqual([]); // both queued behind the in-flight unseal(1)
+    expect(provider.maxInFlight).toBeLessThanOrEqual(1);
 
+    provider.releaseSeq(1);
+    await flushMicrotasks();
+    provider.releaseSeq(2);
+    await flushMicrotasks();
+
+    // B received BOTH frames in order — its shared chain was neither destroyed
+    // (frame 2 dropped) nor forked (concurrent unseal) by A's double teardown.
+    expect(bMsgs).toEqual([1, 2]);
+    expect(provider.maxInFlight).toBe(1);
+
+    teardownB();
+  });
+
+  // MEDIUM (pr-review-council): the crypto_mode_mismatch abort path must fully
+  // tear down the subscription (release its decrypt-chain refcount), not just
+  // close the stream. A co-subscriber B must keep decrypting in order through
+  // A's mismatch. (The refcount balance itself is private; this exercises the
+  // shared teardown path from the mismatch catch and guards the survivor.)
+  it('crypto_mode_mismatch on one subscriber tears it down without stranding a co-subscriber', async () => {
+    const provider = makeControllableProvider();
+    const instances = installMockEventSource();
+    stubTicketFetch();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Client configured for sframe-static; A will receive a conflicting mode.
+    const client = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      e2ee: { provider },
+      cryptoMode: 'sframe-static',
+    });
+
+    let aError: unknown = null;
+    const teardownA = client.subscribe(ROOM_ID, {
+      onMessage: vi.fn(),
+      onError: (err) => { aError = err; },
+    });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    const bMsgs: number[] = [];
+    const teardownB = client.subscribe(ROOM_ID, {
+      onMessage: (row) => { bMsgs.push(row.seq); },
+    });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    // A's stream receives a conflicting crypto_mode prelude → mismatch → abort.
+    instances[0]!.listeners['connected']?.(
+      Object.assign(new Event('connected'), { data: JSON.stringify({ crypto_mode: 'plaintext' }) }) as MessageEvent,
+    );
+    await flushMicrotasks();
+    expect(aError).not.toBeNull();
+
+    // B is unaffected: it still decrypts its frames serially and in order.
+    instances[1]!.emit(frame(1));
+    instances[1]!.emit(frame(2));
+    await flushMicrotasks();
+    provider.releaseSeq(1);
+    await flushMicrotasks();
+    provider.releaseSeq(2);
+    await flushMicrotasks();
+
+    expect(bMsgs).toEqual([1, 2]);
+    expect(provider.maxInFlight).toBe(1);
+
+    errSpy.mockRestore();
+    teardownA();
     teardownB();
   });
 

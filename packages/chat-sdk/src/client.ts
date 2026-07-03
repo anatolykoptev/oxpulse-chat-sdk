@@ -734,17 +734,19 @@ export class SDKChatClient {
           );
           this.#activeCryptoMode = resolved;
         } catch (err) {
-          // crypto_mode_mismatch — abort the stream and surface to caller.
-          es?.close();
-          es = null;
-          if (!destroyed) {
-            reportError(err);
-            destroyed = true;
-          }
+          // crypto_mode_mismatch — surface to caller, then fully tear down THIS
+          // subscription (closes the stream AND releases the decrypt-chain
+          // refcount, so the mismatch does not leak the room's chain entry).
+          if (!destroyed) reportError(err);
+          teardownSubscriber();
         }
       });
 
       es.onmessage = (ev) => {
+        // Consistent with onerror/shutdown: ignore frames after teardown so a
+        // queued message dispatched post-close cannot append a decrypt onto a
+        // released subscriber's chain.
+        if (destroyed) return;
         try {
           const data = JSON.parse(ev.data) as {
             type?: string;
@@ -984,21 +986,12 @@ export class SDKChatClient {
       }, delay);
     };
 
-    // Initial connection: fetch ticket then open EventSource.
-    (async () => {
-      if (destroyed) return;
-      let ticket: string;
-      try {
-        ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
-      } catch (err) {
-        reportError(err);
-        reconnect(0);
-        return;
-      }
-      attach(ticket);
-    })();
-
-    return () => {
+    // Full teardown of THIS subscription. Idempotent (destroyed + chainReleased
+    // guards). Called from BOTH the returned unsubscribe handle AND the
+    // crypto_mode_mismatch abort path, so every destroyed=true balances its
+    // acquire() with exactly one release() — a mismatch no longer leaks the
+    // room's chain refcount for the client's lifetime.
+    const teardownSubscriber = () => {
       destroyed = true;
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
@@ -1015,6 +1008,22 @@ export class SDKChatClient {
         this.#decryptChain.release(roomId);
       }
     };
+
+    // Initial connection: fetch ticket then open EventSource.
+    (async () => {
+      if (destroyed) return;
+      let ticket: string;
+      try {
+        ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+      } catch (err) {
+        reportError(err);
+        reconnect(0);
+        return;
+      }
+      attach(ticket);
+    })();
+
+    return teardownSubscriber;
   }
 
   // ── W6: Typing / Presence / Read receipts ─────────────────────────────────
