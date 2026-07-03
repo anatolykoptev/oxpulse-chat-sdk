@@ -1,0 +1,298 @@
+/**
+ * sframe-replay.test.ts — SEC-CR-003 (CWE-294) durable cross-reload anti-replay.
+ *
+ * Threat: a malicious / compromised app-server (the adversary in the E2EE threat
+ * model — it cannot forge, but it CAN replay authentic old ciphertext) re-serves an
+ * OLD sealed frame under a FRESH msg_id. The widget's msg_id dedup does not catch it
+ * (fresh id), and after a page reload sframe-ratchet's IN-MEMORY receiver replay window
+ * is empty — the AEAD verifies (the ciphertext is genuinely authentic, just old) and the
+ * stale message renders as new (e.g. replaying an old "approved" / "paid" instruction).
+ *
+ * A "reload" is simulated by constructing a FRESH provider with the SAME key (fresh
+ * in-memory window, like a real page reload) while the durable IndexedDB store persists.
+ *
+ * TDD: the cross-reload test is RED against main ce7863f (the replay is ACCEPTED),
+ * GREEN once the durable receiver-side replay window lands.
+ */
+
+import 'fake-indexeddb/auto';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { get, keys, clear } from 'idb-keyval';
+import { createSFrameProvider } from '../sframe.js';
+import { ReplayError } from 'sframe-ratchet/chat';
+import type { CryptoProvider } from '../types.js';
+
+const ROOM_ID = 'room-replay-1';
+const SENDER_UID = 'user-replay-1';
+
+/** A single shared HKDF base-key reused across "reloads" (as a real room key would be). */
+async function makeHkdfKey(): Promise<CryptoKey> {
+  const raw = new Uint8Array(32);
+  crypto.getRandomValues(raw);
+  return crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey', 'deriveBits']);
+}
+
+const enc = new TextEncoder();
+function pt(s: string): ArrayBuffer {
+  return enc.encode(s).buffer as ArrayBuffer;
+}
+
+beforeEach(async () => {
+  await clear();
+  vi.restoreAllMocks();
+});
+
+describe('SFrame durable cross-reload anti-replay (SEC-CR-003)', () => {
+  it('rejects a replayed old frame after a simulated reload (fresh provider, same key)', async () => {
+    const key = await makeHkdfKey();
+
+    // Session 1: victim receives (unseals) an authentic frame — records its CTR durably.
+    const sender = createSFrameProvider({ getKey: async () => key });
+    const oldFrame = await sender.seal(pt('approve payment'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1: CryptoProvider = createSFrameProvider({ getKey: async () => key });
+    const firstView = await session1.unseal(oldFrame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(firstView)).toEqual(enc.encode('approve payment'));
+
+    // Reload: fresh provider (empty in-memory window) — durable IDB store persists.
+    const session2: CryptoProvider = createSFrameProvider({ getKey: async () => key });
+
+    // Server replays the SAME authentic frame under a fresh msg_id. Must be REJECTED.
+    await expect(
+      session2.unseal(oldFrame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
+
+  it('persists the accepted CTR to IndexedDB across the simulated reload', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key });
+    const frame = await sender.seal(pt('hello'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key });
+    await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // The durable store holds a per-(room,sender) entry with at least one accepted CTR.
+    const storeKey = `sframe-replay|default|${ROOM_ID}|${SENDER_UID}`;
+    const persisted = await get<{ v: number; seen: string[] }>(storeKey);
+    expect(persisted).toBeDefined();
+    expect(persisted!.seen.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('regression (a): normal in-order delivery of distinct frames still works', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key });
+    const receiver = createSFrameProvider({ getKey: async () => key });
+
+    for (const msg of ['one', 'two', 'three']) {
+      const frame = await sender.seal(pt(msg), { roomId: ROOM_ID, senderUid: SENDER_UID });
+      const out = await receiver.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+      expect(new Uint8Array(out)).toEqual(enc.encode(msg));
+    }
+  });
+
+  it('regression (b): a genuinely-new frame is still accepted after a reload', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key });
+    const oldFrame = await sender.seal(pt('old'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const newFrame = await sender.seal(pt('new-and-legit'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key });
+    await session1.unseal(oldFrame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Reload: a fresh frame the victim has never seen must still decrypt.
+    const session2 = createSFrameProvider({ getKey: async () => key });
+    const out = await session2.unseal(newFrame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('new-and-legit'));
+  });
+
+  it('preserves in-session replay rejection (same provider, same frame twice)', async () => {
+    const key = await makeHkdfKey();
+    const provider = createSFrameProvider({ getKey: async () => key });
+    const frame = await provider.seal(pt('once'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    await provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    await expect(
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
+
+  it('regression (c): degrades gracefully with a one-time warn when IndexedDB is unavailable', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const saved = globalThis.indexedDB;
+    // Simulate an SSR / Node-without-polyfill runtime.
+    delete (globalThis as { indexedDB?: unknown }).indexedDB;
+    try {
+      const key = await makeHkdfKey();
+      // Must NOT throw at construct.
+      const sender = createSFrameProvider({ getKey: async () => key });
+      const receiver = createSFrameProvider({ getKey: async () => key });
+
+      // Round-trip still works (in-memory window is the only defense).
+      const frame = await sender.seal(pt('no-idb'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+      const out = await receiver.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+      expect(new Uint8Array(out)).toEqual(enc.encode('no-idb'));
+
+      // One-time no-IDB warning fired, referencing SEC-CR-003.
+      const warnMsgs = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(warnMsgs.some((m) => m.includes('SEC-CR-003') && m.includes('IndexedDB'))).toBe(true);
+    } finally {
+      (globalThis as { indexedDB?: unknown }).indexedDB = saved;
+    }
+  });
+
+  it('opt-out: durableReplay:false reverts to in-memory-only (replay accepted after reload)', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplay: false });
+    const frame = await sender.seal(pt('escape-hatch'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key, durableReplay: false });
+    await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session2 = createSFrameProvider({ getKey: async () => key, durableReplay: false });
+    const out = await session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('escape-hatch'));
+  });
+
+  it('scopes the window per (room, sender): distinct rooms use distinct store entries', async () => {
+    const key = await makeHkdfKey();
+    const provider = createSFrameProvider({ getKey: async () => key });
+
+    const frameA = await provider.seal(pt('a'), { roomId: 'room-A', senderUid: SENDER_UID });
+    const frameB = await provider.seal(pt('b'), { roomId: 'room-B', senderUid: SENDER_UID });
+    await provider.unseal(frameA, { roomId: 'room-A', senderUid: SENDER_UID });
+    await provider.unseal(frameB, { roomId: 'room-B', senderUid: SENDER_UID });
+
+    const storeKeys = (await keys()).map(String);
+    expect(storeKeys).toContain(`sframe-replay|default|room-A|${SENDER_UID}`);
+    expect(storeKeys).toContain(`sframe-replay|default|room-B|${SENDER_UID}`);
+
+    // A frame accepted in room-A does not falsely reject a fresh frame in room-B.
+    const frameB2 = await provider.seal(pt('b2'), { roomId: 'room-B', senderUid: SENDER_UID });
+    const reload = createSFrameProvider({ getKey: async () => key });
+    const out = await reload.unseal(frameB2, { roomId: 'room-B', senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('b2'));
+  });
+
+  it('anti-poison: a forged frame that fails AEAD is NOT recorded in the durable window', async () => {
+    const keyA = await makeHkdfKey();
+    const keyB = await makeHkdfKey(); // different key → AEAD auth fails
+
+    // Frame sealed under key B; the victim (key A) will fail to unseal it.
+    const sealerB = createSFrameProvider({ getKey: async () => keyB });
+    const forged = await sealerB.seal(pt('forged'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const victim = createSFrameProvider({ getKey: async () => keyA });
+    await expect(
+      victim.unseal(forged, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeTruthy(); // AEAD auth error, not a ReplayError
+
+    // The forged CTR must NOT have been persisted (accept runs only after a successful unseal),
+    // so an attacker cannot poison the window to false-reject a later legitimate frame.
+    const storeKey = `sframe-replay|default|${ROOM_ID}|${SENDER_UID}`;
+    const persisted = await get<{ v: number; seen: string[] }>(storeKey);
+    expect(persisted).toBeUndefined();
+  });
+
+  it('documents the eviction residual (SEC-CR-003-01): an aged, evicted CTR can replay', async () => {
+    const key = await makeHkdfKey();
+    // Tiny durable window so eviction is cheap to exercise.
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    const f1 = await sender.seal(pt('f1'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const f2 = await sender.seal(pt('f2'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const f3 = await sender.seal(pt('f3'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    // Accept f1, f2, f3 in order — f1 is evicted (window holds only the 2 most recent).
+    await session1.unseal(f1, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    await session1.unseal(f2, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    await session1.unseal(f3, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Recent frames (f2, f3) are still rejected on reload.
+    const session2 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    await expect(
+      session2.unseal(f3, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+
+    // The evicted f1 is accepted — the bounded-window residual (documented in the changeset).
+    const session3 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    const out = await session3.unseal(f1, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('f1'));
+  });
+
+  it('monotonic-idb strategy: round-trip works and cross-reload replay is still rejected', async () => {
+    const key = await makeHkdfKey();
+    const opts = { getKey: async () => key, ctrStrategy: 'monotonic-idb' as const, ctrKeyspace: 'ks-test' };
+    const sender = createSFrameProvider(opts);
+    const frame = await sender.seal(pt('mono'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider(opts);
+    const out = await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('mono'));
+
+    // The durable window (not monotonic-idb itself) is what protects the receiver on reload.
+    const session2 = createSFrameProvider(opts);
+    await expect(
+      session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
+
+  it('durableReplayWindow:0 disables the durable window (mirrors replayWindow:0)', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 0 });
+    const frame = await sender.seal(pt('disabled'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 0 });
+    await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Disabled → nothing persisted, and a cross-reload replay is accepted (opt-in-only again).
+    const storeKey = `sframe-replay|default|${ROOM_ID}|${SENDER_UID}`;
+    expect(await get(storeKey)).toBeUndefined();
+
+    const session2 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 0 });
+    const out = await session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('disabled'));
+  });
+
+  it('cross-tab: a second tab merges (does not clobber) the first tab persisted CTRs', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key });
+    const fA = await sender.seal(pt('tabA-frame'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const fB = await sender.seal(pt('tabB-frame'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Two "tabs" (separate provider instances) sharing the same IDB store record different CTRs.
+    const tabA = createSFrameProvider({ getKey: async () => key });
+    const tabB = createSFrameProvider({ getKey: async () => key });
+    await tabA.unseal(fA, { roomId: ROOM_ID, senderUid: SENDER_UID }); // persists {ctrA}
+    await tabB.unseal(fB, { roomId: ROOM_ID, senderUid: SENDER_UID }); // read-merge-write -> {ctrA, ctrB}
+
+    // A reload sees BOTH CTRs — tabA's ctrA was merged, not clobbered by tabB's write.
+    const reloadA = createSFrameProvider({ getKey: async () => key });
+    await expect(
+      reloadA.unseal(fA, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+    const reloadB = createSFrameProvider({ getKey: async () => key });
+    await expect(
+      reloadB.unseal(fB, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
+
+  it('concurrency: overlapping unseals of one frame may double-deliver, but the guarantee holds after', async () => {
+    const key = await makeHkdfKey();
+    const provider = createSFrameProvider({ getKey: async () => key });
+    const frame = await provider.seal(pt('race'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Two overlapping unseals of the SAME fresh frame — mirrors the un-serialized public list()
+    // path (subscribe()/reconnect route through the per-room serial chain; list() does not).
+    // Both pass check() before either accept() lands → the documented double-deliver residual.
+    const results = await Promise.allSettled([
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled').length).toBeGreaterThanOrEqual(1);
+
+    // Once the race settles, the durable window rejects any subsequent replay.
+    await expect(
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
+});
