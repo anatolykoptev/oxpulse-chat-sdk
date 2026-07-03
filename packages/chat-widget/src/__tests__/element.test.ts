@@ -540,6 +540,62 @@ describe('OxpulseChatElement — M6 iframe mode', () => {
     expect(el.getAttribute('jwt')).toBe(newJwt); // fresh token survives the remount
   });
 
+  it('refreshToken() with an invalid base-url falls back to the DEFAULT origin — never "*"', async () => {
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', IFRAME_REFRESH_JWT);
+    el.setAttribute('room-id', 'room1');
+    el.setAttribute('mode', 'iframe');
+    // Hostile / misconfigured base-url — must NOT reach postMessage as a wildcard.
+    el.setAttribute('base-url', '*');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const iframe = el.shadowRoot?.querySelector('iframe') as HTMLIFrameElement;
+    expect(iframe).not.toBeNull();
+    const pmSpy = vi.fn();
+    Object.defineProperty(iframe, 'contentWindow', { configurable: true, value: { postMessage: pmSpy } });
+
+    el.refreshToken(makeJwt({ aud_origins: ['http://localhost', 'http://localhost:*'], sub: 'u2' }));
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The JWT is posted to the safe DEFAULT origin, never to '*'.
+    expect(pmSpy).toHaveBeenCalledTimes(1);
+    const targetOrigin = (pmSpy.mock.calls[0] as [unknown, string])[1];
+    expect(targetOrigin).toBe('https://oxpulse.chat');
+    expect(targetOrigin).not.toBe('*');
+  });
+
+  it('base-url change + refreshToken in the same tick delivers via the pending remount, not a stale in-place post', async () => {
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', IFRAME_REFRESH_JWT);
+    el.setAttribute('room-id', 'room1');
+    el.setAttribute('mode', 'iframe');
+    el.setAttribute('base-url', 'https://a.example.com');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const iframe1 = el.shadowRoot?.querySelector('iframe') as HTMLIFrameElement;
+    const pmSpy = vi.fn();
+    Object.defineProperty(iframe1, 'contentWindow', { configurable: true, value: { postMessage: pmSpy } });
+
+    const newJwt = makeJwt({ aud_origins: ['http://localhost', 'http://localhost:*'], sub: 'u2' });
+    // Same tick: a base-url change (schedules a remount) then a refresh. The refresh
+    // must NOT post to the about-to-be-replaced iframe (browser would drop it, token lost).
+    el.setAttribute('base-url', 'https://b.example.com');
+    el.refreshToken(newJwt);
+    await new Promise((r) => setTimeout(r, 20));
+
+    // No stale in-place post went to the old iframe.
+    expect(pmSpy).not.toHaveBeenCalled();
+    // The pending remount delivered the fresh token at the new base-url.
+    const iframe2 = el.shadowRoot?.querySelector('iframe') as HTMLIFrameElement;
+    expect(iframe2).not.toBe(iframe1);
+    expect(iframe2.getAttribute('src') ?? '').toContain('https://b.example.com');
+    expect(el.getAttribute('jwt')).toBe(newJwt);
+  });
+
   it('refreshToken() falls back to re-bootstrap (sets jwt attribute) when no live iframe is present', async () => {
     // Inline mode has no iframe → in-place path is skipped → existing remount fallback runs.
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;

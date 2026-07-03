@@ -42,6 +42,9 @@ let liveConfig: WidgetConfig | null = null;
  */
 export function applyRefreshedToken(jwt: string): void {
   if (liveConfig) {
+    // TODO(W2.2): re-validate the refreshed JWT's aud_origins / room scope against
+    // liveConfig before swapping, so a crafted refresh-token cannot silently
+    // downgrade or re-scope the live session.
     // Immutable update — new object, never mutate the received config.
     liveConfig = { ...liveConfig, jwt };
   }
@@ -49,10 +52,16 @@ export function applyRefreshedToken(jwt: string): void {
 }
 
 /**
- * @internal Test hook — the JWT currently applied to the live iframe session.
- * Not re-exported from index.ts; not part of the public API surface.
+ * @internal Test-only observation hook — the JWT currently applied to the live
+ * iframe session. Not re-exported from index.ts; not part of the public API.
+ *
+ * Inert outside the test runner: `globalThis.process` is undefined in a browser
+ * bundle and NODE_ENV is only 'test' under vitest, so a production iframe bundle
+ * never returns the live bearer JWT from this export.
  */
 export function __getLiveJwt(): string | null {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  if (env?.['NODE_ENV'] !== 'test') return null;
   return liveConfig?.jwt ?? null;
 }
 

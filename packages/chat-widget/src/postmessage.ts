@@ -105,16 +105,17 @@ function wrapIframe(msg: IframeMessage): Record<string, unknown> {
 /**
  * Send a token-refresh message from the parent to a specific iframe.
  *
- * M1 security: requires an EXPLICIT target origin (the resolved widget baseUrl).
- * A bearer JWT must never be posted to the '*' wildcard, so when no origin is
- * available the message is dropped with a warning — mirroring sendToParent()'s
- * "never send with '*'" discipline. There is no '*' fallback.
+ * M1 security: requires an EXPLICIT, CONCRETE target origin (the resolved widget
+ * baseUrl). A bearer JWT must never be posted to the '*' wildcard — which
+ * Window.postMessage treats as "any origin" — so an empty OR literal-'*' origin
+ * is dropped with a warning, mirroring sendToParent()'s "never send with '*'"
+ * discipline. There is no '*' fallback.
  */
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
 export function sendRefreshTokenToIframe(iframe: HTMLIFrameElement, jwt: string, targetOrigin: string): void {
-  if (!targetOrigin) {
+  if (!targetOrigin || targetOrigin === '*') {
     // eslint-disable-next-line no-console
-    console.warn('[oxpulse-chat-widget] sendRefreshTokenToIframe called without a target origin — token refresh dropped (JWT never posted to "*")');
+    console.warn('[oxpulse-chat-widget] sendRefreshTokenToIframe requires a concrete target origin (got empty or "*") — token refresh dropped (JWT never posted to "*")');
     return;
   }
   iframe.contentWindow?.postMessage(

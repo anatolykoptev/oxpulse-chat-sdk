@@ -177,13 +177,17 @@ export class OxpulseChatElement extends HTMLElement {
    * and decrypt state survive. The iframe re-authenticates internally without a
    * document reload.
    *
-   * Fallback (inline mode, or the iframe is not present/ready): re-bootstrap
-   * with the fresh token. Inline uses a `readonly`-JWT SDKChatClient that can
-   * only be re-authed by reconstruction, so a re-bootstrap is required there.
+   * Fallback (inline mode, the iframe is not present/ready, OR a remount is
+   * already pending): re-bootstrap with the fresh token. A pending remount
+   * (e.g. from a same-tick base-url/room change) would replace the current
+   * iframe, so an in-place post to it targets the OLD origin and the browser
+   * drops it (token lost) — instead we sync the attribute and let the pending
+   * remount deliver the fresh token. Inline uses a `readonly`-JWT SDKChatClient
+   * that can only be re-authed by reconstruction, so a re-bootstrap is required.
    */
   refreshToken(jwt: string): void {
     const iframe = this.#iframe;
-    if (iframe?.contentWindow) {
+    if (iframe?.contentWindow && !this.#bootstrapScheduled) {
       const config = this.#resolveConfig();
       if (config) {
         // Same concrete origin the init path posts to — never '*'.
@@ -768,9 +772,24 @@ export class OxpulseChatElement extends HTMLElement {
   /**
    * Resolve the widget's API base URL — the single authority for both the iframe
    * src origin and the postMessage target origin (never '*').
+   *
+   * Validates `base-url` as an absolute http(s) URL: a missing, malformed, or
+   * non-http(s) value (e.g. `'*'`, `'javascript:…'`, garbage) falls back to the
+   * default rather than flowing a magic/injected value into `iframe.src` or a
+   * postMessage targetOrigin.
    */
   #resolveBaseUrl(config: WidgetConfig): string {
-    return config.baseUrl ?? DEFAULT_BASE_URL;
+    const raw = config.baseUrl;
+    if (!raw) return DEFAULT_BASE_URL;
+    try {
+      const parsed = new URL(raw);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return raw;
+    } catch {
+      // Not an absolute URL — fall through to the safe default.
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`[oxpulse-chat-widget] ignoring invalid base-url "${raw}" (must be an absolute http(s) URL) — using ${DEFAULT_BASE_URL}`);
+    return DEFAULT_BASE_URL;
   }
 
   /** Resolve WidgetConfig from element attributes + stored callbacks. Returns null if required attrs missing. */

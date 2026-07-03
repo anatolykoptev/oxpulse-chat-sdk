@@ -209,6 +209,16 @@ describe('sendRefreshTokenToIframe — M1 explicit origin (no "*")', () => {
     warnSpy.mockRestore();
   });
 
+  it('DROPS (does not post) and warns when the target origin is the literal "*" wildcard', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { iframe, postMessage } = fakeIframe();
+    // '*' is truthy but is a browser-level wildcard — the JWT must never be broadcast.
+    sendRefreshTokenToIframe(iframe, 'new.jwt.token', '*');
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('sendRefreshTokenToIframe'));
+    warnSpy.mockRestore();
+  });
+
   it('NEVER posts a JWT to the "*" wildcard origin', () => {
     const { iframe, postMessage } = fakeIframe();
     sendRefreshTokenToIframe(iframe, 'new.jwt.token', '');
