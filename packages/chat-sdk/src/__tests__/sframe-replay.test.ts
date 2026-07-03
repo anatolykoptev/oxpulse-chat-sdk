@@ -172,4 +172,67 @@ describe('SFrame durable cross-reload anti-replay (SEC-CR-003)', () => {
     const out = await reload.unseal(frameB2, { roomId: 'room-B', senderUid: SENDER_UID });
     expect(new Uint8Array(out)).toEqual(enc.encode('b2'));
   });
+
+  it('anti-poison: a forged frame that fails AEAD is NOT recorded in the durable window', async () => {
+    const keyA = await makeHkdfKey();
+    const keyB = await makeHkdfKey(); // different key → AEAD auth fails
+
+    // Frame sealed under key B; the victim (key A) will fail to unseal it.
+    const sealerB = createSFrameProvider({ getKey: async () => keyB });
+    const forged = await sealerB.seal(pt('forged'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const victim = createSFrameProvider({ getKey: async () => keyA });
+    await expect(
+      victim.unseal(forged, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeTruthy(); // AEAD auth error, not a ReplayError
+
+    // The forged CTR must NOT have been persisted (accept runs only after a successful unseal),
+    // so an attacker cannot poison the window to false-reject a later legitimate frame.
+    const storeKey = `sframe-replay|default|${ROOM_ID}|${SENDER_UID}`;
+    const persisted = await get<{ v: number; seen: string[] }>(storeKey);
+    expect(persisted).toBeUndefined();
+  });
+
+  it('documents the eviction residual (SEC-CR-003-01): an aged, evicted CTR can replay', async () => {
+    const key = await makeHkdfKey();
+    // Tiny durable window so eviction is cheap to exercise.
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    const f1 = await sender.seal(pt('f1'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const f2 = await sender.seal(pt('f2'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const f3 = await sender.seal(pt('f3'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    // Accept f1, f2, f3 in order — f1 is evicted (window holds only the 2 most recent).
+    await session1.unseal(f1, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    await session1.unseal(f2, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    await session1.unseal(f3, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Recent frames (f2, f3) are still rejected on reload.
+    const session2 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    await expect(
+      session2.unseal(f3, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+
+    // The evicted f1 is accepted — the bounded-window residual (documented in the changeset).
+    const session3 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 2 });
+    const out = await session3.unseal(f1, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('f1'));
+  });
+
+  it('monotonic-idb strategy: round-trip works and cross-reload replay is still rejected', async () => {
+    const key = await makeHkdfKey();
+    const opts = { getKey: async () => key, ctrStrategy: 'monotonic-idb' as const, ctrKeyspace: 'ks-test' };
+    const sender = createSFrameProvider(opts);
+    const frame = await sender.seal(pt('mono'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider(opts);
+    const out = await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('mono'));
+
+    // The durable window (not monotonic-idb itself) is what protects the receiver on reload.
+    const session2 = createSFrameProvider(opts);
+    await expect(
+      session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
 });

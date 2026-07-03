@@ -74,6 +74,7 @@ export class DurableReplayGuard {
   /** Serializes persist writes so interleaved snapshots cannot clobber each other. */
   private persistTail: Promise<void> = Promise.resolve();
   private warnedPersistFail = false;
+  private warnedReadFail = false;
 
   constructor(opts: DurableReplayGuardOptions = {}) {
     this.namespace = opts.namespace ?? 'default';
@@ -108,8 +109,18 @@ export class DurableReplayGuard {
         if (persisted && persisted.v === 1 && Array.isArray(persisted.seen)) {
           order = persisted.seen.slice(-this.window);
         }
-      } catch {
-        // Read failure — start empty; write-through re-establishes the window.
+      } catch (err: unknown) {
+        // IndexedDB is present but the read threw (private-mode / partitioned / quota-broken
+        // storage): we start with an EMPTY window, so a frame accepted in a prior session
+        // would not be caught. Surface that once rather than silently claiming protection.
+        if (!this.warnedReadFail) {
+          this.warnedReadFail = true;
+          console.warn(
+            '[chat-sdk] could not read the persisted sframe replay window (SEC-CR-003); ' +
+              'cross-reload replay protection is unavailable this session:',
+            err,
+          );
+        }
       }
       const win: MemWindow = { set: new Set(order), order };
       this.mem.set(key, win);

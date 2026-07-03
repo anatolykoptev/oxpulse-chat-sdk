@@ -38,7 +38,21 @@ New `SFrameProviderOptions`:
   avoids the random-64 birthday bound; note it does NOT by itself protect the receiver — that is
   what `durableReplay` does).
 
-Residual (documented): the durable window is bounded (default 1024 recent CTRs per sender per room),
-so a replay of a frame whose CTR has since been evicted could still pass — the same bound the
-library's in-memory window has within a session, now extended across reloads. Multi-tab receivers
-each keep their own in-memory mirror; the last tab to write wins the persisted snapshot.
+Residuals (documented, accepted):
+
+- Bounded-window eviction: the durable window tracks the 1024 most-recent CTRs per (room, sender),
+  so a replay of a frame whose CTR has since been evicted by ≥1024 later accepts can still pass —
+  the same bound the library's in-memory window has within a session, now extended across reloads.
+  A high-watermark would close this for a monotonic sender, but is intentionally NOT applied: the
+  receiver cannot know a REMOTE sender's CTR strategy from the frame, so assuming monotonicity would
+  false-reject every legitimate message from a `random-64` peer in a mixed-strategy room. The
+  strategy-agnostic bounded set is safe for mixed rooms; a homogeneous `monotonic-idb` deployment
+  that wants unbounded protection is a possible future opt-in.
+- Storage growth: one small IDB entry per (room, sender), not garbage-collected (mirrors the
+  outbox's per-room key). Bounded per entry (≤1024 CTRs); the entry count grows with distinct
+  (room, sender) over the client lifetime.
+- Multi-tab: each tab keeps its own in-memory mirror; the last tab to write wins the persisted
+  snapshot (the library likewise scopes the receiver window per instance).
+- If IndexedDB is present but its read/write throws (private-mode / partitioned storage), the
+  session starts with an empty window and a one-time warning is emitted — cross-reload protection
+  is unavailable that session (the in-memory window still defends within the session).

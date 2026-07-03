@@ -113,6 +113,11 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
       // Durable pre-filter: reject a CTR we have already accepted (survives page reload).
       // The CTR lives in the RFC 9605 header, which is the AEAD AAD — authenticated, so the
       // server cannot alter it without failing AEAD below.
+      //
+      // check() and accept() straddle the `await inner.unseal` — the same check→decrypt→accept
+      // ordering the library uses internally. Cross-reload protection holds once either accept
+      // lands; a within-session double-render of one fresh CTR is prevented upstream by the
+      // client's per-room serial decrypt chain (SEC-CR-14-01), which serializes every unseal.
       let ctr: bigint | undefined;
       if (durable?.available) {
         try {
