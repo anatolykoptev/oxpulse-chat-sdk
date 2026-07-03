@@ -40,20 +40,7 @@ afterEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeClient(opts?: { withE2ee?: boolean }) {
-	if (opts?.withE2ee) {
-		// Custom CryptoProvider whose seal is a spy — lets us assert it was NOT called.
-		const sealSpy = vi.fn(async (plain: ArrayBuffer) => plain);
-		const provider: CryptoProvider = { seal: sealSpy, unseal: vi.fn(async (c) => c) };
-		const client = new SDKChatClient({
-			jwt: 'test-token',
-			baseUrl: '',
-			appId: 'app_plaintext_test',
-			cryptoMode: 'plaintext',
-			e2ee: { provider },
-		});
-		return { client, sealSpy };
-	}
+function makeClient() {
 	return {
 		client: new SDKChatClient({
 			jwt: 'test-token',
@@ -61,7 +48,6 @@ function makeClient(opts?: { withE2ee?: boolean }) {
 			appId: 'app_plaintext_test',
 			cryptoMode: 'plaintext',
 		}),
-		sealSpy: null,
 	};
 }
 
@@ -166,14 +152,22 @@ const ROOM_ID = 'room-plaintext-consumer-test';
 // ---------------------------------------------------------------------------
 
 describe('plaintext_send_omits_e2ee_encrypt_call', () => {
-	it('sendText in plaintext mode does NOT call e2ee provider.seal', async () => {
-		const { client, sealSpy } = makeClient({ withE2ee: true });
-
-		fetchMock.mockResolvedValueOnce(makeOkSendResp());
-
-		await client.sendText(ROOM_ID, { senderUid: 'alice', text: 'hello' });
-
-		// Wire-contract: CryptoProvider.seal MUST NOT be called when cryptoMode='plaintext'.
+	it('e2ee provider + cryptoMode:plaintext is rejected at construct (SEC-CR-001)', () => {
+		// SEC-CR-001 (CWE-757): an e2ee encryption provider plus an explicit plaintext
+		// opt-out is a contradictory config — the SDK fails closed at construct, so the
+		// provider's seal is never reachable.
+		const sealSpy = vi.fn(async (plain: ArrayBuffer) => plain);
+		const provider: CryptoProvider = { seal: sealSpy, unseal: vi.fn(async (c) => c) };
+		expect(
+			() =>
+				new SDKChatClient({
+					jwt: 'test-token',
+					baseUrl: '',
+					appId: 'app_plaintext_test',
+					cryptoMode: 'plaintext',
+					e2ee: { provider },
+				}),
+		).toThrow(SDKChatError);
 		expect(sealSpy).not.toHaveBeenCalled();
 	});
 

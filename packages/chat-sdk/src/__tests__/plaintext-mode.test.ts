@@ -128,23 +128,22 @@ describe('send_plaintext_skips_seal_step', () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.restoreAllMocks());
 
-  it('sendText in plaintext mode does NOT call CryptoProvider.seal', async () => {
+  it('e2ee provider + explicit cryptoMode:plaintext is rejected at construct (SEC-CR-001)', () => {
     const provider = makeCustomCryptoProvider();
 
-    // Build client with both e2ee and cryptoMode=plaintext.
-    // cryptoMode option triggers the plaintext path immediately.
-    const client = new SDKChatClient({
-      baseUrl: BASE_URL,
-      jwt: JWT,
-      e2ee: { provider },
-      cryptoMode: 'plaintext',
-    });
-
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeOkSendResponse());
-
-    await client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: 'hello' });
-
-    // seal MUST NOT have been called — plaintext path bypasses E2EE.
+    // SEC-CR-001 (CWE-757): an encryption provider PLUS an explicit plaintext
+    // opt-out is a contradictory config. The SDK now fails CLOSED at construct
+    // instead of allowing a plaintext downgrade of an E2EE-configured client —
+    // so seal is never even reached.
+    expect(
+      () =>
+        new SDKChatClient({
+          baseUrl: BASE_URL,
+          jwt: JWT,
+          e2ee: { provider },
+          cryptoMode: 'plaintext',
+        }),
+    ).toThrow(SDKChatError);
     expect(provider.sealSpy).not.toHaveBeenCalled();
   });
 
@@ -480,32 +479,34 @@ describe('unknown_crypto_mode_value_rejected', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 11: send before discover with e2ee configured → throws crypto_mode_undiscovered
-// code-quality MAJOR: send-before-discover gate
+// Test 11: send before discover with e2ee configured → defaults to sframe-static
+// SEC-CR-001: downgrade defense is default-on, so an e2ee client seals by default
+// instead of blocking on discovery (the old crypto_mode_undiscovered contract).
 // ---------------------------------------------------------------------------
 
-describe('send_before_discover_with_e2ee_throws', () => {
+describe('send_with_e2ee_defaults_to_sframe_static', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('sendText throws crypto_mode_undiscovered when e2ee configured and no mode known', async () => {
+  it('sendText with e2ee (no explicit cryptoMode) defaults to sframe-static and seals', async () => {
     const provider = makeCustomCryptoProvider();
 
-    // No cryptoMode option (auto-detect), e2ee configured.
-    // No list() or subscribe() called — mode never discovered.
+    // No cryptoMode option, e2ee configured. SEC-CR-001: #cryptoMode defaults to
+    // 'sframe-static', so sending before any list()/subscribe() SEALS by default
+    // (fail-closed) rather than shipping plaintext or blocking on discovery.
     const client = new SDKChatClient({
       baseUrl: BASE_URL,
       jwt: JWT,
       e2ee: { provider },
     });
 
-    await expect(
-      client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: 'hello' }),
-    ).rejects.toSatisfy(
-      (err: unknown) => err instanceof SDKChatError && err.code === 'crypto_mode_undiscovered',
-    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeOkSendResponse());
 
-    // seal must NOT have been called — we rejected before reaching that code.
-    expect(provider.sealSpy).not.toHaveBeenCalled();
+    await client.sendText(ROOM_ID, { senderUid: SENDER_UID, text: 'hello' });
+
+    // seal MUST have been called with the UTF-8 bytes — default-on downgrade defense.
+    expect(provider.sealSpy).toHaveBeenCalledOnce();
+    const sealArg = provider.sealSpy.mock.calls[0][0] as ArrayBuffer;
+    expect(new Uint8Array(sealArg)).toEqual(new TextEncoder().encode('hello'));
   });
 });
 

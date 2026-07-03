@@ -280,8 +280,11 @@ export class SDKChatClient {
 
   /**
    * Phase 2: client-configured crypto_mode expectation (from constructor options).
-   * When set, every server-emitted crypto_mode is validated against this value.
+   * When non-null, every server-emitted crypto_mode is validated against this value.
    * null = auto-detect from server (no validation).
+   *
+   * SEC-CR-001: when an e2ee provider is configured this defaults to 'sframe-static'
+   * (never null) so downgrade protection is default-on — see the constructor.
    */
   readonly #cryptoMode: CryptoMode | null;
 
@@ -312,8 +315,26 @@ export class SDKChatClient {
     this.#minCompressBytes = opts.minCompressBytes ?? DEFAULT_MIN_COMPRESS_BYTES;
     this.#dictHint = opts.dictHint ?? 'zstd-dict-ru-v1';
     this.#testNoSleep = opts._testNoSleep ?? false;
-    // Phase 2: store configured expectation (null = auto-detect).
-    this.#cryptoMode = opts.cryptoMode ?? null;
+
+    // SEC-CR-001 (CWE-757 downgrade defense): an e2ee provider + an explicit
+    // cryptoMode:'plaintext' is a contradictory config — an encryption provider
+    // AND an explicit opt-out of encryption. Fail CLOSED at construct rather than
+    // honor a downgrade a caller almost certainly did not intend.
+    const hasE2ee = opts.e2ee !== undefined;
+    if (hasE2ee && opts.cryptoMode === 'plaintext') {
+      throw new SDKChatError(
+        'invalid_args',
+        'cryptoMode:"plaintext" is incompatible with a configured e2ee provider — ' +
+        'omit cryptoMode (defaults to "sframe-static") or remove the e2ee option',
+      );
+    }
+    // Phase 2 + SEC-CR-001: store the configured crypto_mode expectation.
+    // Downgrade protection is DEFAULT-ON: with an e2ee provider present, default to
+    // 'sframe-static' (NOT null) so a server-emitted crypto_mode:'plaintext' becomes a
+    // poison-mismatch (throw + tear down + refuse to send) instead of an accepted
+    // silent downgrade. Without an e2ee provider, plaintext is a valid intended mode
+    // (null = auto-detect from server, no validation).
+    this.#cryptoMode = opts.cryptoMode ?? (hasE2ee ? 'sframe-static' : null);
 
     // W6 E2EE: initialize crypto provider from e2ee option.
     if (opts.e2ee !== undefined) {
@@ -448,11 +469,11 @@ export class SDKChatClient {
       );
     }
 
-    // AD-1 downgrade defense: if e2ee is configured but crypto_mode is unknown
-    // (auto-detect not yet completed via subscribe/list), refuse to send.
-    // Otherwise we'd seal blindly — if server is plaintext mode, readers see garbage;
-    // if attacker tricked us into thinking we're plaintext when server is sframe,
-    // we'd silently send plaintext.
+    // AD-1 downgrade defense (fail-closed backstop): refuse to send if e2ee is
+    // configured but no crypto_mode is known. SEC-CR-001 makes #cryptoMode default
+    // to 'sframe-static' whenever an e2ee provider is present, so in normal operation
+    // knownMode is never null here — this guard remains as a defense-in-depth invariant
+    // that a future refactor cannot silently seal-blind or downgrade past.
     const knownMode = this.#activeCryptoMode ?? this.#cryptoMode;
     if (knownMode === null && this.#cryptoProvider !== null) {
       throw new SDKChatError(
