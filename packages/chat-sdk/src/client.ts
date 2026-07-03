@@ -48,6 +48,7 @@ import type {
 } from './types.js';
 import { SDKChatBatchError, SDKChatError } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
+import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
 import { enqueue, dequeue, pending } from './outbox.js';
 import { sendFile as sendFileHelper, type SendFileArgs } from './attachments.js';
@@ -262,14 +263,15 @@ export class SDKChatClient {
    */
   readonly #cryptoProvider: CryptoProvider | null;
   /**
-   * W6 E2EE: per-room promise chain to serialize async decryptions in subscribe().
-   * Keyed by roomId. Each onmessage decrypt is chained onto the room's entry to
-   * preserve message order within that room. Independent per room — one stuck
-   * unseal in roomA does NOT stall roomB.
-   * Non-re-entrant serial queue (not a re-entrant mutex).
-   * Assumes at most one active subscriber per room.
+   * W6 E2EE: per-room serial decrypt queue for subscribe(). Each onmessage
+   * decrypt is appended onto the room's chain to preserve in-order unseal within
+   * a room (the SFrame ratchet/replay window desyncs on out-of-order unseal).
+   * Independent per room — one stuck unseal in roomA does NOT stall roomB.
+   * Refcounted so multiple concurrent subscribers of one roomId (widget remount,
+   * visibility re-subscribe, reconnect race) share one serial chain and teardown
+   * of any single subscriber does not destroy it — see room-decrypt-chain.ts.
    */
-  readonly #decryptChainByRoom: Map<string, Promise<void>> = new Map();
+  readonly #decryptChain: RoomDecryptChain = new RoomDecryptChain();
   /**
    * W6 E2EE: guard to warn once when sendOptimistic is called with e2ee configured.
    * Callers should use sendTextOptimistic instead.
@@ -699,6 +701,15 @@ export class SDKChatClient {
     let lastSeq = 0;
     let es: EventSource | null = null;
 
+    // W6 E2EE: register this subscriber on the room's shared serial decrypt
+    // chain. Refcounted so a co-subscriber (widget remount / reconnect race)
+    // sharing this roomId keeps the chain alive until the LAST teardown.
+    // Gated on cryptoProvider (readonly) so acquire/release stay balanced and
+    // plaintext rooms never touch the chain (matching prior behaviour).
+    if (this.#cryptoProvider !== null) {
+      this.#decryptChain.acquire(roomId);
+    }
+
     const attach = (ticket: string) => {
       if (destroyed) return;
       const url = `${this.#baseUrl}/api/sdk/messages/subscribe?ticket=${encodeURIComponent(ticket)}&after_seq=${lastSeq}`;
@@ -767,9 +778,10 @@ export class SDKChatClient {
           // 5s timeout prevents a single stuck unseal from blocking all subsequent messages.
           if (this.#cryptoProvider !== null) {
             const provider = this.#cryptoProvider;
-            const chainKey = roomId;
-            const prev = this.#decryptChainByRoom.get(chainKey) ?? Promise.resolve();
-            const next = prev.then(async () => {
+            // Append onto the room's shared serial chain: unseal runs only after
+            // the prior frame's unseal settles, preserving in-order decrypt. The
+            // task self-catches so it always resolves (never poisons the chain).
+            this.#decryptChain.append(roomId, async () => {
               const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
               const timeoutMs = 5000;
               const timeoutPromise = new Promise<ArrayBuffer>((_res, rej) =>
@@ -787,7 +799,6 @@ export class SDKChatClient {
                 args.onMessage({ ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined });
               }
             });
-            this.#decryptChainByRoom.set(chainKey, next);
           } else {
             args.onMessage(mappedRow);
           }
@@ -981,11 +992,13 @@ export class SDKChatClient {
       }
       es?.close();
       es = null;
-      // Clean up per-room decrypt chain entry to avoid accumulating stale
-      // Promise<void> entries for rooms that are no longer subscribed.
-      // Note: assumes one active subscriber per room — if two subscribers share
-      // a roomId, teardown of either will remove the shared chain entry.
-      this.#decryptChainByRoom.delete(roomId);
+      // Deregister this subscriber from the room's shared serial decrypt chain.
+      // The chain entry is removed only when the LAST subscriber releases
+      // (refCount → 0), so a co-subscriber sharing this roomId keeps decrypting
+      // in order — teardown of one no longer destroys the shared chain.
+      if (this.#cryptoProvider !== null) {
+        this.#decryptChain.release(roomId);
+      }
     };
   }
 
