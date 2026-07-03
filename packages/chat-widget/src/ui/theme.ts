@@ -288,6 +288,39 @@ export const THEME_CSS = `
   font-style: italic;
 }
 
+/* U2: failed-decrypt placeholder — text color: --oxp-danger text directly on
+ * --oxp-bubble-self-bg fails WCAG 1.4.3 in the dark theme (#ff6b6b on #1e4e31
+ * = 3.46:1, below the 4.5:1 AA floor for italic/normal-size text — italic does
+ * not qualify for the large-text exemption). --oxp-fg-secondary is the token
+ * this file already designates for bubble-background text (see its own doc
+ * comment: "Much better than --oxp-muted on bubble bgs which fails at small
+ * sizes") and passes ≥5.9:1 on all four self/other × light/dark backgrounds.
+ *
+ * review-fix HIGH#2: text color alone left this visually identical in weight
+ * to .oxp-tombstone (both small/italic/muted) — but an unsealError, unlike a
+ * benign deletion, can mean a tampered/replayed message (SDK explicitly
+ * preserves it rather than masking it — see chat-sdk client.ts). Give it a
+ * danger-tinted chip background so it reads as a security-relevant state, not
+ * routine housekeeping. Reuses TWO existing in-file conventions rather than
+ * inventing a new one: the transparent-mix idiom from
+ * .oxp-reaction-chip[data-own='true'] (color-mix(..., transparent) — correct
+ * here too, since this span sits on a VARYING backdrop, self or other bubble,
+ * light or dark, unlike .oxp-reconnect-banner which sits on a fixed --oxp-bg
+ * and can mix against it directly); and the 12% tint ratio from
+ * .oxp-reconnect-banner[data-state='auth-expired'].
+ * Re-verified WCAG 1.4.3 (text-on-tint, ≥4.5:1 required) with the same
+ * relative-luminance math after alpha-compositing the 12% danger tint onto
+ * each bubble bg: light-self 4.81:1, light-other 4.88:1, dark-self 5.42:1,
+ * dark-other 7.30:1 — all PASS. */
+.oxp-unseal-error {
+  display: inline-block;
+  color: var(--oxp-fg-secondary);
+  font-style: italic;
+  background: color-mix(in srgb, var(--oxp-danger) 12%, transparent);
+  border-radius: calc(var(--oxp-radius) * 0.35);
+  padding: 2px calc(var(--oxp-spacing-unit) * 0.625);
+}
+
 /* ── Markdown styles ── */
 /* 2A: use --oxp-code-bg (semantic token) instead of --oxp-border (structural token).
  * B3 (BLOCKER): add --oxp-code-border for guaranteed code region boundary.

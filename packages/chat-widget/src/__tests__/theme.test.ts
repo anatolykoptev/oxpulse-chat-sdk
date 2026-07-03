@@ -96,6 +96,35 @@ describe('theme foundation', () => {
     expect(css).toMatch(/\.oxp-error[^}]*var\(--oxp-danger\)/s);
   });
 
+  it('unseal_error_has_distinct_danger_affordance_from_tombstone', async () => {
+    // review-fix HIGH#2: .oxp-unseal-error must carry a distinct danger
+    // affordance, not the plain-italic-muted treatment .oxp-tombstone uses
+    // for a benign deletion — an unsealError can mean a tampered/replayed
+    // message. Reuses the existing color-mix(--oxp-danger, transparent)
+    // idiom (.oxp-reaction-chip[data-own='true'] uses the same transparent-mix
+    // pattern for a nested/varying-bubble-bg context; the 12% ratio matches
+    // .oxp-reconnect-banner[data-state='auth-expired']).
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const shadow = el.shadowRoot;
+    expect(shadow).not.toBeNull();
+    const css = shadow!.querySelector('style')!.textContent ?? '';
+    expect(css).toContain('.oxp-unseal-error');
+    expect(css).toMatch(/\.oxp-unseal-error[^}]*color-mix\([^)]*--oxp-danger[^)]*\)/s);
+    expect(css).toMatch(/\.oxp-unseal-error[^}]*background:/s);
+    // Tombstone stays plain — no background, no danger token — proving the
+    // two placeholder states are visually distinct, not the same treatment.
+    const tombstoneRule = css.match(/\.oxp-tombstone\s*\{[^}]*\}/s)?.[0] ?? '';
+    expect(tombstoneRule).not.toBe('');
+    expect(tombstoneRule).not.toMatch(/--oxp-danger/);
+    expect(tombstoneRule).not.toMatch(/background:/);
+  });
+
   it('on_accent_token_defined_for_both_themes', async () => {
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');

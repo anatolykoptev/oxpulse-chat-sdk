@@ -77,6 +77,28 @@ export function tombstoneText(_scope: "self" | "everyone"): string {
   return "This message was deleted";
 }
 
+/** U2: Failed-decrypt placeholder text (visible) — same wording regardless of
+ *  the SDK's unsealError reason ('replay' | 'auth' | 'unknown'). Mirrors
+ *  tombstoneText's one-wording-for-all-cases precedent: the UI doesn't need
+ *  to expose crypto failure-class detail to the end user, only that the
+ *  content is unavailable. Lock glyph gives a visual cue distinct from the
+ *  plain-italic tombstone. No i18n layer exists in this package (lang option
+ *  is accepted but unused for strings — see MessageListOptions.lang) so this
+ *  hardcoded-English string matches every other user-facing string in the
+ *  widget (tombstoneText, "Retry", "Add reaction", inline list-error text). */
+export function unsealErrorText(): string {
+  return "\u{1F512} This message couldn't be decrypted";
+}
+
+/** U2 review-fix: aria/screen-reader variant of unsealErrorText() — same
+ *  wording, no lock glyph. VoiceOver/NVDA announce U+1F512 as "locked", so
+ *  the glyph-bearing string would read as "locked This message couldn't be
+ *  decrypted" — redundant once the words themselves are spoken. The glyph is
+ *  a visual-only affordance; keep it out of the announced text. */
+export function unsealErrorAriaText(): string {
+  return "This message couldn't be decrypted";
+}
+
 /** Does the current user have a ❤️ reaction on the given message?
  *  Pure helper so the heart-fill state is unit-testable without
  *  mounting Svelte. Tuple shape mirrors the hook view. */

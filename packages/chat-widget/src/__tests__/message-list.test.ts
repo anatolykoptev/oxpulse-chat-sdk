@@ -156,6 +156,118 @@ describe('MessageList', () => {
     ml.destroy();
   });
 
+  it('renders_distinct_placeholder_for_failed_decrypt_message', async () => {
+    const rows = [
+      makeRow({ senderUid: 'u2', seq: 1, plaintext: undefined, text: undefined, unsealError: 'auth' }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    // U2: failed-decrypt row must render a distinct, non-empty placeholder — never raw/empty content.
+    expect(bubble!.querySelector('.oxp-unseal-error')).not.toBeNull();
+    expect(bubble!.textContent).toContain("couldn't be decrypted");
+    // Must not fall through to the normal empty-body render path.
+    expect(bubble!.querySelector('.oxp-bubble-body')?.innerHTML).not.toBe('');
+    // a11y: bubble aria-label must announce the failure, not read as empty.
+    expect(bubble!.getAttribute('aria-label')).toContain("couldn't be decrypted");
+    ml.destroy();
+  });
+
+  it('renders_normal_bubble_unchanged_when_unsealError_absent', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, text: 'hello world' })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-unseal-error')).toBeNull();
+    expect(bubble!.textContent).toContain('hello world');
+    ml.destroy();
+  });
+
+  it('tombstone_wins_over_unsealError_in_body_and_aria_when_both_set', async () => {
+    // design-quality-reviewer MUST-FIX: body render and aria-label priority
+    // must agree — a row can theoretically carry both deletedAt (a later
+    // mutation) and unsealError (from the original unseal attempt).
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        plaintext: undefined,
+        text: undefined,
+        unsealError: 'auth',
+        deletedAt: new Date().toISOString(),
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-tombstone')).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-unseal-error')).toBeNull();
+    expect(bubble!.textContent).toContain('This message was deleted');
+    // aria-label must match what's visually shown — not announce a different state.
+    expect(bubble!.getAttribute('aria-label')).toContain('This message was deleted');
+    expect(bubble!.getAttribute('aria-label')).not.toContain("couldn't be decrypted");
+    ml.destroy();
+  });
+
+  it('aria_label_resyncs_on_live_dedupe_reclassification_to_unsealError', async () => {
+    // review-fix HIGH#1: aria-label is computed ONLY in #createBubble; every live
+    // re-render (#updateBubble, via #handleNewMessage's dedupe path or
+    // #handleMutation) must ALSO refresh it, or a screen reader keeps announcing
+    // stale plaintext after the SDK reclassifies the row as unseal-failed
+    // (exactly the list()/subscribe decrypt-preserve mechanism this PR targets).
+    const fixedId = 'fixed-msg-1';
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, msgId: fixedId, text: 'original plaintext' })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    let bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble!.getAttribute('aria-label')).toContain('original plaintext');
+
+    // Live redelivery of the SAME msgId, now flagged unsealError (dedupe/upsert path).
+    expect(capturedOnMessage).not.toBeNull();
+    capturedOnMessage!(
+      makeRow({ senderUid: 'u2', seq: 1, msgId: fixedId, plaintext: undefined, text: undefined, unsealError: 'replay' }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble!.querySelector('.oxp-unseal-error')).not.toBeNull();
+    expect(bubble!.getAttribute('aria-label')).toContain("couldn't be decrypted");
+    expect(bubble!.getAttribute('aria-label')).not.toContain('original plaintext');
+    ml.destroy();
+  });
+
+  it('aria_label_resyncs_on_live_mutation_event', async () => {
+    // review-fix HIGH#1: same staleness gap via #handleMutation (delete/edit SSE).
+    const fixedId = 'fixed-msg-2';
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, msgId: fixedId, text: 'original plaintext' })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    let bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble!.getAttribute('aria-label')).toContain('original plaintext');
+
+    expect(capturedOnMutation).not.toBeNull();
+    capturedOnMutation!({ msgId: fixedId, op: 'delete', deletedAt: new Date().toISOString() });
+
+    bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble!.querySelector('.oxp-tombstone')).not.toBeNull();
+    expect(bubble!.getAttribute('aria-label')).toContain('This message was deleted');
+    expect(bubble!.getAttribute('aria-label')).not.toContain('original plaintext');
+    ml.destroy();
+  });
+
   it('auto_scrolls_to_bottom_on_initial_mount', async () => {
     const rows = [
       makeRow({ senderUid: 'u1', seq: 1 }),
