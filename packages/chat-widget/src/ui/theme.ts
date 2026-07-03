@@ -288,6 +288,20 @@ export const THEME_CSS = `
   font-style: italic;
 }
 
+/* U2: failed-decrypt placeholder — distinct from .oxp-tombstone via the lock
+ * glyph + wording (see unsealErrorText()), not via color: --oxp-danger text
+ * on --oxp-bubble-self-bg fails WCAG 1.4.3 in the dark theme (#ff6b6b on
+ * #1e4e31 = 3.46:1, below the 4.5:1 AA floor for italic/normal-size text —
+ * italic does not qualify for the large-text exemption). --oxp-fg-secondary
+ * is the token this file already designates for bubble-background text
+ * (see its own doc comment: "Much better than --oxp-muted on bubble bgs
+ * which fails at small sizes") and passes ≥5.9:1 on all four
+ * self/other × light/dark bubble backgrounds. */
+.oxp-unseal-error {
+  color: var(--oxp-fg-secondary);
+  font-style: italic;
+}
+
 /* ── Markdown styles ── */
 /* 2A: use --oxp-code-bg (semantic token) instead of --oxp-border (structural token).
  * B3 (BLOCKER): add --oxp-code-border for guaranteed code region boundary.

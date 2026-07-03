@@ -156,6 +156,68 @@ describe('MessageList', () => {
     ml.destroy();
   });
 
+  it('renders_distinct_placeholder_for_failed_decrypt_message', async () => {
+    const rows = [
+      makeRow({ senderUid: 'u2', seq: 1, plaintext: undefined, text: undefined, unsealError: 'auth' }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    // U2: failed-decrypt row must render a distinct, non-empty placeholder — never raw/empty content.
+    expect(bubble!.querySelector('.oxp-unseal-error')).not.toBeNull();
+    expect(bubble!.textContent).toContain("couldn't be decrypted");
+    // Must not fall through to the normal empty-body render path.
+    expect(bubble!.querySelector('.oxp-bubble-body')?.innerHTML).not.toBe('');
+    // a11y: bubble aria-label must announce the failure, not read as empty.
+    expect(bubble!.getAttribute('aria-label')).toContain("couldn't be decrypted");
+    ml.destroy();
+  });
+
+  it('renders_normal_bubble_unchanged_when_unsealError_absent', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, text: 'hello world' })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-unseal-error')).toBeNull();
+    expect(bubble!.textContent).toContain('hello world');
+    ml.destroy();
+  });
+
+  it('tombstone_wins_over_unsealError_in_body_and_aria_when_both_set', async () => {
+    // design-quality-reviewer MUST-FIX: body render and aria-label priority
+    // must agree — a row can theoretically carry both deletedAt (a later
+    // mutation) and unsealError (from the original unseal attempt).
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        plaintext: undefined,
+        text: undefined,
+        unsealError: 'auth',
+        deletedAt: new Date().toISOString(),
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-tombstone')).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-unseal-error')).toBeNull();
+    expect(bubble!.textContent).toContain('This message was deleted');
+    // aria-label must match what's visually shown — not announce a different state.
+    expect(bubble!.getAttribute('aria-label')).toContain('This message was deleted');
+    expect(bubble!.getAttribute('aria-label')).not.toContain("couldn't be decrypted");
+    ml.destroy();
+  });
+
   it('auto_scrolls_to_bottom_on_initial_mount', async () => {
     const rows = [
       makeRow({ senderUid: 'u1', seq: 1 }),

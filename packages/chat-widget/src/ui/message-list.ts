@@ -12,7 +12,7 @@
 import { renderMarkdown } from '../utils/markdown.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl } from '../utils/attachments.js';
-import { shouldAutoScroll, isChained, formatTime, tombstoneText } from '../utils/list-helpers.js';
+import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText } from '../utils/list-helpers.js';
 import { reactionAriaLabel } from '../utils/reaction-types.js';
 import { ReactionPicker } from './reaction-picker.js';
 
@@ -25,6 +25,13 @@ export interface MessageRow {
   senderUid: string;
   sealed: ArrayBuffer;
   plaintext?: ArrayBuffer;
+  /**
+   * U2: set by the SDK (chat-sdk MessageRow.unsealError) when unseal() failed
+   * for this row — the row is preserved rather than dropped. When set,
+   * plaintext is undefined; the render path must show a distinct
+   * failed-decrypt placeholder instead of the (empty) normal body.
+   */
+  unsealError?: 'replay' | 'auth' | 'unknown';
   createdAt: string;
   deletedAt?: string;
   editedAt?: string;
@@ -732,7 +739,17 @@ export class MessageList {
     const rosterName = isSelf ? 'You' : (this.#roster.get(row.senderUid) ?? row.senderUid.slice(0, 8));
     const senderLabel = escapeHtml(rosterName);
     const timeText = formatTime(rowTime(row));
-    const plainBody = decodeText(row).replace(/\n/g, ' ').slice(0, 200);
+    // U2: a11y — announce the tombstone / failed-decrypt placeholder text instead
+    // of an empty body (plaintext is undefined in both cases, so decodeText()
+    // would otherwise yield '' and the bubble would read as empty to a screen
+    // reader). Priority MUST mirror #populateBubble's body-render order exactly
+    // (deletedAt wins over unsealError) — divergent priority here would announce
+    // a different state than what's visually shown for a row carrying both flags.
+    const plainBody = row.deletedAt
+      ? tombstoneText('everyone')
+      : row.unsealError
+        ? unsealErrorText()
+        : decodeText(row).replace(/\n/g, ' ').slice(0, 200);
     el.setAttribute('aria-label', `Message from ${senderLabel} at ${timeText}: ${plainBody}`);
 
     this.#populateBubble(el, row, chained);
@@ -773,6 +790,15 @@ export class MessageList {
       tombEl.className = 'oxp-tombstone';
       tombEl.textContent = tombstoneText('everyone');
       bodyEl.appendChild(tombEl);
+    } else if (row.unsealError) {
+      // U2: preserved-but-undecryptable row (SDK sets unsealError instead of
+      // dropping it — see chat-sdk client.ts classifyUnsealError). Render a
+      // distinct placeholder so the user never sees raw/empty ciphertext
+      // content mistaken for a real message.
+      const unsealEl = document.createElement('span');
+      unsealEl.className = 'oxp-unseal-error';
+      unsealEl.textContent = unsealErrorText();
+      bodyEl.appendChild(unsealEl);
     } else {
       const text = decodeText(row);
       bodyEl.innerHTML = renderMarkdown(text);
