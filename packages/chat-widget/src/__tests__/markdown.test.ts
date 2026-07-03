@@ -33,6 +33,14 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('an _italic_ word')).toContain('<em>italic</em>');
   });
 
+  it('does NOT italicize underscores inside snake_case identifiers', () => {
+    // ITALIC_RE's word-boundary lookaround must reject an underscore flanked
+    // by word chars — a doubled-backslash char class ([\\w]) instead of the
+    // \w escape disables this and mis-italicizes snake_case text.
+    expect(renderMarkdown('snake_case_var')).not.toContain('<em>');
+    expect(renderMarkdown('a_hi_b')).not.toContain('<em>');
+  });
+
   it('renders ~~strike~~ as <del>', () => {
     expect(renderMarkdown('~~gone~~')).toContain('<del>gone</del>');
   });

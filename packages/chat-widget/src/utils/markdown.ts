@@ -23,7 +23,7 @@ const SPOILER_RE = /\|\|([^|]+)\|\|/g;
 const BOLD_RE = /\*\*(.+?)\*\*/g;
 const UNDERLINE_RE = /__(.+?)__/g;
 const STRIKE_RE = /~~(.+?)~~/g;
-const ITALIC_RE = /(?<![\\w])_(.+?)_(?![\\w])/g;
+const ITALIC_RE = /(?<!\w)_(.+?)_(?!\w)/g;
 const LINK_RE = /\[([^\]]+)]\(([^)]+)\)/g;
 const AUTOLINK_RE = /(https?:\/\/[^\s<"')\]]+)/g;
 
