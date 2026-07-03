@@ -717,22 +717,56 @@ export class SDKChatClient {
       // W6 E2EE: post-decrypt rows when crypto provider is configured.
       // Failed decryptions are PRESERVED with unsealError set (not dropped) so
       // pagination counts remain accurate and callers can detect potential attacks.
-      const provider = this.#cryptoProvider;
-      const decrypted: MessageRow[] = [];
-      for (const row of rawItems) {
-        const ctx: SealContext = { roomId, senderUid: row.senderUid };
-        try {
-          const plaintext = await provider.unseal(row.sealed, ctx);
-          decrypted.push({ ...row, plaintext });
-        } catch (err) {
-          // Preserve the row with unsealError — do NOT drop it (M2 fix).
-          // Dropped rows break pagination (caller sees fewer items than server sent)
-          // and mask attacks (tampered/replayed rows vanish silently).
-          console.warn('[chat-sdk] list(): unseal failed for seq', row.seq, err);
-          decrypted.push({ ...row, unsealError: classifyUnsealError(err) });
+      //
+      // SEC-CR-14-02: if THIS room has a LIVE subscription, its per-room
+      // #decryptChain owns the SFrame ratchet — unsealing this fetched page
+      // off-chain would run a SECOND unseal on that ratchet while a streamed /
+      // reconnect-replay unseal is still in flight, desyncing the ratchet /
+      // replay window (the class #14 closed on the stream and #15 on reconnect).
+      // Route the unseal through the SAME serial chain so scrollback / pagination
+      // can never run concurrently with the live stream for that room. If the
+      // room has NO live subscription (refCount 0) there is no chain entry —
+      // appending would no-op and DROP every row — AND no streamed unseal can
+      // race, so unseal directly off-chain.
+      //
+      // The refCount check and the on-chain appends run in ONE synchronous burst
+      // (#unsealRowsOnChain appends before its first await), so no subscribe /
+      // teardown interleaves between the check and the dispatch: the whole page
+      // is queued atomically while refCount is still > 0. The common case (a
+      // stable subscription during scrollback) is thus always serialized.
+      //
+      // Two documented residual off-chain windows remain, both requiring
+      // refCount == 0 at dispatch, both strictly rarer than and no-worse than
+      // main (which unseals list() off-chain UNCONDITIONALLY, racing even at
+      // refCount > 0). Neither can be closed by on-chaining a chainless room —
+      // append() no-ops at refCount 0 and would DROP the rows (the footgun #14/#15
+      // scoped around):
+      //   (1) a subscription that APPEARS after a refCount-0 dispatch runs its
+      //       first streamed unseal concurrently with this one-shot fetch;
+      //   (2) a list() issued during release()'s deferred-delete DRAIN window —
+      //       the entry lingers at refCount 0 while a torn-down subscriber's last
+      //       streamed unseal is still draining (see RoomDecryptChain.release) —
+      //       runs off-chain concurrently with that draining unseal.
+      if (this.#decryptChain.refCountOf(roomId) > 0) {
+        items = await this.#unsealRowsOnChain(roomId, rawItems);
+      } else {
+        const provider = this.#cryptoProvider;
+        const decrypted: MessageRow[] = [];
+        for (const row of rawItems) {
+          const ctx: SealContext = { roomId, senderUid: row.senderUid };
+          try {
+            const plaintext = await provider.unseal(row.sealed, ctx);
+            decrypted.push({ ...row, plaintext });
+          } catch (err) {
+            // Preserve the row with unsealError — do NOT drop it (M2 fix).
+            // Dropped rows break pagination (caller sees fewer items than server sent)
+            // and mask attacks (tampered/replayed rows vanish silently).
+            console.warn('[chat-sdk] list(): unseal failed for seq', row.seq, err);
+            decrypted.push({ ...row, unsealError: classifyUnsealError(err) });
+          }
         }
+        items = decrypted;
       }
-      items = decrypted;
     } else {
       items = rawItems;
     }
@@ -796,6 +830,38 @@ export class SDKChatClient {
         console.warn('[chat-sdk] decrypt task: onMessage threw for seq', mappedRow.seq, cbErr);
       }
     });
+  }
+
+  /**
+   * Unseal a fetched page of rows THROUGH the room's serial #decryptChain and
+   * return them decrypted, IN SERVER ORDER. Used by list() ONLY when the room has
+   * a live subscription (refCountOf > 0) so scrollback / pagination unseal
+   * serializes with the streamed + reconnect-replay unseal on the SAME queue — at
+   * most one unseal in flight per room (SEC-CR-14-02).
+   *
+   * Reuses #appendDecryptTask (5s timeout, never-rejects, refCount-gated) so
+   * on-chain scrollback obeys the SAME chain-drain contract as the live stream;
+   * each task's onMessage resolves that row's slot, so we collect the ordered
+   * result via Promise.all (which preserves input-array order regardless of
+   * settle order).
+   *
+   * Appends run in ONE synchronous burst — each Promise executor runs
+   * #appendDecryptTask synchronously during the map — so no teardown / subscribe
+   * interleaves between the caller's refCount check and these appends: the whole
+   * page is queued atomically while refCount is still > 0, so no append no-ops
+   * (a no-op would drop a row and hang this Promise.all). Already-queued tasks
+   * still drain even if the subscription tears down afterward — release() defers
+   * entry removal until the chain drains — so the returned promise always settles.
+   */
+  #unsealRowsOnChain(roomId: string, rawItems: MessageRow[]): Promise<MessageRow[]> {
+    return Promise.all(
+      rawItems.map(
+        (row) =>
+          new Promise<MessageRow>((resolve) => {
+            this.#appendDecryptTask(roomId, row, resolve);
+          }),
+      ),
+    );
   }
 
   async #fetchSubscribeTicket(roomId: string, afterSeq: number): Promise<string> {
