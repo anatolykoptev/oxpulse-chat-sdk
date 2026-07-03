@@ -85,6 +85,30 @@ export type E2EEOptions =
        * ```
        */
       getKey: (roomId: string) => Promise<CryptoKey>;
+
+      /**
+       * CTR allocation strategy for sframe-ratchet. Default `'random-64'`.
+       * `'monotonic-idb'` persists the SENDER's counter (requires `ctrKeyspace`) and avoids
+       * the random-64 birthday bound; it does NOT by itself protect the receiver across
+       * reloads — that is `durableReplay` (SEC-CR-003).
+       */
+      ctrStrategy?: 'random-64' | 'monotonic-idb';
+      /** Required when `ctrStrategy` is `'monotonic-idb'`; namespaces sframe-ratchet's CTR store. */
+      ctrKeyspace?: string;
+      /** In-memory replay window size for sframe-ratchet (session-scoped). Default 1024; `0` disables it. */
+      replayWindow?: number;
+      /**
+       * SEC-CR-003: durable, cross-reload receiver-side anti-replay. Default ON when IndexedDB is
+       * available, graceful no-op (one-time warn) when it is not. Set `false` to opt out.
+       */
+      durableReplay?: boolean;
+      /**
+       * Namespace for the durable replay IDB store. Defaults to the client's `appId` (falling back
+       * to `'default'`), so distinct tenants on the same origin do not share a replay window.
+       */
+      durableReplayNamespace?: string;
+      /** Durable replay window size (distinct recent CTRs per sender per room). Default 1024; `0` disables it. */
+      durableReplayWindow?: number;
     }
   | {
       /**

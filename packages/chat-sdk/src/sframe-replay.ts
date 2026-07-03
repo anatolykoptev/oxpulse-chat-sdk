@@ -20,7 +20,14 @@
  * Feature-detected + default-on: when IndexedDB is unavailable (SSR / Node without a polyfill /
  * private-mode quirks) the guard degrades to a no-op with a one-time warning, and the library's
  * in-memory window remains the only (session-scoped) defense — the guard never throws at
- * construct and never breaks a no-IDB runtime.
+ * construct and never breaks a no-IDB runtime. A `window` of 0 disables the durable window
+ * (mirrors sframe-ratchet's `replayWindow: 0` debug switch).
+ *
+ * ## Concurrency
+ * Same-realm writes are serialized by a promise chain; CROSS-tab writes are serialized by the
+ * Web Locks API (the same `navigator.locks` pattern sframe-ratchet's monotonic-idb CTR allocator
+ * uses), and each persist is a read-merge-write so a second tab's accepted CTRs are merged, not
+ * clobbered. Where `navigator.locks` is absent the read-merge-write still runs (unlocked).
  */
 
 import { get, set } from 'idb-keyval';
@@ -50,10 +57,46 @@ function idbAvailable(): boolean {
   }
 }
 
+/** Detect the Web Locks API (cross-tab mutual exclusion), mirroring sframe-ratchet's allocator. */
+function locksAvailable(): boolean {
+  try {
+    return typeof navigator !== 'undefined' && navigator.locks != null;
+  } catch {
+    return false;
+  }
+}
+
+/** Dedup keeping the LAST occurrence of each value, preserving that last-occurrence order. */
+function dedupKeepLast(arr: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const v = arr[i];
+    if (v === undefined || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  out.reverse();
+  return out;
+}
+
+/**
+ * Resolve the effective window size: `undefined` → default; `0` → disabled (matches the
+ * library's `replayWindow: 0`); a negative (invalid) value → the secure default, not disabled.
+ */
+function resolveWindow(window: number | undefined): number {
+  if (window === undefined || window < 0) return DEFAULT_WINDOW;
+  return Math.trunc(window);
+}
+
 export interface DurableReplayGuardOptions {
   /** Namespace isolating independent key-spaces in the shared IDB store. Default 'default'. */
   namespace?: string;
-  /** Max distinct recent CTRs tracked per (room, sender). Default 1024 (matches the library). */
+  /**
+   * Max distinct recent CTRs tracked per (room, sender). Default 1024 (matches the library).
+   * `0` disables the durable window (mirrors sframe-ratchet's `replayWindow: 0`); a negative
+   * value is treated as invalid and falls back to the default (it does NOT disable).
+   */
   window?: number;
   /** Suppress the one-time no-IDB warning (e.g. when the caller has already surfaced it). */
   warnIfUnavailable?: boolean;
@@ -62,6 +105,11 @@ export interface DurableReplayGuardOptions {
 /**
  * Durable receiver-side replay window. One instance per provider; state is scoped per
  * (namespace, roomId, senderUid) so no cross-room / cross-key-space replay-window confusion.
+ *
+ * The caller SHOULD pass a per-tenant `namespace` (the SDK defaults it to the client's `appId`).
+ * Two independent deployments sharing the same origin AND the same namespace (e.g. both omitting
+ * appId → `'default'`) with a colliding (roomId, senderUid) would share a window and could
+ * false-reject each other — give each deployment a distinct namespace/appId to avoid this.
  */
 export class DurableReplayGuard {
   /** True when IndexedDB is present; when false every method is a safe no-op. */
@@ -78,7 +126,7 @@ export class DurableReplayGuard {
 
   constructor(opts: DurableReplayGuardOptions = {}) {
     this.namespace = opts.namespace ?? 'default';
-    this.window = opts.window !== undefined && opts.window > 0 ? opts.window : DEFAULT_WINDOW;
+    this.window = resolveWindow(opts.window);
     this.available = idbAvailable();
     if (!this.available && opts.warnIfUnavailable !== false) {
       // One-time, matching the SDK's console.warn idiom. Not fatal: the library's in-memory
@@ -136,7 +184,7 @@ export class DurableReplayGuard {
    * proceed with AEAD verification. A false result means the CTR was already seen (replay).
    */
   async check(roomId: string, senderUid: string, ctr: bigint): Promise<boolean> {
-    if (!this.available) return true;
+    if (!this.available || this.window === 0) return true;
     const win = await this.hydrate(roomId, senderUid);
     return !win.set.has(ctr.toString());
   }
@@ -146,7 +194,7 @@ export class DurableReplayGuard {
    * only AFTER a successful unseal, so a forged frame with a novel CTR cannot poison the window.
    */
   async accept(roomId: string, senderUid: string, ctr: bigint): Promise<void> {
-    if (!this.available) return;
+    if (!this.available || this.window === 0) return;
     const key = this.storeKey(roomId, senderUid);
     const win = await this.hydrate(roomId, senderUid);
     const ctrStr = ctr.toString();
@@ -154,26 +202,62 @@ export class DurableReplayGuard {
 
     win.set.add(ctrStr);
     win.order.push(ctrStr);
+    this.trim(win);
+
+    // Serialize same-realm writes via the chain; serialize cross-tab writes via Web Locks inside
+    // persistMerged. Non-fatal on failure (the in-memory window still defends this session).
+    this.persistTail = this.persistTail
+      .catch(() => undefined)
+      .then(() => this.persistMerged(key, win))
+      .catch((err: unknown) => this.warnPersistFail(err));
+    await this.persistTail;
+  }
+
+  /** Drop oldest CTRs until the in-memory window is within bound. */
+  private trim(win: MemWindow): void {
     while (win.order.length > this.window) {
       const evicted = win.order.shift();
       if (evicted !== undefined) win.set.delete(evicted);
     }
+  }
 
-    const snapshot: PersistedWindow = { v: 1, seen: [...win.order] };
-    // Serialize per guard; non-fatal on failure (in-memory window still defends this session).
-    this.persistTail = this.persistTail
-      .catch(() => undefined)
-      .then(() => set(key, snapshot))
-      .catch((err: unknown) => {
-        if (!this.warnedPersistFail) {
-          this.warnedPersistFail = true;
-          console.warn(
-            '[chat-sdk] failed to persist sframe replay window (SEC-CR-003); cross-reload ' +
-              'replay protection may be degraded:',
-            err,
-          );
-        }
-      });
-    await this.persistTail;
+  /**
+   * Read-merge-write the persisted window under a cross-tab exclusive lock (when available):
+   * union the persisted CTRs (possibly from another tab) with this tab's in-memory window, dedup,
+   * bound, persist, and reflect the union back into the in-memory mirror so this tab immediately
+   * rejects a CTR another tab already accepted.
+   */
+  private async persistMerged(key: string, win: MemWindow): Promise<void> {
+    const write = async (): Promise<void> => {
+      let persistedSeen: string[] = [];
+      try {
+        const cur = await get<PersistedWindow>(key);
+        if (cur && cur.v === 1 && Array.isArray(cur.seen)) persistedSeen = cur.seen;
+      } catch {
+        // Read failed inside the RMW — fall back to this tab's in-memory view only.
+      }
+      const merged = dedupKeepLast(persistedSeen.concat(win.order)).slice(-this.window);
+      win.order = merged;
+      win.set = new Set(merged);
+      const payload: PersistedWindow = { v: 1, seen: merged };
+      await set(key, payload);
+    };
+
+    if (locksAvailable()) {
+      await navigator.locks.request(`${KEY_PREFIX}-lock|${key}`, { mode: 'exclusive' }, write);
+    } else {
+      await write();
+    }
+  }
+
+  private warnPersistFail(err: unknown): void {
+    if (!this.warnedPersistFail) {
+      this.warnedPersistFail = true;
+      console.warn(
+        '[chat-sdk] failed to persist sframe replay window (SEC-CR-003); cross-reload ' +
+          'replay protection may be degraded:',
+        err,
+      );
+    }
   }
 }

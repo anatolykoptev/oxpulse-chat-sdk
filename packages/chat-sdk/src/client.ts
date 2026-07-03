@@ -346,8 +346,20 @@ export class SDKChatClient {
     if (opts.e2ee !== undefined) {
       const e2ee: E2EEOptions = opts.e2ee;
       if (e2ee.provider === 'sframe') {
-        // Discriminated union guarantees e2ee.getKey is present here.
-        this.#cryptoProvider = createSFrameProvider({ getKey: e2ee.getKey });
+        // Discriminated union guarantees e2ee.getKey is present here. Forward the anti-replay
+        // config surface (SEC-CR-003); default the durable namespace to the client's appId so
+        // distinct tenants on one origin do not share a replay window.
+        this.#cryptoProvider = createSFrameProvider({
+          getKey: e2ee.getKey,
+          ...(e2ee.ctrStrategy !== undefined ? { ctrStrategy: e2ee.ctrStrategy } : {}),
+          ...(e2ee.ctrKeyspace !== undefined ? { ctrKeyspace: e2ee.ctrKeyspace } : {}),
+          ...(e2ee.replayWindow !== undefined ? { replayWindow: e2ee.replayWindow } : {}),
+          ...(e2ee.durableReplay !== undefined ? { durableReplay: e2ee.durableReplay } : {}),
+          ...(e2ee.durableReplayWindow !== undefined
+            ? { durableReplayWindow: e2ee.durableReplayWindow }
+            : {}),
+          durableReplayNamespace: e2ee.durableReplayNamespace ?? opts.appId,
+        });
       } else if (typeof e2ee.provider === 'object' && 'seal' in e2ee.provider) {
         // Custom CryptoProvider instance supplied directly.
         this.#cryptoProvider = e2ee.provider;

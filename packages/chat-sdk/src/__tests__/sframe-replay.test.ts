@@ -235,4 +235,64 @@ describe('SFrame durable cross-reload anti-replay (SEC-CR-003)', () => {
       session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
     ).rejects.toBeInstanceOf(ReplayError);
   });
+
+  it('durableReplayWindow:0 disables the durable window (mirrors replayWindow:0)', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 0 });
+    const frame = await sender.seal(pt('disabled'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    const session1 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 0 });
+    await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Disabled → nothing persisted, and a cross-reload replay is accepted (opt-in-only again).
+    const storeKey = `sframe-replay|default|${ROOM_ID}|${SENDER_UID}`;
+    expect(await get(storeKey)).toBeUndefined();
+
+    const session2 = createSFrameProvider({ getKey: async () => key, durableReplayWindow: 0 });
+    const out = await session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+    expect(new Uint8Array(out)).toEqual(enc.encode('disabled'));
+  });
+
+  it('cross-tab: a second tab merges (does not clobber) the first tab persisted CTRs', async () => {
+    const key = await makeHkdfKey();
+    const sender = createSFrameProvider({ getKey: async () => key });
+    const fA = await sender.seal(pt('tabA-frame'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+    const fB = await sender.seal(pt('tabB-frame'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Two "tabs" (separate provider instances) sharing the same IDB store record different CTRs.
+    const tabA = createSFrameProvider({ getKey: async () => key });
+    const tabB = createSFrameProvider({ getKey: async () => key });
+    await tabA.unseal(fA, { roomId: ROOM_ID, senderUid: SENDER_UID }); // persists {ctrA}
+    await tabB.unseal(fB, { roomId: ROOM_ID, senderUid: SENDER_UID }); // read-merge-write -> {ctrA, ctrB}
+
+    // A reload sees BOTH CTRs — tabA's ctrA was merged, not clobbered by tabB's write.
+    const reloadA = createSFrameProvider({ getKey: async () => key });
+    await expect(
+      reloadA.unseal(fA, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+    const reloadB = createSFrameProvider({ getKey: async () => key });
+    await expect(
+      reloadB.unseal(fB, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
+
+  it('concurrency: overlapping unseals of one frame may double-deliver, but the guarantee holds after', async () => {
+    const key = await makeHkdfKey();
+    const provider = createSFrameProvider({ getKey: async () => key });
+    const frame = await provider.seal(pt('race'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+    // Two overlapping unseals of the SAME fresh frame — mirrors the un-serialized public list()
+    // path (subscribe()/reconnect route through the per-room serial chain; list() does not).
+    // Both pass check() before either accept() lands → the documented double-deliver residual.
+    const results = await Promise.allSettled([
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled').length).toBeGreaterThanOrEqual(1);
+
+    // Once the race settles, the durable window rejects any subsequent replay.
+    await expect(
+      provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
+    ).rejects.toBeInstanceOf(ReplayError);
+  });
 });

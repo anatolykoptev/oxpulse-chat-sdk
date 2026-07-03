@@ -115,9 +115,17 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
       // server cannot alter it without failing AEAD below.
       //
       // check() and accept() straddle the `await inner.unseal` — the same check→decrypt→accept
-      // ordering the library uses internally. Cross-reload protection holds once either accept
-      // lands; a within-session double-render of one fresh CTR is prevented upstream by the
-      // client's per-room serial decrypt chain (SEC-CR-14-01), which serializes every unseal.
+      // ordering the library uses internally. Cross-reload replay protection is NOT weakened by
+      // this gap: hydrate() atomically loads the persisted CTRs before any check() resolves, so a
+      // frame accepted in a PRIOR session is always rejected regardless of concurrency.
+      //
+      // The only residual is a within-session double-DELIVERY of one genuinely-new CTR when two
+      // unseal() calls for the same frame overlap. subscribe()/reconnect route every unseal
+      // through the client's per-room serial decrypt chain (SEC-CR-14-01), so they are safe;
+      // list() (client.ts) calls unseal() directly in a loop and is NOT serialized, so two
+      // concurrent list() calls could double-deliver. This is a pre-existing, idempotent residual
+      // tracked as tasks #44 / #42 (the public-list()-off-chain concurrency case) — not a replay
+      // bypass introduced here.
       let ctr: bigint | undefined;
       if (durable?.available) {
         try {
