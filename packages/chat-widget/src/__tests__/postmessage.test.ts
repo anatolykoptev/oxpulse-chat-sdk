@@ -185,7 +185,49 @@ import {
   sendToParent as _sendToParent,
   setParentOrigin,
   onParentMessage as _onParentMessage,
+  sendRefreshTokenToIframe,
 } from '../postmessage.js';
+
+// ── M1: sendRefreshTokenToIframe requires an explicit target origin ───────────
+// A bearer JWT must NEVER cross to '*'. Mirrors sendToParent's M1 discipline:
+// no origin available → warn + DROP (never post).
+
+describe('sendRefreshTokenToIframe — M1 explicit origin (no "*")', () => {
+  function fakeIframe(): { iframe: HTMLIFrameElement; postMessage: ReturnType<typeof vi.fn> } {
+    const postMessage = vi.fn();
+    const iframe = { contentWindow: { postMessage } } as unknown as HTMLIFrameElement;
+    return { iframe, postMessage };
+  }
+
+  it('DROPS (does not post) and warns when no target origin is provided', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { iframe, postMessage } = fakeIframe();
+    // Empty/absent origin — old code fell back to '*'; hardened code must drop.
+    sendRefreshTokenToIframe(iframe, 'new.jwt.token', '');
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('sendRefreshTokenToIframe'));
+    warnSpy.mockRestore();
+  });
+
+  it('NEVER posts a JWT to the "*" wildcard origin', () => {
+    const { iframe, postMessage } = fakeIframe();
+    sendRefreshTokenToIframe(iframe, 'new.jwt.token', '');
+    // Even if a future refactor re-introduced a post, it must not target '*'.
+    expect(postMessage).not.toHaveBeenCalledWith(expect.anything(), '*');
+  });
+
+  it('posts the refresh-token to the concrete origin when provided', () => {
+    const { iframe, postMessage } = fakeIframe();
+    sendRefreshTokenToIframe(iframe, 'new.jwt.token', 'https://widget.example.com');
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ ns: 'oxpulse-chat', type: 'refresh-token', jwt: 'new.jwt.token' }),
+      'https://widget.example.com',
+    );
+    // and specifically NOT the wildcard
+    expect(postMessage).not.toHaveBeenCalledWith(expect.anything(), '*');
+  });
+});
 
 describe('sendToParent — M1 targeted origin', () => {
   let parentPostMessage: ReturnType<typeof vi.fn>;
