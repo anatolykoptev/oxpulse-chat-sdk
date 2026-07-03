@@ -548,7 +548,21 @@ export class SDKChatClient {
     return { seq: json.seq, msgId: json.msg_id };
   }
 
-  async list(roomId: string, args: ListArgs = {}): Promise<ListResult> {
+  /**
+   * Fetch + parse + crypto_mode-validate a single page of rows WITHOUT unsealing.
+   * Shared by list() (which then unseals / plaintext-aliases + builds pagination)
+   * and the subscribe() reconnect-replay path (which appends each unseal onto the
+   * room's serial decrypt chain — SEC-CR-14-01 — instead of unsealing off-chain).
+   * Returns rows with `sealed` intact (no `plaintext` / `unsealError` set yet).
+   *
+   * Keeps the fail-closed poison check + crypto_mode validation + malformed-page
+   * guard in ONE place so both the public list() and the reconnect replay validate
+   * the server response identically.
+   */
+  async #fetchRows(
+    roomId: string,
+    args: ListArgs,
+  ): Promise<{ rawItems: MessageRow[]; hasMore: boolean; nextCursor: number | null }> {
     // SEC-CR-1695-02: fail-CLOSED if client was poisoned by a prior mismatch.
     if (this.#cryptoModePoisoned) {
       throw new SDKChatError(
@@ -611,7 +625,22 @@ export class SDKChatClient {
       () => { this.#cryptoModePoisoned = true; },
     );
 
-    const rawItems: MessageRow[] = json.items.map(rowToMessageRow);
+    if (json.has_more && json.next_cursor == null) {
+      throw new SDKChatError(
+        'server_error',
+        'server returned has_more=true but next_cursor=null',
+      );
+    }
+
+    return {
+      rawItems: json.items.map(rowToMessageRow),
+      hasMore: json.has_more,
+      nextCursor: json.next_cursor,
+    };
+  }
+
+  async list(roomId: string, args: ListArgs = {}): Promise<ListResult> {
+    const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, args);
 
     // Phase 2 + W6 E2EE: dispatch based on active crypto_mode.
     // - plaintext: base64-decode → UTF-8 string in plaintext field (no unseal).
@@ -644,16 +673,9 @@ export class SDKChatClient {
       items = rawItems;
     }
 
-    if (json.has_more && json.next_cursor == null) {
-      throw new SDKChatError(
-        'server_error',
-        'server returned has_more=true but next_cursor=null',
-      );
-    }
-
-    const result: ListResult = { items, hasNext: json.has_more };
-    if (json.has_more && json.next_cursor != null) {
-      const cursor = json.next_cursor;
+    const result: ListResult = { items, hasNext: hasMore };
+    if (hasMore && nextCursor != null) {
+      const cursor = nextCursor;
       // Direction-aware thunk: forward paging passes cursor as afterSeq;
       // backward paging passes cursor as beforeSeq.
       result.next =
@@ -662,6 +684,54 @@ export class SDKChatClient {
           : () => this.list(roomId, { ...args, afterSeq: cursor });
     }
     return result;
+  }
+
+  /**
+   * Append a per-room serial decrypt task onto the room's #decryptChain: unseal
+   * `mappedRow` (5s timeout) then deliver via `onMessage`. The task NEVER rejects
+   * (unseal failure → unsealError; a throwing onMessage is caught) so a link can't
+   * poison the room's chain. Shared by the live subscribe() SSE stream AND the
+   * reconnect replay path so BOTH serialize on the SAME queue — at most one unseal
+   * per room is ever in flight, across the reconnect boundary too (SEC-CR-14-01).
+   *
+   * No-op unless a crypto provider is configured (callers already gate on this;
+   * the guard keeps the method self-contained). RoomDecryptChain.append gates on a
+   * live subscriber, so a task for a torn-down room is dropped, not run.
+   */
+  #appendDecryptTask(
+    roomId: string,
+    mappedRow: MessageRow,
+    onMessage: (row: MessageRow) => void,
+  ): void {
+    const provider = this.#cryptoProvider;
+    if (provider === null) return;
+    this.#decryptChain.append(roomId, async () => {
+      const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
+      const timeoutMs = 5000;
+      const timeoutPromise = new Promise<ArrayBuffer>((_res, rej) =>
+        setTimeout(() => rej(new Error('unseal timeout')), timeoutMs),
+      );
+      let out: MessageRow;
+      try {
+        const plaintext = await Promise.race([
+          provider.unseal(mappedRow.sealed, ctx),
+          timeoutPromise,
+        ]);
+        out = { ...mappedRow, plaintext };
+      } catch (err) {
+        const isTimeout = err instanceof Error && err.message === 'unseal timeout';
+        console.warn('[chat-sdk] decrypt task: unseal failed for seq', mappedRow.seq, err);
+        out = { ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined };
+      }
+      // Deliver exactly once, AFTER the try/catch, so a throwing caller callback
+      // neither re-delivers the row as an unseal error nor rejects the link (which
+      // would wedge the room's serial chain).
+      try {
+        onMessage(out);
+      } catch (cbErr) {
+        console.warn('[chat-sdk] decrypt task: onMessage threw for seq', mappedRow.seq, cbErr);
+      }
+    });
   }
 
   async #fetchSubscribeTicket(roomId: string, afterSeq: number): Promise<string> {
@@ -785,40 +855,11 @@ export class SDKChatClient {
           }
           // W6 E2EE: async decrypt for subscribe — per-room serial chain to
           // preserve message order within a room while not stalling other rooms.
-          // 5s timeout prevents a single stuck unseal from blocking all subsequent messages.
+          // 5s timeout prevents a single stuck unseal from blocking all subsequent
+          // messages. Shared with the reconnect replay path (SEC-CR-14-01) so live
+          // and replayed frames serialize on ONE queue.
           if (this.#cryptoProvider !== null) {
-            const provider = this.#cryptoProvider;
-            // Append onto the room's shared serial chain: unseal runs only after
-            // the prior frame's unseal settles, preserving in-order decrypt. The
-            // task NEVER rejects (unseal failure → unsealError; a throwing
-            // onMessage is caught) so a link can't poison the room's chain.
-            this.#decryptChain.append(roomId, async () => {
-              const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
-              const timeoutMs = 5000;
-              const timeoutPromise = new Promise<ArrayBuffer>((_res, rej) =>
-                setTimeout(() => rej(new Error('unseal timeout')), timeoutMs),
-              );
-              let out: MessageRow;
-              try {
-                const plaintext = await Promise.race([
-                  provider.unseal(mappedRow.sealed, ctx),
-                  timeoutPromise,
-                ]);
-                out = { ...mappedRow, plaintext };
-              } catch (err) {
-                const isTimeout = err instanceof Error && err.message === 'unseal timeout';
-                console.warn('[chat-sdk] subscribe(): unseal failed for seq', mappedRow.seq, err);
-                out = { ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined };
-              }
-              // Deliver exactly once, AFTER the try/catch, so a throwing caller
-              // callback neither re-delivers the row as an unseal error nor
-              // rejects the link (which would wedge the room's serial chain).
-              try {
-                args.onMessage(out);
-              } catch (cbErr) {
-                console.warn('[chat-sdk] subscribe(): onMessage threw for seq', mappedRow.seq, cbErr);
-              }
-            });
+            this.#appendDecryptTask(roomId, mappedRow, args.onMessage);
           } else {
             args.onMessage(mappedRow);
           }
@@ -933,21 +974,58 @@ export class SDKChatClient {
       args.onError(sdkErr);
     };
 
+    // Replay messages missed while the stream was down, then advance lastSeq.
+    // SEC-CR-14-01: when e2ee is active the replay unseal is routed through the
+    // room's #decryptChain (the SAME serial queue as the live stream) so it can
+    // never run concurrently with a streamed unseal still in flight from before
+    // the stream closed — the ratchet / replay-window desync the chain exists to
+    // prevent. Mirrors list()'s crypto_mode dispatch exactly (plaintext-alias /
+    // unseal / raw); plaintext + no-e2ee rooms have no chain and deliver directly
+    // (unchanged). Shared by reconnectImmediate() and reconnect() so both fix the
+    // bypass identically.
+    const replayMissed = async () => {
+      try {
+        const { rawItems } = await this.#fetchRows(roomId, { afterSeq: lastSeq });
+        // Teardown may have raced the replay fetch: a torn-down subscriber must
+        // deliver nothing AND must not append onto a co-subscriber's still-live
+        // chain (append gates on refCount, which a surviving co-subscriber keeps
+        // > 0). Mirrors the live-stream guard in the onmessage handler.
+        if (destroyed) return;
+        if (this.#activeCryptoMode === 'plaintext') {
+          for (const row of rawItems) {
+            lastSeq = row.seq;
+            args.onMessage(aliasSealedAsPlaintext(row));
+          }
+        } else if (this.#cryptoProvider !== null) {
+          // Route each replay unseal through the room's serial chain: it queues
+          // behind any still-in-flight streamed unseal (never concurrent), and
+          // frames from the re-attached stream append AFTER these, preserving
+          // replay-before-live order. lastSeq advances synchronously from row.seq
+          // (independent of when the deferred unseal runs) so the follow-up ticket
+          // fetch + re-attach resume from the correct cursor with no gap/dup.
+          for (const row of rawItems) {
+            lastSeq = row.seq;
+            this.#appendDecryptTask(roomId, row, args.onMessage);
+          }
+        } else {
+          for (const row of rawItems) {
+            lastSeq = row.seq;
+            args.onMessage(row);
+          }
+        }
+      } catch (err) {
+        // Surface replay failures to caller; the reconnect flow still re-attaches.
+        reportError(err);
+      }
+    };
+
     // MAJOR #5: immediate reconnect for graceful shutdown — same replay logic as
     // reconnect() but fires in the next microtask instead of after backoff delay.
     const reconnectImmediate = () => {
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
         if (destroyed) return;
-        try {
-          const missed = await this.list(roomId, { afterSeq: lastSeq });
-          for (const row of missed.items) {
-            lastSeq = row.seq;
-            args.onMessage(row);
-          }
-        } catch (err) {
-          reportError(err);
-        }
+        await replayMissed();
         if (destroyed) return;
         let ticket: string;
         try {
@@ -966,16 +1044,7 @@ export class SDKChatClient {
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
         if (destroyed) return;
-        try {
-          const missed = await this.list(roomId, { afterSeq: lastSeq });
-          for (const row of missed.items) {
-            lastSeq = row.seq;
-            args.onMessage(row);
-          }
-        } catch (err) {
-          // Surface replay failures to caller; will still retry on next reconnect.
-          reportError(err);
-        }
+        await replayMissed();
         if (destroyed) return;
         let ticket: string;
         try {

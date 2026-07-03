@@ -19,8 +19,11 @@
  * ratchet's ordering.
  *
  * Guarantee: at most ONE unseal task per room is in flight at any time, across
- * every subscribe / teardown / resubscribe interleaving — the property a
- * ratcheting AEAD needs. Rooms remain independent of each other.
+ * every subscribe / teardown / resubscribe / reconnect-replay interleaving — the
+ * property a ratcheting AEAD needs. The reconnect replay (missed rows fetched on
+ * SSE error / graceful shutdown) appends its unseals onto this same chain rather
+ * than unsealing off-chain, so it too is serialized with the live stream
+ * (SEC-CR-14-01). Rooms remain independent of each other.
  */
 
 interface ChainEntry {
