@@ -20,8 +20,8 @@ export {
   decodeHttpBody,
 } from './codec.ts';
 
-export { asWireBytes, asSealedBytes } from "./brands.js";
-export type { WireBytes, SealedBytes } from "./brands.js";
+export { asWireBytes, asHttpWireBytes, asSealedBytes } from "./brands.js";
+export type { WireBytes, HttpWireBytes, SealedBytes } from "./brands.js";
 
 export type { DictName, DictLoader } from './dicts.ts';
 export {

@@ -53,8 +53,8 @@ import {
 } from "./dicts";
 import { canEncodeAsV2, toV2, fromV2 } from "./envelope-v2";
 import { WireCodecError } from "./errors.js";
-import { asWireBytes } from "./brands";
-import type { WireBytes } from "./brands";
+import { asWireBytes, asHttpWireBytes } from "./brands";
+import type { WireBytes, HttpWireBytes } from "./brands";
 
 export type { DictName };
 
@@ -609,7 +609,7 @@ export function capToOpts(cap: WireCap): EncodeOpts {
  * @returns Uint8Array with magic-byte prefix, ready to send as application/octet-stream.
  * @throws if zstd not initialized — call `ensureWireCodecReady()` first.
  */
-export function encodeHttpBody(jsonBytes: Uint8Array, dictName?: DictName): WireBytes {
+export function encodeHttpBody(jsonBytes: Uint8Array, dictName?: DictName): HttpWireBytes {
   if (!zstdReady) {
     throw new WireCodecError(
       "ZSTD_NOT_INITIALIZED",
@@ -627,7 +627,7 @@ export function encodeHttpBody(jsonBytes: Uint8Array, dictName?: DictName): Wire
       out[1] = (dictId >> 8) & 0xff; // high byte (0x00 for current IDs)
       out[2] = dictId & 0xff;         // low byte (0x01–0x03)
       out.set(compressed, 3);
-      return asWireBytes(out);
+      return asHttpWireBytes(out);
     }
     // Dict not loaded — fall through to dictless.
   }
@@ -635,7 +635,7 @@ export function encodeHttpBody(jsonBytes: Uint8Array, dictName?: DictName): Wire
   const out = new Uint8Array(1 + compressed.length);
   out[0] = ZSTD_MAGIC_PREFIX;
   out.set(compressed, 1);
-  return asWireBytes(out);
+  return asHttpWireBytes(out);
 }
 
 
@@ -655,7 +655,7 @@ export function encodeHttpBody(jsonBytes: Uint8Array, dictName?: DictName): Wire
  *
  * @throws if zstd not initialized or dict not loaded.
  */
-export function decodeHttpBody(bytes: WireBytes | string): unknown {
+export function decodeHttpBody(bytes: HttpWireBytes | string): unknown {
   if (typeof bytes === 'string') {
     return JSON.parse(bytes) as unknown;
   }

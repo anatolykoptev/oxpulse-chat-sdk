@@ -33,7 +33,7 @@ import {
   decodeHttpBody,
   ensureWireCodecReady,
 } from '../codec.ts';
-import { asWireBytes } from '../brands.ts';
+import { asHttpWireBytes } from '../brands.ts';
 
 beforeAll(async () => {
   await ensureWireCodecReady();
@@ -51,7 +51,7 @@ describe('encodeHttpBody / decodeHttpBody', () => {
     const payload = { v: 1, msg: 'hello' };
     const jsonBytes = new TextEncoder().encode(JSON.stringify(payload));
     expect(jsonBytes[0]).toBe(0x7b);
-    const result = decodeHttpBody(asWireBytes(jsonBytes));
+    const result = decodeHttpBody(asHttpWireBytes(jsonBytes));
     expect(result).toEqual(payload);
   });
 
@@ -80,7 +80,7 @@ describe('encodeHttpBody / decodeHttpBody', () => {
     // decodeHttpBody must reject it with a clear message, not silently throw
     // "unknown magic byte 0xc8" which is hard to diagnose.
     const peerFrame = new Uint8Array([0xc8, 0x00, 0x01, 0x02, 0x03]);
-    expect(() => decodeHttpBody(asWireBytes(peerFrame))).toThrow(
+    expect(() => decodeHttpBody(asHttpWireBytes(peerFrame))).toThrow(
       'decodeHttpBody: 0xC8 is the peer envelope-v2 format; use decode() instead.',
     );
   });
