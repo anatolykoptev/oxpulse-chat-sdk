@@ -1,6 +1,6 @@
 {
   "name": "@oxpulse/chat-sdk",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "OxPulse Chat SDK — send/list/subscribe over the OxPulse SDK HTTP API. CSP-safe (zero eval/Function calls).",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
