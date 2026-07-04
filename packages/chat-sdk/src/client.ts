@@ -243,6 +243,17 @@ function aliasSealedAsPlaintext(row: MessageRow): MessageRow {
 const DEFAULT_MIN_COMPRESS_BYTES = 256;
 
 /**
+ * SEC-CR-17-01 (availability): upper bound on the number of per-room discovered
+ * crypto-mode entries retained on the list()-only path. A client paging history
+ * across many distinct rooms via list() (no live subscription, so no
+ * teardownSubscriber eviction) would otherwise accumulate one #activeCryptoModeByRoom
+ * entry per room forever. When the map exceeds this cap, the OLDEST entry whose room
+ * has NO live subscription (decrypt-chain refCount 0) is evicted; live rooms and
+ * #poisonedRooms are never touched.
+ */
+const ACTIVE_CRYPTO_MODE_MAP_CAP = 256;
+
+/**
  * Server-side maximum number of user_ids accepted in a single bulk
  * POST /api/sdk/rooms/{room_id}/members request.
  * Mirrors `BULK_ADD_MAX = 500` in crates/sdk/src/rooms.rs:78.
@@ -496,8 +507,40 @@ export class SDKChatClient {
     );
     if (resolved !== null) {
       this.#activeCryptoModeByRoom.set(roomId, resolved);
+      this.#boundActiveCryptoModeMap(roomId);
     }
     return resolved;
+  }
+
+  /**
+   * SEC-CR-17-01 (availability): keep #activeCryptoModeByRoom bounded on the
+   * list()-only path (subscribe()'s teardownSubscriber only evicts LIVE rooms at
+   * chain refCount 0). Evicts the OLDEST entries whose room has NO live subscription
+   * until the map is within ACTIVE_CRYPTO_MODE_MAP_CAP.
+   *
+   * Never evicts:
+   *   - the room just resolved (justResolvedRoomId) — it is the freshest read;
+   *   - a room with a LIVE subscription (decrypt-chain refCount > 0) — its cached
+   *     mode is load-bearing for streamed-frame dispatch and is released by teardown;
+   *   - #poisonedRooms — a SEPARATE authoritative set: evicting a mode entry can never
+   *     un-poison a room (#assertRoomNotPoisoned reads #poisonedRooms alone, and a
+   *     poisoned room can never re-resolve — the fetch is refused first).
+   */
+  #boundActiveCryptoModeMap(justResolvedRoomId: string): void {
+    while (this.#activeCryptoModeByRoom.size > ACTIVE_CRYPTO_MODE_MAP_CAP) {
+      let evicted = false;
+      // Map iteration is insertion-order → the first eligible key is the oldest.
+      for (const roomId of this.#activeCryptoModeByRoom.keys()) {
+        if (roomId === justResolvedRoomId) continue;
+        if (this.#decryptChain.refCountOf(roomId) > 0) continue;
+        this.#activeCryptoModeByRoom.delete(roomId);
+        evicted = true;
+        break;
+      }
+      // All remaining entries are live subscriptions — legitimately bounded by the
+      // live-subscription count (teardownSubscriber releases them), so stop.
+      if (!evicted) break;
+    }
   }
 
   /**
