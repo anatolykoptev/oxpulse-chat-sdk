@@ -13,9 +13,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
 import { SDKChatError } from '../errors.js';
 import { enqueue, pending, dequeue } from '../outbox.js';
+import type { CryptoProvider, SealContext } from '../types.js';
 
 const BASE_URL = 'http://x';
 const JWT = 't';
+
+/** Identity crypto provider (e2ee wiring only — no message frames are unsealed in these tests). */
+const trivialProvider: CryptoProvider = {
+  seal: async (p: ArrayBuffer, _ctx: SealContext) => p,
+  unseal: async (c: ArrayBuffer, _ctx: SealContext) => c,
+};
 
 beforeEach(async () => {
   const { clear } = await import('idb-keyval');
@@ -228,5 +235,63 @@ describe('outbox', () => {
     // Both entries survive — transient failures stay queued.
     const remaining = await pending('room-transient');
     expect(remaining.map((m) => m.msgId).sort()).toEqual(['t-1', 't-2']);
+  });
+
+  // CR17-C-01 (unify doctrine across ALL THREE outbox-writing paths): the foreground
+  // optimistic-send catches must obey the same permanence rule flushOutbox uses — keep a
+  // transient failure queued, dequeue only a permanent code.
+  it('sendOptimistic keeps a transient (401) entry queued instead of dropping it', async () => {
+    globalThis.fetch = vi.fn(async () => new Response('nope', { status: 401 }));
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    const failed: SDKChatError[] = [];
+    const handle = c.sendOptimistic('room-401', {
+      senderUid: 'u',
+      sealed: new ArrayBuffer(0),
+      msgId: 'k-401',
+    });
+    handle.onFailed((e) => failed.push(e));
+    await expect(handle.done).rejects.toThrow();
+
+    // 401 is transient (a token refresh may fix it) → retried, then LEFT queued for flushOutbox.
+    const remaining = await pending('room-401');
+    expect(remaining.some((m) => m.msgId === 'k-401')).toBe(true);
+    expect(failed).toHaveLength(1);
+  });
+
+  it('sendOptimistic dequeues a permanent (403 forbidden) entry immediately', async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls++;
+      return new Response('no', { status: 403 });
+    });
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    const handle = c.sendOptimistic('room-403', {
+      senderUid: 'u',
+      sealed: new ArrayBuffer(0),
+      msgId: 'k-403',
+    });
+    await expect(handle.done).rejects.toMatchObject({ code: 'forbidden' });
+
+    expect(calls).toBe(1); // permanent → no retry
+    const remaining = await pending('room-403');
+    expect(remaining.every((m) => m.msgId !== 'k-403')).toBe(true);
+  });
+
+  it('sendTextOptimistic keeps a transient (401) entry queued', async () => {
+    globalThis.fetch = vi.fn(async () => new Response('nope', { status: 401 }));
+    const c = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      _testNoSleep: true,
+      e2ee: { provider: trivialProvider },
+    });
+    const failed: SDKChatError[] = [];
+    const handle = c.sendTextOptimistic('room-t401', { senderUid: 'u', text: 'hi', msgId: 'kt-401' });
+    handle.onFailed((e) => failed.push(e));
+    await expect(handle.done).rejects.toThrow();
+
+    const remaining = await pending('room-t401');
+    expect(remaining.some((m) => m.msgId === 'kt-401')).toBe(true);
+    expect(failed).toHaveLength(1);
   });
 });

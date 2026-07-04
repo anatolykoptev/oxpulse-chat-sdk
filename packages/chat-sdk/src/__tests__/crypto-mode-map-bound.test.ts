@@ -10,8 +10,13 @@
  *
  * Locks:
  *   - the map stays bounded (<= cap) across many list()-only rooms;
- *   - LRU eviction of a MODE entry never un-poisons a room (`#poisonedRooms` is a
- *     SEPARATE authoritative set the bound must not touch).
+ *   - insertion-order (FIFO) eviction of a MODE entry never un-poisons a room
+ *     (`#poisonedRooms` is a SEPARATE authoritative set the bound must not touch).
+ *
+ * Note: eviction is bounded FIFO / insertion-order (evict the oldest non-live entry), NOT
+ * true LRU — #resolveRoomCryptoMode sets unconditionally and Map.set on an existing key does
+ * not reorder, so a re-listed room does not move to the back. For the page-once-per-room
+ * access pattern this is equivalent to LRU and simpler; hot rooms are not specially protected.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
@@ -36,7 +41,7 @@ describe('CR17 Item A — #activeCryptoModeByRoom bound on the list()-only path'
     expect(c._roomCryptoStateSize().modes).toBeLessThanOrEqual(256);
   });
 
-  it('LRU eviction of a mode entry never un-poisons a room', async () => {
+  it('insertion-order (FIFO) eviction of a mode entry never un-poisons a room', async () => {
     const POISON_ROOM = 'room-poisoned';
     let poisonRoomFetches = 0;
     globalThis.fetch = vi.fn(async (input: string | URL) => {
@@ -63,8 +68,8 @@ describe('CR17 Item A — #activeCryptoModeByRoom bound on the list()-only path'
       code: 'crypto_mode_mismatch',
     });
 
-    // Flood the map with list()-only rooms to force LRU eviction of the (oldest) poisoned
-    // room's now-stale mode entry.
+    // Flood the map with list()-only rooms to force insertion-order eviction of the (oldest)
+    // poisoned room's now-stale mode entry.
     for (let i = 0; i < 400; i++) {
       await c.list(`flood-${i}`, {});
     }

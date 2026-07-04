@@ -12,10 +12,14 @@ DurableReplayGuard.
   `#activeCryptoModeByRoom` was populated by `list()`/`#fetchRows` but evicted only by
   `subscribe()`'s teardown (chain refCount 0), so a client paging history across many distinct
   rooms via `list()` with no live subscription accumulated one entry per room forever. The map is
-  now capped (256); on overflow the oldest entry whose room has NO live subscription is evicted.
-  Live rooms and `#poisonedRooms` are never touched — evicting a mode entry can never un-poison a
-  room (`#poisonedRooms` is a separate authoritative set, and a poisoned room can never re-resolve).
-  This resolves the "Known follow-up" noted in the SEC-CR-001 (downgrade-default-on) changeset.
+  now capped (256); on overflow the oldest entry whose room has NO live subscription is evicted
+  (bounded FIFO / insertion-order, NOT LRU — equivalent for the page-once-per-room pattern; hot
+  rooms are not specially protected). Live rooms and `#poisonedRooms` are never touched — evicting
+  a mode entry can never un-poison a room (`#poisonedRooms` is a separate authoritative set, and a
+  poisoned room can never re-resolve). This resolves the "Known follow-up" noted in the SEC-CR-001
+  (downgrade-default-on) changeset. (Follow-up, tracked separately: `#poisonedRooms` itself is not
+  yet bounded — it grows only under an active downgrade attack today, but a server crypto_mode
+  bookkeeping bug touching many rooms would grow it unboundedly.)
 
 - **Item B — gate `getThread` on poison; document the exempt metadata tier (security hygiene).**
   `getThread` reads sealed message-content rows but lacked the poison gate its sibling read
@@ -30,13 +34,17 @@ DurableReplayGuard.
   sibling — another bare-array sealed-content read) is likewise gated when scoped to a `roomId`
   (SEC-CR-17-B-01).
 
-- **Item C — `flushOutbox` dequeues a permanently-failed entry (robustness).** `flushOutbox`'s catch
-  swallowed all errors and left the message queued, so a poisoned-room entry (`send` throws
-  `crypto_mode_poisoned`) was retried forever. It now scrubs ONLY a PERMANENTLY-failed entry
+- **Item C — unify the outbox permanence doctrine across ALL THREE write paths (robustness).**
+  All three outbox writers (`flushOutbox`, `sendOptimistic`, `sendTextOptimistic`) now consult ONE
+  authority — `PERMANENT_OUTBOX_FAILURE_CODES`. They scrub an entry ONLY on a PERMANENTLY-failed code
   (`crypto_mode_*` / `invalid_args` / `unsupported` / `forbidden` / `not_found`); a TRANSIENT failure
-  (`network` / `unauthorized` / `rate_limited` / `server_error`) stays queued for the next flush
-  (SEC-CR-17-C-01 — this is a background durability path with no caller notification, so dropping a
-  retriable ciphertext message would be silent E2EE message loss). The outbox holds ciphertext only.
+  (`network` / `unauthorized` / `rate_limited` / `server_error`) stays queued for a later flush
+  (SEC-CR-17-C-01 — dropping a refreshable-401 / rate-limited / 5xx ciphertext entry would be silent
+  E2EE message loss). `flushOutbox`'s original swallow-all catch retried a poisoned entry forever; the
+  first pass fixed only `flushOutbox` with a blanket `!== 'network'` rule that STILL dropped transient
+  429/5xx on the two foreground paths — this unifies all three on the permanent-code Set. The
+  foreground paths keep their retry loop for transient codes, then leave the entry queued for
+  `flushOutbox` (still notifying the caller via `onFailed`). The outbox holds ciphertext only.
 
 - **Item D — regression test for co-subscriber crypto-mode eviction.** Locks the `=== 0` guard in
   teardown: two subscribers on one room → first teardown must NOT evict (refCount 2→1), second must

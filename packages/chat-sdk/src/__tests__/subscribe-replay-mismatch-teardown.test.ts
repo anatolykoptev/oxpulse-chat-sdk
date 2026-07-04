@@ -9,72 +9,21 @@
  *
  * Observable: with the fix, the reconnect returns before re-attaching (destroyed=true), so
  * NO second EventSource is constructed. Without it, the reconnect proceeds and opens a 2nd
- * stream (instances.length === 2) — enforcement a microtask late.
+ * stream (2 controllers) — enforcement a microtask late.
+ *
+ * Uses the shared EventSource mock + microtask flush from ./helpers.ts (no local re-copy).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
-import type { CryptoProvider, SealContext } from '../types.js';
+import {
+  installMockEventSource,
+  makeSpyCryptoProvider,
+  flush,
+  TEST_BASE_URL,
+  TEST_JWT,
+} from './helpers.js';
 
-const BASE_URL = 'http://x';
-const JWT = 'test-token';
 const ROOM = 'room-replay-mismatch';
-
-async function flushMicrotasks(rounds = 20): Promise<void> {
-  for (let i = 0; i < rounds; i++) await Promise.resolve();
-}
-
-interface FakeES {
-  url: string;
-  onmessage: ((ev: MessageEvent) => void) | null;
-  onerror: (() => void) | null;
-  listeners: Record<string, (ev: MessageEvent) => void>;
-  fireShutdown(): void;
-}
-
-function installMockEventSource(): FakeES[] {
-  const instances: FakeES[] = [];
-  class MockES {
-    url: string;
-    onmessage: ((ev: MessageEvent) => void) | null = null;
-    onerror: (() => void) | null = null;
-    listeners: Record<string, (ev: MessageEvent) => void> = {};
-    constructor(url: string) {
-      this.url = url;
-      const self = this;
-      instances.push({
-        url,
-        get onmessage() {
-          return self.onmessage;
-        },
-        get onerror() {
-          return self.onerror;
-        },
-        get listeners() {
-          return self.listeners;
-        },
-        fireShutdown: () => self.listeners['shutdown']?.(new Event('shutdown') as MessageEvent),
-      } as FakeES);
-    }
-    addEventListener(type: string, cb: (ev: MessageEvent) => void) {
-      this.listeners[type] = cb;
-    }
-    removeEventListener(type: string) {
-      delete this.listeners[type];
-    }
-    close() {}
-  }
-  vi.stubGlobal('EventSource', MockES);
-  return instances;
-}
-
-const passthroughProvider: CryptoProvider = {
-  async seal(p: ArrayBuffer, _c: SealContext) {
-    return p;
-  },
-  async unseal(c: ArrayBuffer, _c2: SealContext) {
-    return c;
-  },
-};
 
 describe('CR17 Item G — crypto_mode_mismatch during reconnect replay tears down immediately', () => {
   beforeEach(() => {
@@ -86,7 +35,7 @@ describe('CR17 Item G — crypto_mode_mismatch during reconnect replay tears dow
   });
 
   it('does not re-attach a second stream when the replay fetch resolves a downgraded crypto_mode', async () => {
-    const instances = installMockEventSource();
+    const es = installMockEventSource();
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: string | URL) => {
@@ -107,27 +56,27 @@ describe('CR17 Item G — crypto_mode_mismatch during reconnect replay tears dow
 
     // e2ee provider → #cryptoMode defaults to 'sframe-static'.
     const client = new SDKChatClient({
-      baseUrl: BASE_URL,
-      jwt: JWT,
-      e2ee: { provider: passthroughProvider },
+      baseUrl: TEST_BASE_URL,
+      jwt: TEST_JWT,
+      e2ee: { provider: makeSpyCryptoProvider() },
     });
     const onError = vi.fn();
     client.subscribe(ROOM, { onMessage: vi.fn(), onError });
 
     // Initial subscribe settles (stream #1 attached).
-    await flushMicrotasks();
+    await flush();
     await vi.advanceTimersByTimeAsync(1);
-    await flushMicrotasks();
-    expect(instances.length).toBe(1);
+    await flush();
+    expect(es.getControllers().length).toBe(1);
 
     // Graceful shutdown → reconnectImmediate → replayMissed → crypto_mode_mismatch thrown.
-    instances[0]!.fireShutdown();
+    es.getControllers()[0]!.emitNamed('shutdown', '');
     await vi.advanceTimersByTimeAsync(1);
-    await flushMicrotasks();
+    await flush();
 
     // Teardown fires inside replayMissed's catch → the reconnect returns before re-attach,
     // so no second EventSource is constructed. The mismatch is surfaced to the caller.
-    expect(instances.length).toBe(1);
+    expect(es.getControllers().length).toBe(1);
     expect(onError).toHaveBeenCalled();
   });
 });

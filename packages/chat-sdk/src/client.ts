@@ -265,6 +265,10 @@ const ACTIVE_CRYPTO_MODE_MAP_CAP = 256;
 const PERMANENT_OUTBOX_FAILURE_CODES: ReadonlySet<SDKChatErrorCode> = new Set<SDKChatErrorCode>([
   'crypto_mode_poisoned',
   'crypto_mode_mismatch',
+  // Inert on the current outbox paths (flushOutbox / sendOptimistic / sendTextOptimistic all
+  // call send() directly, and the only `crypto_mode_undiscovered` throw is in sendText, which
+  // they never call) — listed as shared-Set defense-in-depth so it classifies as PERMANENT if a
+  // future refactor routes an outbox write through a path that can raise it.
   'crypto_mode_undiscovered',
   'invalid_args',
   'unsupported',
@@ -546,6 +550,12 @@ export class SDKChatClient {
    * list()-only path (subscribe()'s teardownSubscriber only evicts LIVE rooms at
    * chain refCount 0). Evicts the OLDEST entries whose room has NO live subscription
    * until the map is within ACTIVE_CRYPTO_MODE_MAP_CAP.
+   *
+   * Eviction is bounded FIFO / insertion-order, NOT LRU: #resolveRoomCryptoMode sets
+   * unconditionally and Map.set on an existing key does not reorder, so a re-listed room does
+   * not move to the back. For the page-once-per-room access pattern this equals LRU and is
+   * simpler; a genuinely hot room is not specially protected (acceptable — it re-resolves on
+   * its next list()).
    *
    * Never evicts:
    *   - the room just resolved (justResolvedRoomId) — it is the freshest read;
@@ -2198,8 +2208,14 @@ export class SDKChatClient {
           return result;
         } catch (e) {
           const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-          // Non-network errors (4xx) fail immediately — no retry.
-          if (err.code !== 'network') {
+          // CR17-C-01: ONE outbox permanence doctrine across all three write paths — the same
+          // PERMANENT_OUTBOX_FAILURE_CODES authority flushOutbox uses. A PERMANENT failure
+          // (4xx / crypto_mode_*) can never succeed → scrub the durable entry, notify, give up.
+          // A TRANSIENT failure (network / 401 / 429 / 5xx) is retriable → keep the ciphertext
+          // queued (do NOT dequeue) and retry with backoff; after MAX_RETRIES it is left queued
+          // for flushOutbox and onFailed fires. Never drop a refreshable-401 / rate-limited /
+          // 5xx entry on the foreground path (the exact codes CR17-C-01 protects).
+          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
             await dequeue(roomId, msgId);
             failCbs.forEach((cb) => cb(err));
             throw err;
@@ -2361,7 +2377,10 @@ export class SDKChatClient {
           return result;
         } catch (e) {
           const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-          if (err.code !== 'network') {
+          // CR17-C-01: same unified outbox permanence doctrine as sendOptimistic — dequeue only
+          // on a PERMANENT code; keep a transient (network / 401 / 429 / 5xx) entry queued for
+          // flushOutbox rather than dropping a retriable ciphertext message.
+          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
             await dequeue(roomId, msgId);
             failCbs.forEach((cb) => cb(err));
             throw err;
@@ -2512,10 +2531,13 @@ export class SDKChatClient {
   ): Promise<MessageRow[]> {
     // SEC-CR-17-B-01: searchByProductRef returns sealed message-content rows (same gate
     // class as getThread / list()). When scoped to a single room, fail CLOSED if that room
-    // was poisoned by a prior crypto_mode_mismatch. The cross-room variant (no roomId) has
-    // no single room to gate — its result may include rows from a poisoned room; callers who
-    // need per-room fail-closed must pass roomId. (Documented residual, not a leak: rows come
-    // back sealed and a tampered row fails AEAD on unseal.)
+    // was poisoned by a prior crypto_mode_mismatch. The cross-room variant (no roomId) is
+    // rejected by the SERVER today (GET /api/sdk/messages?product_ref requires room_id and
+    // returns 400 — cross-room search is deferred until a `platform:search:*` scope ships,
+    // see the server's handle_product_search), so no rows are returned and there is nothing
+    // to gate. IF cross-room search later ships, revisit this: results could span a poisoned
+    // room, needing a per-row #poisonedRooms filter here (rows come back sealed, so a tampered
+    // row still fails AEAD on unseal — a completeness gap, not a plaintext leak).
     if (opts?.roomId) {
       this.#assertRoomNotPoisoned(opts.roomId);
     }
