@@ -279,9 +279,11 @@ describe('subscribe() unseal deadline — abort + chain-advance gating (>5s resi
     // the old Promise.race — it happens ONLY after deadline+grace, and the orphan is PARKED
     // (not progressing / not racing the ratchet), its late result dropped (asserted next).
     expect(provider.maxInFlight).toBe(2);
-    // Observable: the force-drain is not silent.
+    // Observable: the force-drain is not silent. Match the force-drain-specific token
+    // ('force-draining'), not 'force-drain', so the deadline warn (which mentions the
+    // 'force-drain grace') cannot satisfy this assertion.
     expect(
-      warnSpy.mock.calls.some((c) => String(c[0]).toLowerCase().includes('force-drain')),
+      warnSpy.mock.calls.some((c) => String(c[0]).toLowerCase().includes('force-draining')),
     ).toBe(true);
 
     // SAFETY: if the orphaned stuck unseal(1) settles LATE, its result MUST be dropped —

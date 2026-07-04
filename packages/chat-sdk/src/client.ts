@@ -982,7 +982,7 @@ export class SDKChatClient {
       const deadlineTimer = setTimeout(() => {
         controller.abort(new DOMException(`unseal deadline exceeded (${deadlineMs}ms)`, 'TimeoutError'));
         console.warn(
-          `[chat-sdk] ${source}: unseal exceeded ${deadlineMs}ms deadline; aborting for seq`,
+          `[chat-sdk] ${source}: unseal exceeded ${deadlineMs}ms deadline; signalling abort (delivers normally if it still settles within the force-drain grace) for seq`,
           mappedRow.seq,
         );
       }, deadlineMs);

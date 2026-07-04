@@ -169,8 +169,12 @@ callback) lives until the provider's own operation eventually settles — inhere
 since only the provider honoring the signal can release it. Both are contained
 per-room (rooms are independent) and **observable**: `#appendDecryptTask` emits a
 distinct `deadline` warn at the abort bound and a distinct `force-drain` warn at
-the hard bound. The built-in providers never trigger any of this (sub-ms decrypt,
-fast durable steps). A **late-but-successful** unseal (a non-cancelling provider
+the hard bound. The built-in providers effectively never trigger this (sub-ms
+decrypt, fast durable steps); the one theoretical exception is a durable-replay
+IndexedDB write hanging past the grace, which would force-drain an
+*already-decrypted* row as `unsealError` — a data-loss/UX edge only, not a replay
+or confidentiality break (the CTR the durable window already recorded is never
+re-accepted, and per-message keys mean no ratchet desync). A **late-but-successful** unseal (a non-cancelling provider
 that finishes *within* the grace) delivers its **real plaintext in order** — never
 re-delivered, never discarded. The **off-chain** `list()` path (a room with no live
 subscription) is unchanged: it has no chain to violate and, by design, no deadline
