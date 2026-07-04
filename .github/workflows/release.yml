@@ -172,11 +172,29 @@ jobs:
           TRUSTED_PUBLISH: '1'
 
       # ── CDN publish (Phase 3) ────────────────────────────────────────────────
-      # Runs ONLY on the publish phase (no pending changesets → packages were
-      # just bumped and npm-published). Gated on steps.changesets.outputs.published
-      # == 'true', which is set by changesets/action when the publish script emits
-      # "New tag: <pkg>@<version>" lines (release-npm-packages.mjs now emits these
-      # on every successful OIDC publish).
+      # Deliberately UNGATED on steps.changesets.outputs.published. That output
+      # reflects whether release-npm-packages.mjs emitted a "New tag:" line for
+      # wire-codec/chat-sdk — it says nothing about chat-widget specifically:
+      #   - chat-widget is in SOFT_PACKAGES_OIDC (not yet bootstrapped on npm),
+      #     so it NEVER emits "New tag:" — it structurally cannot make
+      #     `published` true on its own.
+      #   - wire-codec/chat-sdk report published=true only when THEIR version
+      #     changed. A release that bumps ONLY chat-widget (no sdk/codec churn)
+      #     would leave published=false, permanently skipping the CDN deploy for
+      #     the one package that actually needs it.
+      # (This was found the hard way: the first real CDN deploy attempt gated
+      # on this signal and silently skipped, because at that moment sdk/codec
+      # were already at registry-parity and widget was still un-bootstrapped —
+      # published=false for reasons unrelated to whether the widget needed
+      # deploying.)
+      #
+      # Fix: run these steps on every push to main / workflow_dispatch, and rely
+      # on the script's own idempotency instead of a gate. `pnpm build:cdn` is a
+      # deterministic build; publish-widget-cdn.mjs's rsync --ignore-existing
+      # makes a re-deploy of an already-published version a byte-level no-op.
+      # The small always-on CI cost (a rebuild + a no-op rsync round-trip on
+      # non-widget releases) buys correctness for the case that matters: a
+      # widget-only version bump reliably reaches the CDN.
       #
       # Soft-skip: if CDN_DEPLOY_KEY secret is absent the publisher logs a
       # clear message and exits 0 — the release is not failed.  This lets the
@@ -217,11 +235,9 @@ jobs:
       #                           NOT a bare ssh-keyscan (TOFU) call.
 
       - name: Build CDN bundle
-        if: steps.changesets.outputs.published == 'true'
         run: pnpm --filter @oxpulse/chat-widget build:cdn
 
       - name: Publish widget bundle to cdn.oxpulse.chat
-        if: steps.changesets.outputs.published == 'true'
         env:
           CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
           CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
