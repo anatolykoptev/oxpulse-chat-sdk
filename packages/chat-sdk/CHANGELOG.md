@@ -1,5 +1,328 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 2.0.0
+
+### Major Changes
+
+- ce7863f: fix(chat-sdk): SEC-CR-001 — default-on E2EE downgrade defense, scoped per-room
+
+  Closes a HIGH confidentiality vulnerability (CWE-757 protocol downgrade). An E2EE-configured
+  channel could silently fall back to PLAINTEXT on a server-controlled `crypto_mode: 'plaintext'`
+  signal, because downgrade defense was opt-in. A malicious or compromised app-server could make any
+  consumer that enabled `e2ee` (without also setting `cryptoMode: 'sframe-static'`) transmit cleartext
+  the server reads — TLS does not help, the server is the endpoint.
+
+  Behavior changes (why this is a major bump):
+
+  - With an `e2ee` provider configured, `cryptoMode` now DEFAULTS to `'sframe-static'` (previously
+    effectively null/auto-detect). A server-emitted `crypto_mode: 'plaintext'` for an e2ee client is now
+    a poison-mismatch (throws `crypto_mode_mismatch`, and that room then fails closed) instead of an
+    accepted downgrade. Callers who legitimately ran an e2ee client against plaintext rooms must
+    reconsider that configuration.
+  - Constructing with an `e2ee` provider AND `cryptoMode: 'plaintext'` now THROWS `invalid_args` at
+    construct (contradictory config: an encryption provider plus an explicit opt-out of encryption).
+    Previously it succeeded and sent plaintext. Migration: pass only one of the two.
+  - An e2ee client with no explicit `cryptoMode` now seals and sends immediately by default. Previously a
+    send before the first `list()`/`subscribe()` threw `crypto_mode_undiscovered`; that path is now
+    safe-by-default and the error no longer fires for e2ee clients.
+
+  Availability: the discovered crypto_mode and the poison flag are scoped PER ROOM, so one room's
+  mismatch/downgrade poisons only that room — sibling rooms on the same `SDKChatClient` keep working
+  (no client-wide brick / DoS amplification via a single malicious `crypto_mode` for one room).
+
+  No change for clients WITHOUT an `e2ee` provider: plaintext remains a valid auto-detected mode.
+
+  Known follow-up (non-security): the per-room `crypto_mode` cache is evicted at subscription teardown,
+  but rooms touched only via `list()` without a live subscription are not yet evicted — a client paging
+  many distinct rooms accumulates a small (~100 B) per-room entry until it is recreated. RESOLVED by
+  CR17-01 (Item A of the CR17 hardening batch): the map is now capped and the oldest no-live-subscription
+  entry is evicted on overflow.
+
+### Minor Changes
+
+- 78d7327: fix(chat-sdk): SEC-CR-003 — durable cross-reload anti-replay for the sframe provider
+
+  Closes a MEDIUM replay vulnerability (CWE-294). sframe-ratchet's receiver-side replay window is
+  an in-memory bounded set that is WIPED on page reload, and `ctrStrategy: 'monotonic-idb'` only
+  persists the SENDER's counter — NOT the receiver's replay defense. So after a reload a malicious or
+  compromised app-server (the adversary in the E2EE threat model — it cannot forge, but it CAN replay
+  authentic old ciphertext) could re-serve an OLD sealed frame under a fresh `msg_id`: the AEAD
+  verifies (the ciphertext is genuinely authentic, just old), the widget's `msg_id` dedup does not
+  catch it (fresh id), and the stale message renders as new (e.g. replaying an old "approved" / "paid"
+  chat instruction).
+
+  `createSFrameProvider` now persists the set of already-accepted per-(room, sender) CTRs to
+  IndexedDB (via `idb-keyval`, the same store the outbox uses) so the replay defense survives a
+  reload. The CTR is read from the RFC 9605 header — which is the AEAD AAD, hence authenticated — via
+  the library's own `parseHeader`; a replayed CTR is rejected with the library's `ReplayError` (so
+  `list()` / `subscribe()` already classify it as `unsealError: 'replay'`, no consumer change needed).
+
+  Behavior change (why this is a minor, not a patch):
+
+  - Durable replay protection is DEFAULT-ON whenever IndexedDB is feature-detected available. A frame
+    whose CTR was already accepted in a prior session is now REJECTED instead of accepted. Only
+    replays are newly rejected — genuinely-new frames (new CTR) are unaffected — so no legitimate
+    send/receive path breaks. The provider now writes a small per-(room, sender) entry to IndexedDB.
+  - Where IndexedDB is unavailable (SSR, Node without a polyfill, private-mode quirks) the provider
+    degrades gracefully to the library's in-memory window (session-scoped only) and emits a one-time
+    `console.warn`. It never throws at construct and never breaks a no-IDB runtime.
+
+  New options, surfaced both on `SFrameProviderOptions` AND on the public client config
+  (`E2EEOptions` `'sframe'` variant) so they are reachable without the custom-provider escape hatch:
+
+  - `durableReplay?: boolean` (default `true`) — opt out to revert to the in-memory-only window.
+  - `durableReplayNamespace?: string` — namespaces the durable store. Through the client it DEFAULTS
+    to the client's `appId`, so distinct tenants on one origin do not share a replay window.
+  - `durableReplayWindow?: number` — size of the durable window. `0` DISABLES it (mirrors
+    `replayWindow: 0`); a negative value is invalid and falls back to the default (does not disable).
+  - `ctrStrategy` / `ctrKeyspace` / `replayWindow` are surfaced as explicit passthroughs to
+    sframe-ratchet (`ctrStrategy: 'monotonic-idb'` additionally persists the sender's counter and
+    avoids the random-64 birthday bound; note it does NOT by itself protect the receiver — that is
+    what `durableReplay` does).
+
+  Residuals (documented, accepted):
+
+  - Bounded-window eviction: the durable window tracks the 1024 most-recent CTRs per (room, sender),
+    so a replay of a frame whose CTR has since been evicted by ≥1024 later accepts can still pass —
+    the same bound the library's in-memory window has within a session, now extended across reloads.
+    A high-watermark would close this for a monotonic sender, but is intentionally NOT applied: the
+    receiver cannot know a REMOTE sender's CTR strategy from the frame, so assuming monotonicity would
+    false-reject every legitimate message from a `random-64` peer in a mixed-strategy room. The
+    strategy-agnostic bounded set is safe for mixed rooms; a homogeneous `monotonic-idb` deployment
+    that wants unbounded protection is a possible future opt-in.
+  - Storage growth: one small IDB entry per (room, sender), not garbage-collected (mirrors the
+    outbox's per-room key). Bounded per entry (≤1024 CTRs); the entry count grows with distinct
+    (room, sender) over the client lifetime.
+  - Concurrency: cross-tab persist writes are serialized by the Web Locks API and each write is a
+    read-merge-write, so a second tab's accepted CTRs are merged rather than clobbered (the earlier
+    "last tab wins" caveat no longer applies UNDER CAPACITY). Each tab still keeps its own in-memory
+    mirror; a CTR another tab accepted is reflected into this tab on its next persist / on reload.
+    Residual: the merge is bounded to `window` and eviction is position-based (the writing tab's
+    entries sit last), so when two divergent live tabs together exceed `window` distinct CTRs a peer
+    tab's older recent CTRs can still be evicted — no worse than the bounded window's inherent horizon.
+    (SUPERSEDED by CR17-02 / Item E of the CR17 hardening batch: where `navigator.locks` is absent the
+    RMW no longer runs unlocked — durable persistence is gated OFF entirely, so there is no
+    last-writer-wins drop.) A strict-recency cross-tab merge would need per-CTR acceptance ordinals (a
+    `v:1`→`v:2` store migration) — tracked as a follow-up, not in this PR.
+  - Same-session ordering: `check()` and `accept()` straddle the `await inner.unseal`. This does NOT
+    weaken cross-reload protection (hydrate loads persisted CTRs before any `check()` resolves). The
+    only residual is a within-session double-DELIVERY of one genuinely-new CTR when two `unseal()`
+    calls for the same frame overlap: `subscribe()` / reconnect serialize every unseal through the
+    per-room decrypt chain (SEC-CR-14-01) and are safe; `list()` calls `unseal()` directly and is NOT
+    serialized, so two concurrent `list()` calls could double-deliver. Pre-existing, idempotent,
+    tracked as tasks #44 / #42 — not a replay bypass introduced here.
+  - Same-origin multi-deployment: two independent deployments sharing an origin AND a namespace (e.g.
+    both omitting `appId` → `'default'`) with a colliding (roomId, senderUid) would share a window;
+    give each deployment a distinct `appId` / `durableReplayNamespace`.
+  - If IndexedDB is present but its read/write throws (private-mode / partitioned storage), the
+    session starts with an empty window and a one-time warning is emitted — cross-reload protection
+    is unavailable that session (the in-memory window still defends within the session).
+
+- e3a31ed: fix(chat-sdk): bound the stalled decrypt chain + honest semantics + reuse AbortSignal stdlib
+
+  Closes the LAST residual of the concurrent-unseal class (see `docs/architecture/e2ee-model.md`
+  §3): the 5s per-row unseal deadline was a `Promise.race` that **abandoned** — not cancelled — a
+  slow unseal. On a >5s row the abandoned `provider.unseal` kept running detached while the chain
+  task settled as `unsealError` and the chain started the NEXT unseal → **two unseals in flight**
+  against a ratcheting AEAD, for EVERY >5s row.
+
+  **Discovery.** The built-in provider's unseal bottoms out at `crypto.subtle.decrypt({name:'AES-GCM'})`
+  (sframe-ratchet v0.5). WebCrypto's decrypt takes only `(algorithm, key, data)` — **no AbortSignal,
+  atomic, non-cancellable**. So "cancel the in-flight decrypt" is impossible for the built-in provider;
+  the honest fix is chain-advance gating, not decrypt cancellation.
+
+  **The fix — TWO bounds (reconciles one-in-flight with bounded-settle):**
+
+  - `CryptoProvider.unseal(sealed, ctx, signal?)` gains an **OPTIONAL, backward-compatible**
+    `AbortSignal`. A provider that ignores it (or a pre-existing 2-arg `unseal`) still works.
+  - `#appendDecryptTask` bounds each unseal twice:
+    1. **Abort deadline** — an `AbortController` fires at the deadline (passed to `provider.unseal`).
+       A signal-honoring provider rejects promptly so the chain advances; the task AWAITS the real
+       settle (no Promise.race abandonment) → a **healthy provider gives strictly at most one unseal
+       in flight per room** (the built-in decrypt is sub-ms and never even reaches the deadline).
+    2. **Force-drain** at `deadline + grace` — if the unseal has STILL not settled (a provider that
+       ignores the signal AND hangs), that one row is bailed as `unsealError` so the chain **drains**:
+       the next unseal runs, `list()`/`Promise.all` resolves, and the `RoomDecryptChain` entry is
+       cleaned up. **No room-wide black-hole, no Map leak.**
+  - The built-in sframe provider reuses the stdlib `signal.throwIfAborted()` at its await boundaries
+    (before the atomic decrypt); a successfully-decrypted frame is always recorded + returned.
+
+  **Why this replaced an earlier (wrong) "await the real settle, accept a stalled room" attempt.**
+  The pr-review-council caught that awaiting the real settle _without_ a hard bound turned a hung
+  non-honoring provider into a **permanent** black-hole (list() never resolves, every future room
+  row queued behind an eternal tail) + a `RoomDecryptChain` leak — strictly WORSE than the bounded
+  `Promise.race` it replaced. The force-drain restores the bounded-settle guarantee.
+
+  **Honest claim scope + the two bounded residuals.**
+
+  - Healthy provider (incl. built-in): strict one-in-flight, real plaintext in order.
+  - Genuinely-stuck non-honoring provider (crossed `deadline + grace`): (a) its orphaned unseal stays
+    _pending_ while the chain advances, so `maxInFlight` can transiently reach 2 — but ONLY for a row
+    past the hard bound, and the orphan is _parked_ (not progressing / not racing the ratchet); its
+    late result is dropped by a `settled` guard (never re-delivers, never advances the chain).
+    (b) that orphaned continuation lives until the provider's own operation settles — inherent, since
+    JS cannot cancel a live promise; only the provider honoring the signal releases it.
+    Both are contained per-room, and observable via distinct `deadline` + `force-drain` warns.
+
+  **Compatibility.** `minor` (additive optional param). The off-chain `list()` path (a room with no
+  live subscription) is unchanged — no chain to violate, no deadline, by design.
+
+  **Deviation note.** The client-side deadline uses a manual `AbortController` + `setTimeout` (not
+  `AbortSignal.timeout()`) because the latter is not controllable by the test harness's fake timers
+  (empirically verified), and a manual force-drain `setTimeout` is required regardless. The stdlib
+  `signal.throwIfAborted()` IS reused inside the built-in provider (timer-independent).
+
+  Tests: `src/__tests__/subscribe-unseal-abort.test.ts` (one-in-flight for a honoring provider across
+  the deadline; late-success delivered once in order; **bounded-drain** for a never-settling provider —
+  row bailed as unsealError, chain advances, orphan's late settle dropped, no chain-entry leak;
+  normal <5s unaffected; 2-arg provider works). `src/__tests__/subscribe-scrollback-decrypt-chain.test.ts`
+  adds a **list() RESOLVES via force-drain** case for a non-honoring stuck provider. `sframe-unseal-abort.test.ts`
+  guards the SEC-CR-003 durable-replay integrity across the abort boundary.
+
+- def28fc: feat(T18): widget roster consumption — display names for other writers
+
+  - SDK: new `fetchRoster()` helper fetches `GET /api/sdk/roster` with SDK JWT
+  - SDK: new `rosterDisplayName(roster, epid)` with 8-char short-form fallback
+  - SDK: `SubscribeArgs.onRosterSignal` callback — fires on `type:"roster"` SSE signal
+  - SDK: `mintNamedWriteToken` alg-pin guard — rejects tokens with alg≠EdDSA returned by the mint endpoint (defense-in-depth; server enforces EdDSA at exchange, client now enforces at receipt)
+  - Widget: MessageList fetches roster on mount and re-fetches on `type:"roster"` SSE invalidation signals (100ms debounce)
+  - Widget: element adapter now forwards `onRosterSignal` to `sdkClient.subscribe` (was silently dropped — the re-fetch end-to-end path was broken)
+  - Widget: bubbles show roster display names for other writers; own messages show "You"
+  - Widget: XSS-safe — roster names use textContent only, never innerHTML (SEC-CR-003 / FF3)
+  - CI: FF6 alg-pin — `mintNamedWriteToken` rejects alg:none and alg:HS256 tokens (real production guard, red-on-revert)
+  - CI: issuer-disjointness (FF5) — server-enforced invariant; client-side tautology removed; server tests own it
+
+### Patch Changes
+
+- 917c97a: fix(chat-sdk): CR17 LOW security-hardening + robustness batch (deferred from #16/#17/SEC-CR-14-02)
+
+  Closes a batch of LOW-severity residuals the B2/B3/SEC-CR-14-02 review councils deferred. No new
+  primitives; each item reuses the existing per-room poison gate, decrypt-chain refcount, and
+  DurableReplayGuard.
+
+  - **Item A — bound the per-room crypto-mode map on the list()-only path (availability).**
+    `#activeCryptoModeByRoom` was populated by `list()`/`#fetchRows` but evicted only by
+    `subscribe()`'s teardown (chain refCount 0), so a client paging history across many distinct
+    rooms via `list()` with no live subscription accumulated one entry per room forever. The map is
+    now capped (256); on overflow the oldest entry whose room has NO live subscription is evicted
+    (bounded FIFO / insertion-order, NOT LRU — equivalent for the page-once-per-room pattern; hot
+    rooms are not specially protected). Live rooms and `#poisonedRooms` are never touched — evicting
+    a mode entry can never un-poison a room (`#poisonedRooms` is a separate authoritative set, and a
+    poisoned room can never re-resolve). This resolves the "Known follow-up" noted in the SEC-CR-001
+    (downgrade-default-on) changeset. (Follow-up, tracked separately: `#poisonedRooms` itself is not
+    yet bounded — it grows only under an active downgrade attack today, but a server crypto_mode
+    bookkeeping bug touching many rooms would grow it unboundedly.)
+
+  - **Item B — gate `getThread` on poison; document the exempt metadata tier (security hygiene).**
+    `getThread` reads sealed message-content rows but lacked the poison gate its sibling read
+    `list()`/`#fetchRows` has — a room proven to have a downgraded/tampered `crypto_mode` still served
+    its thread. `getThread` now calls `#assertRoomNotPoisoned` and fails closed. It does NOT resolve
+    `crypto_mode`: the threads endpoint returns a BARE JSON array with no per-response `crypto_mode`
+    field (only `list()`'s page wrapper carries it) and returns raw sealed rows (caller unseals), so
+    there is no mode-dependent dispatch — the poison gate is the relevant boundary. The gate class is
+    now documented at `#assertRoomNotPoisoned`: message-content reads/writes are gated;
+    interaction-metadata (reactions / typing / presence / markRead / pins) is cleartext by wire
+    contract and stays EXEMPT (not governed by `crypto_mode`). `searchByProductRef` (the direct
+    sibling — another bare-array sealed-content read) is likewise gated when scoped to a `roomId`
+    (SEC-CR-17-B-01).
+
+  - **Item C — unify the outbox permanence doctrine across ALL THREE write paths (robustness).**
+    All three outbox writers (`flushOutbox`, `sendOptimistic`, `sendTextOptimistic`) now consult ONE
+    authority — `PERMANENT_OUTBOX_FAILURE_CODES`. They scrub an entry ONLY on a PERMANENTLY-failed code
+    (`crypto_mode_*` / `invalid_args` / `unsupported` / `forbidden` / `not_found`); a TRANSIENT failure
+    (`network` / `unauthorized` / `rate_limited` / `server_error`) stays queued for a later flush
+    (SEC-CR-17-C-01 — dropping a refreshable-401 / rate-limited / 5xx ciphertext entry would be silent
+    E2EE message loss). `flushOutbox`'s original swallow-all catch retried a poisoned entry forever; the
+    first pass fixed only `flushOutbox` with a blanket `!== 'network'` rule that STILL dropped transient
+    429/5xx on the two foreground paths — this unifies all three on the permanent-code Set. The
+    foreground paths keep their retry loop for transient codes, then leave the entry queued for
+    `flushOutbox` (still notifying the caller via `onFailed`). The outbox holds ciphertext only.
+
+  - **Item D — regression test for co-subscriber crypto-mode eviction.** Locks the `=== 0` guard in
+    teardown: two subscribers on one room → first teardown must NOT evict (refCount 2→1), second must
+    (→0). Guards against a future refactor that drops the guard and re-introduces the co-subscriber
+    sibling-brick class #16 closed. (Test only.)
+
+  - **Item E — gate the durable replay window on the Web Locks API (CR17-02).** `DurableReplayGuard`'s
+    persist read-merge-write ran UNLOCKED where `navigator.locks` was absent (legacy Safari <15.4), so
+    two tabs concurrently accepting distinct frames could interleave and silently drop a CTR (later
+    replayable after reload). `available` now requires BOTH IndexedDB AND Web Locks; without Web Locks
+    the guard degrades to a no-op with a one-time CR17-02 `console.warn` (mirroring the no-IDB path) and
+    the library's in-memory window still defends within a session. The reachable persist path now always
+    holds the lock, so the unlocked-RMW branch is removed. This supersedes the "unlocked RMW
+    (last-writer-wins)" residual noted in the SEC-CR-003 (durable-antireplay) changeset. Tradeoff:
+    single-tab durable protection on lockless engines is forgone in exchange for an honest, uniform "no
+    durable claim without Web Locks" posture (a silently-droppable window is a worse footgun than a
+    clearly-absent one).
+
+  - **Item F — aged-evicted-CTR replay residual: no change.** Confirmed the SEC-CR-003
+    (durable-antireplay) changeset's "Bounded-window eviction" residual note and the
+    `SEC-CR-003-01` test accurately document the inherent aged-evicted-CTR replay; the real fix
+    (monotonic-idb + persisted high-watermark) stays out of scope.
+
+  - **Item G — reconnect-replay: immediate teardown on downgrade + one-page-cap flag (robustness).**
+    `replayMissed`'s catch called only `reportError` on a thrown `crypto_mode_mismatch`, so enforcement
+    landed a microtask late via the next attach's connected handler. It now tears the subscription down
+    immediately (mirrors the connected handler's contract) on `crypto_mode_mismatch` OR
+    `crypto_mode_poisoned` (an already-poisoned room hit during replay — SEC-CR-17-G-02, avoids an
+    endless reconnect loop against a bricked room), so no second stream re-attaches. Also flags
+    (`TODO(#43)`, no behavior change) the one-page replay cap: `replayMissed` replays only the first
+    page (limit 50); whether >50 missed messages are recovered depends on the oxpulse-chat server
+    backfilling the full gap past the re-attach `after_seq` cursor — needs server-team confirmation.
+
+- f3e9c7f: fix(chat-sdk): SEC-CR-14-02 — route scrollback unseal through the per-room decrypt chain when a subscription exists
+
+  Closes the last OFF-CHAIN unseal path of the concurrent-unseal class (same class as
+  #14, which serialized the streamed unseal, and #15/SEC-CR-14-01, which serialized the
+  reconnect/replay unseal).
+
+  The public `list()` pagination / scrollback path (backward paging via `beforeSeq`, and
+  any `list()` of a room that also has a live subscription) unsealed rows directly via
+  `provider.unseal()` — OFF the per-room serial `#decryptChain`. A direct-SDK consumer
+  that `subscribe()`d a room AND `list()`d that same e2ee room's scrollback concurrently
+  ran two unseals at once on the room's SFrame ratchet → ratchet / replay-window desync,
+  the exact failure the chain exists to prevent.
+
+  Scope of the guarantee (precise, NOT categorical): with this fix, the
+  "at most one unseal in flight per room" invariant holds for unseal calls that SETTLE
+  within the chain's 5s per-row timeout, across all three call sites (streamed, reconnect,
+  scrollback). It does NOT hold for a >5s unseal: the timeout is a `Promise.race`, which
+  ABANDONS (does not cancel) a slow unseal — the abandoned call keeps running detached
+  while the task settles as an `unsealError` and the chain starts the next unseal, so two
+  can be in flight. That residual is pre-existing across all three call sites and is
+  bounded to idempotent double-DELIVERY by sframe-ratchet's static per-(room,sender) key
+  (NOT a replay or confidentiality break). A genuine `AbortSignal` cancel — the real
+  categorical fix — is a `CryptoProvider.unseal` interface change tracked separately. A
+  real >5s timeout now emits a distinct `console.warn` so the abandonment is observable in
+  prod instead of silently folded into an unsealError.
+
+  Behavior change (why a bump): when a room has a live subscription (`#decryptChain`
+  refCount > 0), `list()`'s unseal for that fetch now serializes onto the room's decrypt
+  chain instead of running concurrently. Same items are returned, in the same server
+  order; the fetch may resolve slightly later because its unseal queues behind any
+  in-flight streamed / replay unseal. A `list()` for a room with NO live subscription is
+  unchanged — it still unseals directly off-chain (there is no chain entry to append to,
+  and no streamed unseal can race), so one-shot fetches still deliver every row.
+
+  Timeout asymmetry (same `list()` call, different failure semantics by subscription
+  state): the on-chain path (refCount > 0) inherits the 5s per-row timeout — a stuck row
+  bails with an `unsealError` and the fetch resolves — whereas the off-chain path
+  (refCount 0) awaits `provider.unseal` with NO timeout and hangs the fetch indefinitely
+  on a stuck row (unchanged from before this fix).
+
+  Chain-latency coupling: because scrollback now shares the room's serial chain, a page
+  whose rows each hit the 5s timeout occupies the chain up to page_size × 5s, queuing
+  live-stream messages behind it. In practice page size is server-clamped, but a consumer
+  paging with a slow/stuck provider will see live delivery for that room stall until the
+  page drains.
+
+  No API, signature, or configuration change. Not widget-triggered (the widget never
+  paginates with `beforeSeq`); reachable on the SDK's public API surface by a direct-SDK
+  consumer or a sibling app's own api layer.
+
+- Updated dependencies [29b5d83]
+  - @oxpulse/wire-codec@0.4.0
+
 ## 1.6.0
 
 ### Minor Changes
