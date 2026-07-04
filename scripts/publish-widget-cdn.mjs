@@ -33,11 +33,25 @@
 // complexity.  Not implemented; documented here for future reference.
 //
 // Required env:
-//   CDN_SSH_HOST    box hostname or IP (e.g. "192.9.243.148")
-//   CDN_SSH_USER    ssh user (e.g. "krolik")
-//   CDN_DEPLOY_KEY  private ed25519 key content (PEM); written to a tmp file
+//   CDN_SSH_HOST     box hostname or IP (e.g. "192.9.243.148")
+//   CDN_SSH_USER     ssh user (e.g. "krolik")
+//   CDN_DEPLOY_KEY   private ed25519 key content (PEM); written to a tmp file
+//   CDN_SSH_HOST_KEY box's SSH host public key line, WITHOUT the hostname
+//                    prefix (just "ssh-ed25519 AAAA...") — pinned into a
+//                    throwaway known_hosts so StrictHostKeyChecking=yes
+//                    succeeds on a fresh CI runner with no prior known_hosts.
+//                    Get it via: cat /etc/ssh/ssh_host_ed25519_key.pub (on
+//                    the box) or `ssh-keyscan -p <port> <host>` (strip the
+//                    leading "host:port " token from keyscan's output).
+//                    TOFU (bare ssh-keyscan with no pinning) is deliberately
+//                    NOT used here — an unpinned first connection from an
+//                    ephemeral CI runner is a MITM window on the deploy key's
+//                    target.
 //
 // Optional env:
+//   CDN_SSH_PORT    ssh port (default "22"; this box uses a non-default port
+//                   — see the box's sshd_config, not hardcoded here since a
+//                   future CDN host may differ)
 //   DRY_RUN=1       skip actual remote writes; print plan; exit 0
 //
 // SSH authorised_keys line the operator must install on the box:
@@ -61,6 +75,8 @@ const REPO_ROOT = join(__dirname, '..');
 const DRY_RUN = process.env.DRY_RUN === '1';
 const CDN_SSH_HOST = process.env.CDN_SSH_HOST || '';
 const CDN_SSH_USER = process.env.CDN_SSH_USER || '';
+const CDN_SSH_PORT = process.env.CDN_SSH_PORT || '22';
+const CDN_SSH_HOST_KEY = process.env.CDN_SSH_HOST_KEY || '';
 const CDN_DEPLOY_KEY = process.env.CDN_DEPLOY_KEY || '';
 
 // ── Logging ───────────────────────────────────────────────────────────────────
@@ -132,9 +148,17 @@ log(`SRI: ${sriAttr}`);
 
 // ── Validate required env (unless dry-run) ────────────────────────────────────
 
+const SSH_KEY_TYPE_RE = /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-\S+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-\S+)\s/;
+
 if (!DRY_RUN) {
 	if (!CDN_SSH_HOST) fail('CDN_SSH_HOST env is not set');
 	if (!CDN_SSH_USER) fail('CDN_SSH_USER env is not set');
+	if (!CDN_SSH_HOST_KEY) fail('CDN_SSH_HOST_KEY env is not set (see script header for how to obtain it)');
+	if (CDN_SSH_HOST_KEY.includes('\n')) fail('CDN_SSH_HOST_KEY must be a single line (no embedded newline)');
+	if (!SSH_KEY_TYPE_RE.test(CDN_SSH_HOST_KEY)) {
+		fail(`CDN_SSH_HOST_KEY must start with a key type (ssh-ed25519, ssh-rsa, ...) — got: "${CDN_SSH_HOST_KEY.slice(0, 30)}...". Did you leave the hostname prefix in? Strip the leading "host:port " token.`);
+	}
+	if (!/^\d+$/.test(CDN_SSH_PORT)) fail(`CDN_SSH_PORT must be numeric — got: "${CDN_SSH_PORT}"`);
 }
 
 const SSH_TARGET = `${CDN_SSH_USER}@${CDN_SSH_HOST}`;
@@ -150,16 +174,20 @@ const REMOTE_LATEST_DIR = `${REMOTE_WIDGET_BASE}/latest`;
 const keyDir = join(tmpdir(), `cdn-deploy-key-${Date.now()}`);
 mkdirSync(keyDir, { mode: 0o700, recursive: true });
 const keyFile = join(keyDir, 'id_ed25519');
+const knownHostsFile = join(keyDir, 'known_hosts');
 
 function cleanupKey() {
 	try { rmSync(keyDir, { recursive: true, force: true }); } catch {}
 }
 
 // ── SSH / rsync helpers ───────────────────────────────────────────────────────
+// known_hosts is pinned (not TOFU) from CDN_SSH_HOST_KEY — see header comment.
 
 const SSH_OPTS = [
 	'-i', keyFile,
+	'-p', CDN_SSH_PORT,
 	'-o', 'StrictHostKeyChecking=yes',
+	'-o', `UserKnownHostsFile=${knownHostsFile}`,
 	'-o', 'BatchMode=yes',
 	'-o', 'ConnectTimeout=30',
 ];
@@ -211,9 +239,11 @@ async function main() {
 	log(`Starting CDN publish — version=${VERSION} dry_run=${DRY_RUN}`);
 	log(`Target: ${SSH_TARGET}:${REMOTE_VERSION_DIR}/`);
 
-	// Write key file (skipped in dry-run)
+	// Write key file + pinned known_hosts (skipped in dry-run)
 	if (!DRY_RUN) {
 		writeFileSync(keyFile, CDN_DEPLOY_KEY + (CDN_DEPLOY_KEY.endsWith('\n') ? '' : '\n'), { mode: 0o600 });
+		const hostPort = CDN_SSH_PORT === '22' ? CDN_SSH_HOST : `[${CDN_SSH_HOST}]:${CDN_SSH_PORT}`;
+		writeFileSync(knownHostsFile, `${hostPort} ${CDN_SSH_HOST_KEY}\n`, { mode: 0o600 });
 	}
 
 	try {

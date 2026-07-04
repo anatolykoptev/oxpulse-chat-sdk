@@ -204,6 +204,17 @@ jobs:
       #        CDN_DEPLOY_KEY   — content of cdn_deploy_key (private key, PEM)
       #        CDN_SSH_HOST     — 192.9.243.148
       #        CDN_SSH_USER     — krolik
+      #        CDN_SSH_PORT     — box's sshd port (optional — publish-widget-cdn.mjs
+      #                           defaults to "22" if unset; this box uses a
+      #                           non-default port, check sshd_config)
+      #        CDN_SSH_HOST_KEY — box's host public key, WITHOUT the hostname
+      #                           prefix (cat /etc/ssh/ssh_host_ed25519_key.pub
+      #                           on the box, or ssh-keyscan and strip the
+      #                           leading "host:port " token). Pinned into a
+      #                           throwaway known_hosts so StrictHostKeyChecking=yes
+      #                           succeeds on a fresh runner — see
+      #                           publish-widget-cdn.mjs header for why this is
+      #                           NOT a bare ssh-keyscan (TOFU) call.
 
       - name: Build CDN bundle
         if: steps.changesets.outputs.published == 'true'
@@ -214,6 +225,8 @@ jobs:
         env:
           CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
           CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+          CDN_SSH_PORT: ${{ secrets.CDN_SSH_PORT }}
+          CDN_SSH_HOST_KEY: ${{ secrets.CDN_SSH_HOST_KEY }}
           CDN_DEPLOY_KEY: ${{ secrets.CDN_DEPLOY_KEY }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: node scripts/publish-widget-cdn.mjs
