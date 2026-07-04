@@ -46,7 +46,7 @@ import type {
   BatchAppendItem,
   RoomVisibility,
 } from './types.js';
-import { SDKChatBatchError, SDKChatError } from './errors.js';
+import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
 import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
@@ -241,6 +241,40 @@ function aliasSealedAsPlaintext(row: MessageRow): MessageRow {
 // ─── Client ───────────────────────────────────────────────────────────────────
 
 const DEFAULT_MIN_COMPRESS_BYTES = 256;
+
+/**
+ * SEC-CR-17-01 (availability): upper bound on the number of per-room discovered
+ * crypto-mode entries retained on the list()-only path. A client paging history
+ * across many distinct rooms via list() (no live subscription, so no
+ * teardownSubscriber eviction) would otherwise accumulate one #activeCryptoModeByRoom
+ * entry per room forever. When the map exceeds this cap, the OLDEST entry whose room
+ * has NO live subscription (decrypt-chain refCount 0) is evicted; live rooms and
+ * #poisonedRooms are never touched.
+ */
+const ACTIVE_CRYPTO_MODE_MAP_CAP = 256;
+
+/**
+ * CR17-C-01: outbox failure codes that are PERMANENT — a later flushOutbox retry can
+ * never succeed, so the entry is scrubbed instead of retried forever. Everything NOT in
+ * this set — network / unauthorized (refreshable token) / rate_limited (429) /
+ * server_error (5xx, e.g. a deploy) — is TRANSIENT and stays queued for the next flush.
+ * flushOutbox is a background, last-resort durability path with no caller notification, so
+ * this is fail-SAFE by design: an ambiguous failure keeps the ciphertext queued (a queued
+ * message can be re-flushed; a dropped one is silent E2EE message loss).
+ */
+const PERMANENT_OUTBOX_FAILURE_CODES: ReadonlySet<SDKChatErrorCode> = new Set<SDKChatErrorCode>([
+  'crypto_mode_poisoned',
+  'crypto_mode_mismatch',
+  // Inert on the current outbox paths (flushOutbox / sendOptimistic / sendTextOptimistic all
+  // call send() directly, and the only `crypto_mode_undiscovered` throw is in sendText, which
+  // they never call) — listed as shared-Set defense-in-depth so it classifies as PERMANENT if a
+  // future refactor routes an outbox write through a path that can raise it.
+  'crypto_mode_undiscovered',
+  'invalid_args',
+  'unsupported',
+  'forbidden',
+  'not_found',
+]);
 
 /**
  * Server-side maximum number of user_ids accepted in a single bulk
@@ -469,6 +503,16 @@ export class SDKChatClient {
   /**
    * SEC-CR-001: fail CLOSED for a single poisoned room. A room poisoned by a prior
    * crypto_mode_mismatch refuses send/list/subscribe; sibling rooms are unaffected.
+   *
+   * Gate class = MESSAGE-CONTENT reads/writes (anything carrying or returning sealed_b64
+   * whose interpretation crypto_mode governs): send / sendText / sendFile / sendProductCard /
+   * updateMessage / batchAppend / #fetchRows (list) / subscribe / getThread. A proven
+   * downgrade must fail these closed.
+   *
+   * EXEMPT tier = INTERACTION-METADATA, cleartext by wire contract and NOT governed by
+   * crypto_mode: sendReaction / removeReaction / sendTyping / sendPresence / markRead /
+   * pinMessage / unpinMessage / listPins. Intentionally NOT gated — a poisoned room's
+   * sealed content is refused, but its cleartext metadata channel is not message content.
    */
   #assertRoomNotPoisoned(roomId: string): void {
     if (this.#poisonedRooms.has(roomId)) {
@@ -496,8 +540,46 @@ export class SDKChatClient {
     );
     if (resolved !== null) {
       this.#activeCryptoModeByRoom.set(roomId, resolved);
+      this.#boundActiveCryptoModeMap(roomId);
     }
     return resolved;
+  }
+
+  /**
+   * SEC-CR-17-01 (availability): keep #activeCryptoModeByRoom bounded on the
+   * list()-only path (subscribe()'s teardownSubscriber only evicts LIVE rooms at
+   * chain refCount 0). Evicts the OLDEST entries whose room has NO live subscription
+   * until the map is within ACTIVE_CRYPTO_MODE_MAP_CAP.
+   *
+   * Eviction is bounded FIFO / insertion-order, NOT LRU: #resolveRoomCryptoMode sets
+   * unconditionally and Map.set on an existing key does not reorder, so a re-listed room does
+   * not move to the back. For the page-once-per-room access pattern this equals LRU and is
+   * simpler; a genuinely hot room is not specially protected (acceptable — it re-resolves on
+   * its next list()).
+   *
+   * Never evicts:
+   *   - the room just resolved (justResolvedRoomId) — it is the freshest read;
+   *   - a room with a LIVE subscription (decrypt-chain refCount > 0) — its cached
+   *     mode is load-bearing for streamed-frame dispatch and is released by teardown;
+   *   - #poisonedRooms — a SEPARATE authoritative set: evicting a mode entry can never
+   *     un-poison a room (#assertRoomNotPoisoned reads #poisonedRooms alone, and a
+   *     poisoned room can never re-resolve — the fetch is refused first).
+   */
+  #boundActiveCryptoModeMap(justResolvedRoomId: string): void {
+    while (this.#activeCryptoModeByRoom.size > ACTIVE_CRYPTO_MODE_MAP_CAP) {
+      let evicted = false;
+      // Map iteration is insertion-order → the first eligible key is the oldest.
+      for (const roomId of this.#activeCryptoModeByRoom.keys()) {
+        if (roomId === justResolvedRoomId) continue;
+        if (this.#decryptChain.refCountOf(roomId) > 0) continue;
+        this.#activeCryptoModeByRoom.delete(roomId);
+        evicted = true;
+        break;
+      }
+      // All remaining entries are live subscriptions — legitimately bounded by the
+      // live-subscription count (teardownSubscriber releases them), so stop.
+      if (!evicted) break;
+    }
   }
 
   /**
@@ -1141,6 +1223,14 @@ export class SDKChatClient {
     // bypass identically.
     const replayMissed = async () => {
       try {
+        // TODO(#43): #fetchRows also returns { hasMore, nextCursor } but replayMissed
+        // replays only this FIRST page. If more than `limit` (50) messages were missed
+        // while the stream was down, rows beyond the first page are NOT replayed here.
+        // Whether that is benign depends on the server: the re-attach below re-opens the
+        // stream from lastSeq (after_seq), which MAY stream the remaining gap — needs
+        // oxpulse-chat server-team confirmation. If the server does NOT backfill past the
+        // reconnect cursor, >50 missed messages would be silently dropped and this must
+        // loop the pages here (advance afterSeq while hasMore). Flagged, not fixed blind.
         const { rawItems } = await this.#fetchRows(roomId, { afterSeq: lastSeq });
         // Teardown may have raced the replay fetch: a torn-down subscriber must
         // deliver nothing AND must not append onto a co-subscriber's still-live
@@ -1170,8 +1260,22 @@ export class SDKChatClient {
           }
         }
       } catch (err) {
-        // Surface replay failures to caller; the reconnect flow still re-attaches.
+        // Surface replay failures to the caller; the reconnect flow still re-attaches for
+        // transient (network / server) failures.
         reportError(err);
+        // #43 + SEC-CR-17-G-02: a crypto_mode enforcement failure during replay is not a
+        // transient error — either #resolveRoomCryptoMode just poisoned this room
+        // (crypto_mode_mismatch), or the room was ALREADY poisoned by a sibling
+        // co-subscriber (#fetchRows → #assertRoomNotPoisoned throws crypto_mode_poisoned).
+        // Tear THIS subscription down immediately (mirror the connected handler's contract)
+        // instead of re-attaching — a re-attach would only re-throw poisoned on the next
+        // replay, an endless reconnect loop against a bricked room.
+        if (
+          err instanceof SDKChatError &&
+          (err.code === 'crypto_mode_mismatch' || err.code === 'crypto_mode_poisoned')
+        ) {
+          teardownSubscriber();
+        }
       }
     };
 
@@ -1677,8 +1781,18 @@ export class SDKChatClient {
    * Wire-contract: GET /api/sdk/rooms/:room_id/threads/:root_msg_id
    * Returns: Array<MessageRow> sorted by seq ascending (server-side ORDER BY seq).
    * Requires scope: chat:read:<room_id>.
+   *
+   * SEC-CR-17-02: fails CLOSED for a poisoned room — a thread is message content, so it
+   * belongs to the same gate class as list()/#fetchRows (a room proven to have a
+   * downgraded/tampered crypto_mode must not keep serving its content). Unlike list(),
+   * getThread does NOT resolve crypto_mode: the threads endpoint returns a BARE JSON array
+   * with no per-response crypto_mode field (crates/sdk/src/messages/dtos.rs — only list()'s
+   * page wrapper carries it), and getThread returns rows with `sealed` intact (the caller
+   * unseals), so there is no plaintext-vs-sframe dispatch that would need the mode. The
+   * poison gate is the relevant boundary here.
    */
   async getThread(roomId: string, rootMsgId: string): Promise<MessageRow[]> {
+    this.#assertRoomNotPoisoned(roomId);
     let resp: Response;
     try {
       resp = await fetch(
@@ -2094,8 +2208,14 @@ export class SDKChatClient {
           return result;
         } catch (e) {
           const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-          // Non-network errors (4xx) fail immediately — no retry.
-          if (err.code !== 'network') {
+          // CR17-C-01: ONE outbox permanence doctrine across all three write paths — the same
+          // PERMANENT_OUTBOX_FAILURE_CODES authority flushOutbox uses. A PERMANENT failure
+          // (4xx / crypto_mode_*) can never succeed → scrub the durable entry, notify, give up.
+          // A TRANSIENT failure (network / 401 / 429 / 5xx) is retriable → keep the ciphertext
+          // queued (do NOT dequeue) and retry with backoff; after MAX_RETRIES it is left queued
+          // for flushOutbox and onFailed fires. Never drop a refreshable-401 / rate-limited /
+          // 5xx entry on the foreground path (the exact codes CR17-C-01 protects).
+          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
             await dequeue(roomId, msgId);
             failCbs.forEach((cb) => cb(err));
             throw err;
@@ -2133,8 +2253,12 @@ export class SDKChatClient {
 
   /**
    * Retry all queued messages for a room (e.g. on reconnect after page reload).
-   * Messages that succeed are dequeued. Messages that fail are left in the outbox.
-   * Errors are silently swallowed — caller can retry again later.
+   * Messages that succeed are dequeued. A message that fails with a PERMANENT error
+   * (crypto_mode_poisoned / 4xx client error — see PERMANENT_OUTBOX_FAILURE_CODES) is
+   * also dequeued, so a truly-undeliverable entry does not retry forever (CR17 Item C).
+   * A TRANSIENT failure (network / 401 / 429 / 5xx) stays queued for the next flush —
+   * this is a background durability path with no caller notification, so dropping a
+   * retriable ciphertext message would be silent E2EE message loss (CR17-C-01).
    */
   async flushOutbox(roomId: string): Promise<void> {
     for (const m of await pending(roomId)) {
@@ -2148,8 +2272,12 @@ export class SDKChatClient {
           threadRootMsgId: m.threadRootMsgId,
         });
         await dequeue(roomId, m.msgId);
-      } catch {
-        // Leave queued for next flush attempt.
+      } catch (e) {
+        const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
+        // Scrub ONLY a permanently-failed entry; keep transient failures queued (fail-safe).
+        if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+          await dequeue(roomId, m.msgId);
+        }
       }
     }
   }
@@ -2249,7 +2377,10 @@ export class SDKChatClient {
           return result;
         } catch (e) {
           const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-          if (err.code !== 'network') {
+          // CR17-C-01: same unified outbox permanence doctrine as sendOptimistic — dequeue only
+          // on a PERMANENT code; keep a transient (network / 401 / 429 / 5xx) entry queued for
+          // flushOutbox rather than dropping a retriable ciphertext message.
+          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
             await dequeue(roomId, msgId);
             failCbs.forEach((cb) => cb(err));
             throw err;
@@ -2398,6 +2529,18 @@ export class SDKChatClient {
     productRef: string,
     opts?: { roomId?: string; limit?: number },
   ): Promise<MessageRow[]> {
+    // SEC-CR-17-B-01: searchByProductRef returns sealed message-content rows (same gate
+    // class as getThread / list()). When scoped to a single room, fail CLOSED if that room
+    // was poisoned by a prior crypto_mode_mismatch. The cross-room variant (no roomId) is
+    // rejected by the SERVER today (GET /api/sdk/messages?product_ref requires room_id and
+    // returns 400 — cross-room search is deferred until a `platform:search:*` scope ships,
+    // see the server's handle_product_search), so no rows are returned and there is nothing
+    // to gate. IF cross-room search later ships, revisit this: results could span a poisoned
+    // room, needing a per-row #poisonedRooms filter here (rows come back sealed, so a tampered
+    // row still fails AEAD on unseal — a completeness gap, not a plaintext leak).
+    if (opts?.roomId) {
+      this.#assertRoomNotPoisoned(opts.roomId);
+    }
     const params = new URLSearchParams({ product_ref: productRef });
     if (opts?.roomId) params.set('room_id', opts.roomId);
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));

@@ -140,6 +140,40 @@ describe('SFrame durable cross-reload anti-replay (SEC-CR-003)', () => {
     }
   });
 
+  it('CR17-02: without Web Locks (legacy Safari), durable persistence is disabled with a one-time warn', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const savedNavDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    // Legacy engine (Safari <15.4): IndexedDB present, but no Web Locks API. Without a
+    // cross-tab lock the durable read-merge-write could silently drop a CTR (CR17-02), so
+    // the guard gates durable persistence OFF rather than claim a protection it cannot keep.
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { locks: undefined },
+      configurable: true,
+    });
+    try {
+      const key = await makeHkdfKey();
+      const sender = createSFrameProvider({ getKey: async () => key });
+      const frame = await sender.seal(pt('no-locks'), { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+      // Round-trip still works — the library's in-memory window is the only defense.
+      const session1 = createSFrameProvider({ getKey: async () => key });
+      await session1.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+
+      // Durable OFF → nothing persisted, and a cross-reload replay is ACCEPTED (like no-IDB).
+      const storeKey = `sframe-replay|default|${ROOM_ID}|${SENDER_UID}`;
+      expect(await get(storeKey)).toBeUndefined();
+      const session2 = createSFrameProvider({ getKey: async () => key });
+      const out = await session2.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID });
+      expect(new Uint8Array(out)).toEqual(enc.encode('no-locks'));
+
+      // One-time CR17-02 warn referencing the Web Locks API fired.
+      const warnMsgs = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(warnMsgs.some((m) => m.includes('CR17-02') && m.includes('Web Locks'))).toBe(true);
+    } finally {
+      if (savedNavDesc) Object.defineProperty(globalThis, 'navigator', savedNavDesc);
+    }
+  });
+
   it('opt-out: durableReplay:false reverts to in-memory-only (replay accepted after reload)', async () => {
     const key = await makeHkdfKey();
     const sender = createSFrameProvider({ getKey: async () => key, durableReplay: false });

@@ -17,17 +17,21 @@
  * AEAD). The guard mirrors the library's in-memory bounded-set semantics exactly, just durable.
  *
  * ## Availability
- * Feature-detected + default-on: when IndexedDB is unavailable (SSR / Node without a polyfill /
- * private-mode quirks) the guard degrades to a no-op with a one-time warning, and the library's
- * in-memory window remains the only (session-scoped) defense — the guard never throws at
- * construct and never breaks a no-IDB runtime. A `window` of 0 disables the durable window
+ * Feature-detected + default-on. Durable persistence requires BOTH IndexedDB AND the Web Locks
+ * API: when either is unavailable (SSR / Node without a polyfill / private-mode quirks / legacy
+ * Safari <15.4 with no Web Locks) the guard degrades to a no-op with a one-time warning, and the
+ * library's in-memory window remains the only (session-scoped) defense — the guard never throws
+ * at construct and never breaks such a runtime. A `window` of 0 disables the durable window
  * (mirrors sframe-ratchet's `replayWindow: 0` debug switch).
  *
  * ## Concurrency
  * Same-realm writes are serialized by a promise chain; CROSS-tab writes are serialized by the
  * Web Locks API (the same `navigator.locks` pattern sframe-ratchet's monotonic-idb CTR allocator
  * uses), and each persist is a read-merge-write so a second tab's accepted CTRs are merged, not
- * clobbered. Where `navigator.locks` is absent the read-merge-write still runs (unlocked).
+ * clobbered. CR17-02: when the Web Locks API is absent the read-merge-write cannot be serialized
+ * cross-tab (two tabs could interleave and silently drop a CTR), so durable persistence is gated
+ * OFF entirely (via `available`) rather than run an unlocked RMW — an honest "no durable claim
+ * without Web Locks" posture. The reachable persist path therefore ALWAYS holds the lock.
  */
 
 import { get, set } from 'idb-keyval';
@@ -57,10 +61,15 @@ function idbAvailable(): boolean {
   }
 }
 
-/** Detect the Web Locks API (cross-tab mutual exclusion), mirroring sframe-ratchet's allocator. */
+/**
+ * Detect a USABLE Web Locks API (cross-tab mutual exclusion), mirroring sframe-ratchet's
+ * allocator. Probes `navigator.locks.request` as a function — a partial polyfill exposing
+ * `navigator.locks` without `.request` must NOT pass (persistMerged calls `.request`
+ * directly with no fallback).
+ */
 function locksAvailable(): boolean {
   try {
-    return typeof navigator !== 'undefined' && navigator.locks != null;
+    return typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
   } catch {
     return false;
   }
@@ -127,14 +136,32 @@ export class DurableReplayGuard {
   constructor(opts: DurableReplayGuardOptions = {}) {
     this.namespace = opts.namespace ?? 'default';
     this.window = resolveWindow(opts.window);
-    this.available = idbAvailable();
-    if (!this.available && opts.warnIfUnavailable !== false) {
-      // One-time, matching the SDK's console.warn idiom. Not fatal: the library's in-memory
-      // window still defends within a session; only cross-reload protection is unavailable.
-      console.warn(
-        '[chat-sdk] IndexedDB unavailable — durable cross-reload replay protection is disabled ' +
-          '(SEC-CR-003); sframe falls back to the in-memory replay window (session-scoped only).',
-      );
+    // Durable persistence requires BOTH IndexedDB (to store) AND the Web Locks API (to
+    // serialize the cross-tab read-merge-write). CR17-02: on a legacy engine with IDB but no
+    // Web Locks (Safari <15.4) the RMW would run UNLOCKED and two tabs could interleave and
+    // silently drop a CTR (later replayable). Gate durable persistence OFF when either
+    // capability is absent; the library's in-memory window still defends within a session
+    // (only cross-reload protection is lost). Both capabilities are static per engine, so
+    // sampling them once at construct is sound.
+    const hasIdb = idbAvailable();
+    const hasLocks = locksAvailable();
+    this.available = hasIdb && hasLocks;
+    if (opts.warnIfUnavailable !== false) {
+      if (!hasIdb) {
+        // One-time, matching the SDK's console.warn idiom.
+        console.warn(
+          '[chat-sdk] IndexedDB unavailable — durable cross-reload replay protection is disabled ' +
+            '(SEC-CR-003); sframe falls back to the in-memory replay window (session-scoped only).',
+        );
+      } else if (!hasLocks) {
+        console.warn(
+          '[chat-sdk] Web Locks API unavailable (legacy engine, e.g. Safari <15.4) — durable ' +
+            'cross-reload replay protection is disabled (CR17-02): the persist read-merge-write ' +
+            'cannot be serialized cross-tab, so sframe falls back to the in-memory replay window ' +
+            '(session-scoped only). Single-tab durable protection is forgone in exchange for an ' +
+            'honest, uniform "no durable claim without Web Locks" posture.',
+        );
+      }
     }
   }
 
@@ -228,6 +255,9 @@ export class DurableReplayGuard {
    * rejects a CTR another tab already accepted.
    */
   private async persistMerged(key: string, win: MemWindow): Promise<void> {
+    // Reached only when `available` is true, which requires the Web Locks API (see the
+    // constructor). So the read-merge-write ALWAYS runs under a cross-tab exclusive lock —
+    // there is no unlocked fallback (CR17-02: an unlocked RMW could silently drop a CTR).
     const write = async (): Promise<void> => {
       let persistedSeen: string[] = [];
       try {
@@ -243,11 +273,7 @@ export class DurableReplayGuard {
       await set(key, payload);
     };
 
-    if (locksAvailable()) {
-      await navigator.locks.request(`${KEY_PREFIX}-lock|${key}`, { mode: 'exclusive' }, write);
-    } else {
-      await write();
-    }
+    await navigator.locks.request(`${KEY_PREFIX}-lock|${key}`, { mode: 'exclusive' }, write);
   }
 
   private warnPersistFail(err: unknown): void {

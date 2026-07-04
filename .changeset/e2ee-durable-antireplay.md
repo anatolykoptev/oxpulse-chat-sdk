@@ -61,10 +61,11 @@ Residuals (documented, accepted):
   mirror; a CTR another tab accepted is reflected into this tab on its next persist / on reload.
   Residual: the merge is bounded to `window` and eviction is position-based (the writing tab's
   entries sit last), so when two divergent live tabs together exceed `window` distinct CTRs a peer
-  tab's older recent CTRs can still be evicted — no worse than the bounded window's inherent horizon,
-  and where `navigator.locks` is absent the RMW runs unlocked (last-writer-wins). A strict-recency
-  cross-tab merge would need per-CTR acceptance ordinals (a `v:1`→`v:2` store migration) — tracked
-  as a follow-up, not in this PR.
+  tab's older recent CTRs can still be evicted — no worse than the bounded window's inherent horizon.
+  (SUPERSEDED by CR17-02 / Item E of the CR17 hardening batch: where `navigator.locks` is absent the
+  RMW no longer runs unlocked — durable persistence is gated OFF entirely, so there is no
+  last-writer-wins drop.) A strict-recency cross-tab merge would need per-CTR acceptance ordinals (a
+  `v:1`→`v:2` store migration) — tracked as a follow-up, not in this PR.
 - Same-session ordering: `check()` and `accept()` straddle the `await inner.unseal`. This does NOT
   weaken cross-reload protection (hydrate loads persisted CTRs before any `check()` resolves). The
   only residual is a within-session double-DELIVERY of one genuinely-new CTR when two `unseal()`
