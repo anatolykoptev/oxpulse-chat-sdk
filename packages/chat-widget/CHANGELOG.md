@@ -1,5 +1,136 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.4.0
+
+### Minor Changes
+
+- def28fc: feat(T18): widget roster consumption — display names for other writers
+
+  - SDK: new `fetchRoster()` helper fetches `GET /api/sdk/roster` with SDK JWT
+  - SDK: new `rosterDisplayName(roster, epid)` with 8-char short-form fallback
+  - SDK: `SubscribeArgs.onRosterSignal` callback — fires on `type:"roster"` SSE signal
+  - SDK: `mintNamedWriteToken` alg-pin guard — rejects tokens with alg≠EdDSA returned by the mint endpoint (defense-in-depth; server enforces EdDSA at exchange, client now enforces at receipt)
+  - Widget: MessageList fetches roster on mount and re-fetches on `type:"roster"` SSE invalidation signals (100ms debounce)
+  - Widget: element adapter now forwards `onRosterSignal` to `sdkClient.subscribe` (was silently dropped — the re-fetch end-to-end path was broken)
+  - Widget: bubbles show roster display names for other writers; own messages show "You"
+  - Widget: XSS-safe — roster names use textContent only, never innerHTML (SEC-CR-003 / FF3)
+  - CI: FF6 alg-pin — `mintNamedWriteToken` rejects alg:none and alg:HS256 tokens (real production guard, red-on-revert)
+  - CI: issuer-disjointness (FF5) — server-enforced invariant; client-side tautology removed; server tests own it
+
+- 8d2d10f: feat(chat-widget): add a real i18n layer — wire the `lang` option through a locale table (en + ru)
+
+  `lang` (constructor option / `lang` attribute, BCP-47) has been accepted since W2.1 but was
+  never read for strings — every user-facing string was hardcoded English regardless of `lang`
+  (`MessageList` even hardcoded `lang: config.lang ?? 'en'` internally, dropping the option's
+  own value). oxpulse's userbase is heavily Russian-speaking (see the ITALIC_RE Cyrillic fix
+  in this same package), so RU users saw an all-English widget.
+
+  Adds `src/utils/i18n.ts`: a plain `Record<Locale, Record<LocaleKey, string>>` table (`en`
+  source-of-truth + a fully-translated `ru`) + a `t(key, lang, params?)` lookup with `{name}`
+  placeholder substitution and a `resolveLocale(lang?)` helper (`lang` → `navigator.language`
+  prefix → `'en'`). No new dependency — the widget is zero-dependency by design and the CDN
+  bundle is size-budgeted (`esbuild.cdn.mjs` FF-1 gate, 250 KB gzip); this adds ~2 KB gzip
+  (52.4 KB → 54.4 KB), nowhere near the ceiling.
+
+  Every hardcoded string across the widget's UI surface is now routed through `t()` /
+  `resolveLocale()`, each class storing its own resolved `#lang` at construction (`lang?`
+  optional everywhere, defaulting via `resolveLocale()`, so no existing construction call site
+  breaks):
+
+  - `MessageList` — tombstone, unseal-error (visible + aria, U2's screen-reader-only variant
+    kept glyph-free), the bubble's composed `aria-label`, "You" sender label, "Add reaction" /
+    "Reactions" group / reaction-count aria (RU gets correct 1/2-4/5+ grammatical plural forms,
+    not just an English-style singular/plural split), attachment aria-labels (Image/Audio/
+    File/Attachment-unavailable), and the list-error Retry button.
+  - `Composer` — placeholder default (an explicit `placeholder:` option still wins), all
+    aria-labels, Send button text, the empty/sending/over-limit hints, the character counter,
+    and the error-chip Retry button.
+  - `AttachmentPicker` — both aria-labels, the upload-progress `aria-valuetext`, the live-region
+    announcements (uploading/uploaded/failed), the queue summary, and the retry/cancel controls.
+  - `ReactionPicker` / `reaction-types.ts` — "Choose reaction" and the per-emoji aria-label map.
+  - `Reconnector` — every banner state (session-expired, reconnecting w/ attempt count,
+    connected, gave-up) and its action button + aria-label.
+  - The element's "Chat loading…" placeholder.
+
+  Left deliberately English: dynamic runtime error text (`Composer`'s error chip,
+  `MessageList`'s list-error banner, the element's `#renderError`) — these render an
+  `Error.message` from a thrown exception (network/SDK/server text), not authored UI copy we
+  control; localizing them would mean translating arbitrary upstream error strings. Emoji
+  glyphs, byte-size units (`KB`), and `HH:MM` time formatting are also left as-is — not prose.
+
+  Regression: 465 pre-existing tests stay green (every EN string is byte-identical to what
+  shipped before); default (no `lang`) behavior is unchanged. 51 new tests added: a RED→GREEN
+  proof (`list-helpers.test.ts` fails against pre-wire-in `main` for every `lang:'ru'`
+  assertion, passes after), `i18n.test.ts` (lookup/fallback/interpolation unit tests), and RU
+  integration coverage across `MessageList`/`Composer`/`Reconnector`/`AttachmentPicker`/
+  `reaction-types`.
+
+- f06ed8b: feat(chat-widget): in-place token refresh via origin-pinned postMessage (no remount)
+
+  `element.refreshToken(jwt)` no longer tears the widget down and rebuilds it to apply a
+  fresh JWT. In **iframe mode** it now posts the new token to the LIVE iframe over an
+  origin-pinned `postMessage` (`{ type: 'refresh-token', jwt }`) and the iframe swaps the
+  session token IN PLACE — the SSE stream, scroll position and decrypt state survive, so
+  there is no flicker, reconnect or lost scroll on a routine token rotation. When there is
+  no live iframe to post to (inline mode, or the iframe is not yet ready) it gracefully
+  falls back to the existing re-bootstrap path, so a refresh never silently no-ops. Inline
+  mode still re-bootstraps by design: its `SDKChatClient` holds its JWT in a `readonly`
+  field and can only be re-authed by reconstruction.
+
+  **Security hardening (behavior change):** `sendRefreshTokenToIframe` no longer falls back
+  to the `'*'` wildcard target origin. It now requires an EXPLICIT target origin (the
+  resolved widget `baseUrl`, the same concrete origin the init path posts to); if none is
+  available the bearer JWT is dropped with a `console.warn` rather than broadcast to any
+  origin — mirroring `sendToParent`'s "never send with '\*'" (M1) discipline. The iframe-side
+  receiver applies a `refresh-token` only from inside the existing fail-closed
+  `onParentMessage` origin gate (M2), so a refresh-token from an unexpected origin is dropped.
+
+  Bumped `minor` (→ `0.4.0`) rather than `patch`: this changes the refresh behavior consumers
+  observe (no remount) and the `sendRefreshTokenToIframe` signature (an explicit origin is now
+  required, no `'*'` default), so it sits outside the `^0.3.1` caret range and requires an
+  explicit consumer opt-in.
+
+### Patch Changes
+
+- 29b5d83: fix(chat-widget): Unicode-aware ITALIC_RE word-boundary (Cyrillic snake_case) + drop dead postMessage helper
+
+  `renderMarkdown`'s italic regex used a doubled-backslash character class `[\\w]` (= the literal set
+  `{backslash, 'w'}`) instead of the `\w` word-char escape, disabling the word-boundary guard entirely —
+  any snake*case-flanked underscore, e.g. `a_hi_b`, was wrongly wrapped in `<em>`. Fixed to a proper `\w`
+  lookaround, then found that `\w` (no `/u` flag) only matches `[A-Za-z0-9*]` — Cyrillic letters aren't
+word chars to JS regex, so a plain-`\w`fix is a no-op for Cyrillic snake_case (this SDK's primary
+userbase is Russian-speaking):`тестовый*юзер*профиль`still wrongly italicized. Final fix uses`\p{L}\p{N}_`with the`/u`flag — Unicode-aware, verified for both ASCII and Cyrillic snake_case,
+still italicizes a normal whitespace-bounded`\_word_`.
+
+  Also deletes the dead `sendInitToIframe` postMessage helper (zero callers repo-wide, not re-exported,
+  defaulted `targetOrigin` to `'*'` — contradicted the file's own M1 "never send with `*`" invariant).
+  `element.ts` already hand-rolls its own safe inline init postMessage; this helper was stranded.
+  `sendRefreshTokenToIframe` is untouched (rebuilt with an explicit origin in the upcoming U1 task).
+
+- 85e5fdc: fix(chat-widget): render failed-decrypt messages with a distinct state (unsealError)
+
+  `@oxpulse/chat-sdk`'s decrypt path already PRESERVES a message row whose `unseal()` call
+  fails (`MessageRow.unsealError: 'replay' | 'auth' | 'unknown'`) instead of dropping it —
+  but `MessageList` never read that marker, so a failed-decrypt row rendered as an empty
+  message bubble, visually indistinguishable from a real one.
+
+  `MessageList` now renders a distinct `.oxp-unseal-error` placeholder (a lock glyph + "This
+  message couldn't be decrypted") in place of the empty body whenever `unsealError` is set,
+  and the bubble's `aria-label` announces the same text instead of an empty string. A row
+  with both `deletedAt` and `unsealError` set renders as the tombstone in both the visible
+  body and the `aria-label` (priority matches the existing deleted-message precedent) so a
+  screen reader never announces a different state than what's shown.
+
+  Render-side only — does not touch `chat-sdk`'s unseal/decrypt logic.
+
+- Updated dependencies [917c97a]
+- Updated dependencies [ce7863f]
+- Updated dependencies [78d7327]
+- Updated dependencies [f3e9c7f]
+- Updated dependencies [e3a31ed]
+- Updated dependencies [def28fc]
+  - @oxpulse/chat-sdk@2.0.0
+
 ## 0.3.1
 
 ### Patch Changes
