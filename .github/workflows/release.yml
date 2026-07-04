@@ -151,6 +151,17 @@ jobs:
           # child `tsc`, breaking the build with TS5112). The `release:ci` script
           # body IS executed by sh, so the "&&" inside it works correctly.
           publish: pnpm release:ci
+          # createGithubReleases: false — the OIDC publisher (release-npm-packages.mjs)
+          # deliberately does NOT create git tags in CI (tagAndPush() early-returns in
+          # OIDC_MODE). But it still logs "New tag: <pkg>@<ver>" so changesets/action
+          # sets outputs.published=true (which the CDN publish steps below gate on).
+          # With createGithubReleases at its default (true), the action parses those
+          # "New tag:" lines and tries to `git push origin <tag>` for each — tags that
+          # were never created — failing the job with "src refspec … does not match any"
+          # AFTER npm publish already succeeded, which then SKIPS the widget-CDN steps.
+          # Setting false keeps published=true (CDN steps run) without the tag push.
+          # GitHub Releases are not created by this pipeline anyway (see the header note).
+          createGithubReleases: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
