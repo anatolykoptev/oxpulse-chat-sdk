@@ -1194,6 +1194,14 @@ export class SDKChatClient {
     // bypass identically.
     const replayMissed = async () => {
       try {
+        // TODO(#43): #fetchRows also returns { hasMore, nextCursor } but replayMissed
+        // replays only this FIRST page. If more than `limit` (50) messages were missed
+        // while the stream was down, rows beyond the first page are NOT replayed here.
+        // Whether that is benign depends on the server: the re-attach below re-opens the
+        // stream from lastSeq (after_seq), which MAY stream the remaining gap — needs
+        // oxpulse-chat server-team confirmation. If the server does NOT backfill past the
+        // reconnect cursor, >50 missed messages would be silently dropped and this must
+        // loop the pages here (advance afterSeq while hasMore). Flagged, not fixed blind.
         const { rawItems } = await this.#fetchRows(roomId, { afterSeq: lastSeq });
         // Teardown may have raced the replay fetch: a torn-down subscriber must
         // deliver nothing AND must not append onto a co-subscriber's still-live
@@ -1223,8 +1231,17 @@ export class SDKChatClient {
           }
         }
       } catch (err) {
-        // Surface replay failures to caller; the reconnect flow still re-attaches.
+        // Surface replay failures to the caller; the reconnect flow still re-attaches for
+        // transient (network / server) failures.
         reportError(err);
+        // #43: a crypto_mode_mismatch during replay is an ENFORCEMENT signal, not a
+        // transient failure — #resolveRoomCryptoMode has already poisoned the room. Tear
+        // THIS subscription down immediately (mirror the connected handler's contract)
+        // instead of letting the reconnect re-attach and land teardown a microtask later
+        // via the new stream's connected prelude.
+        if (err instanceof SDKChatError && err.code === 'crypto_mode_mismatch') {
+          teardownSubscriber();
+        }
       }
     };
 
