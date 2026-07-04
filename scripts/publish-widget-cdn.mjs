@@ -338,6 +338,16 @@ async function main() {
 			);
 
 			log(`widget/latest/ updated → ${VERSION}`);
+		} else if (isStable(VERSION)) {
+			// Not a prerelease — shouldUpdateLatest() already logged the real reason
+			// (deployState !== 'absent'). Flag it loudly: latest/ only ever advances
+			// on the one run where the probe catches this version genuinely absent.
+			// If THAT run's probe was 'indeterminate' (a network blip) or the version
+			// was already 'live' from a prior partial run, every SUBSEQUENT run also
+			// sees 'live' — latest/ can be permanently stranded on the OLD version
+			// with no automatic recovery. The versioned dir is unaffected (it always
+			// deploys/self-heals regardless) — only this mutable pointer can strand.
+			log(`WARNING: widget/${VERSION}/ is stable but latest/ was NOT advanced (CDN probe=${deployState}, not confirmed-absent). If this version was just released and latest/ still doesn't point to it after this run, latest/ may be stranded on an older version — investigate manually (curl -I https://cdn.oxpulse.chat/widget/latest/index.js, or re-run workflow_dispatch).`);
 		} else {
 			log(`Skipping latest/ update (${VERSION} is a prerelease)`);
 		}
