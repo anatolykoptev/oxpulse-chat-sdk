@@ -24,6 +24,7 @@ import { isAuthError } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
 import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
+import { t, resolveLocale } from './utils/i18n.js';
 
 const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
 const ELEMENT_TAG = 'oxpulse-chat';
@@ -269,6 +270,9 @@ export class OxpulseChatElement extends HTMLElement {
       // Required attributes not yet set — wait for attributeChangedCallback
       return;
     }
+    // i18n: resolve once per bootstrap (lang option → navigator.language prefix
+    // → 'en') and reuse for every string this bootstrap renders/constructs.
+    const lang = resolveLocale(config.lang);
 
     // Clear previous content
     if (this.#anonRenewTimer !== null) {
@@ -295,7 +299,7 @@ export class OxpulseChatElement extends HTMLElement {
     applyTheme(this, config.theme ?? null);
 
     // Render loading placeholder
-    this.#renderPlaceholder('Chat loading…');
+    this.#renderPlaceholder(t('chatLoading', lang));
 
     // In anon-read mode the mint endpoint is the authorization gate; skip the
     // JWT-based origin check (config.jwt is empty before minting).
@@ -629,7 +633,7 @@ export class OxpulseChatElement extends HTMLElement {
         client: widgetClient,
         roomId: config.roomId,
         container: listContainer,
-        lang: config.lang ?? 'en',
+        lang,
         // selfUid from element attribute (JWT sub claim wiring is a future slice).
         selfUid: config.selfUid ?? '',
         signal: signal,
@@ -649,6 +653,7 @@ export class OxpulseChatElement extends HTMLElement {
         container: widgetRoot,
         host: this,
         signal: signal,
+        lang,
       });
       reconnectorRef = this.#reconnector;
 
@@ -718,6 +723,7 @@ export class OxpulseChatElement extends HTMLElement {
           roomId: config.roomId,
           container: widgetRoot,
           signal: signal,
+          lang,
         });
         this.#composer.mount();
       }

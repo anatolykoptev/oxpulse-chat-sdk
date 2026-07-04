@@ -3,6 +3,7 @@
  */
 
 import { isAuthError } from '../utils/auth.js';
+import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 
 // ── BackoffStrategy ───────────────────────────────────────────────────────────
 
@@ -42,6 +43,8 @@ export interface ReconnectorOptions {
   container: HTMLElement;
   host: EventTarget;
   signal?: AbortSignal;
+  /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
+  lang?: string;
 }
 
 /**
@@ -72,11 +75,13 @@ export class Reconnector {
   #subscribeFn: SubscribeFn | null = null;
   #backoff = new BackoffStrategy();
   #destroyed = false;
+  #lang: Locale;
 
   constructor(opts: ReconnectorOptions) {
     this.#container = opts.container;
     this.#host = opts.host;
     this.#signal = opts.signal;
+    this.#lang = resolveLocale(opts.lang);
 
     // CM2: AbortSignal wires to destroy() — once: true prevents leak
     opts.signal?.addEventListener('abort', () => this.destroy(), { once: true });
@@ -105,8 +110,8 @@ export class Reconnector {
     // Design M4/CM7: stop loop BEFORE showing banner — prevents scheduled tick from
     // overwriting the auth-expired state after this call returns.
     this.stopReconnectLoop();
-    this.#updateBanner('auth-expired', 'alert', 'assertive', 'Session expired.', {
-      label: 'Refresh', ariaLabel: 'Refresh session',
+    this.#updateBanner('auth-expired', 'alert', 'assertive', t('sessionExpired', this.#lang), {
+      label: t('refresh', this.#lang), ariaLabel: t('refreshSessionAria', this.#lang),
       onClick: () => {
         this.#host.dispatchEvent(new CustomEvent('oxpulse-chat:token-expired', {
           bubbles: true, composed: true,
@@ -120,14 +125,14 @@ export class Reconnector {
   notifyNetworkLost(attempt: number): void {
     if (this.#destroyed || this.#signal?.aborted) return;
     this.#updateBanner('reconnecting', 'status', 'polite',
-      `Connection lost. Reconnecting… (attempt ${attempt})`);
+      t('connectionLostReconnecting', this.#lang, { n: attempt }));
   }
 
   notifyReconnected(): void {
     if (this.#destroyed || this.#signal?.aborted) return;
     // Design M4: stop loop so reconnected state isn't overwritten by a late tick
     this.stopReconnectLoop();
-    this.#updateBanner('connected', 'status', 'polite', 'Connected.');
+    this.#updateBanner('connected', 'status', 'polite', t('connected', this.#lang));
     this.#clearTimer = setTimeout(() => {
       this.#removeBannerFromDom();
       this.#clearTimer = null;
@@ -136,8 +141,8 @@ export class Reconnector {
 
   notifyGivenUp(): void {
     if (this.#destroyed || this.#signal?.aborted) return;
-    this.#updateBanner('auth-expired', 'alert', 'assertive', 'Could not reconnect.', {
-      label: 'Reconnect', ariaLabel: 'Retry connection manually',
+    this.#updateBanner('auth-expired', 'alert', 'assertive', t('couldNotReconnect', this.#lang), {
+      label: t('reconnect', this.#lang), ariaLabel: t('retryConnectionManuallyAria', this.#lang),
       onClick: () => {
         if (this.#subscribeFn && this.#roomId) {
           this.#attempt = 0;

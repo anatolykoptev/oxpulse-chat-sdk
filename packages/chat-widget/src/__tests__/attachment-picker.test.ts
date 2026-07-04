@@ -83,6 +83,21 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
+  // i18n follow-up: lang defaults to English (unchanged); lang='ru' localizes
+  // aria-labels and the retry/error text rendered in the upload queue.
+  it('localizes_button_aria_labels_for_lang_ru', () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container, lang: 'ru' });
+    picker.mount();
+
+    const input = container.querySelector('input[type="file"]');
+    const btn = container.querySelector('.oxp-attachment-btn');
+    expect(input?.getAttribute('aria-label')).toBe('Выбрать файлы для прикрепления');
+    expect(btn?.getAttribute('aria-label')).toBe('Прикрепить файлы');
+
+    picker.destroy();
+  });
+
   it('renders_aria_live_region_for_status_announcements', () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
@@ -228,6 +243,22 @@ describe('AttachmentPicker', () => {
 
     const retryBtn = container.querySelector('.oxp-attachment-retry');
     expect(retryBtn).not.toBeNull();
+
+    picker.destroy();
+  });
+
+  it('localizes_the_retry_button_and_cancel_aria_label_for_lang_ru', async () => {
+    const client = makeStubClient({ rejectWith: new Error('fail') });
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container, lang: 'ru' });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('photo.png')]);
+    await drain(15);
+
+    const retryBtn = container.querySelector('.oxp-attachment-retry');
+    expect(retryBtn?.textContent).toBe('Повторить');
+    const cancelBtn = container.querySelector('.oxp-attachment-cancel');
+    expect(cancelBtn?.getAttribute('aria-label')).toBe('Отменить загрузку photo.png');
 
     picker.destroy();
   });

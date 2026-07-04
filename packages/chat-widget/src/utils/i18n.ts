@@ -1,0 +1,242 @@
+/**
+ * @oxpulse/chat-widget — i18n locale table.
+ *
+ * The widget accepted a `lang` constructor/attribute option since W2.1 but never
+ * read it for any string — every user-facing string (tombstone, unseal-error,
+ * composer, aria-labels) was hardcoded English. This module is the fix: a flat
+ * `Record<Locale, Record<LocaleKey, string>>` lookup + a `t()` helper.
+ *
+ * No external i18n library — the widget is zero-dependency by design and the
+ * CDN bundle is size-budgeted (see esbuild.cdn.mjs FF-1 gate, 250 KB gzip).
+ * A plain table + `{placeholder}` substitution covers every string this
+ * package renders without pulling in ICU/CLDR plural-rule machinery.
+ *
+ * Interpolation: templates use `{name}` placeholders, substituted by `t()`.
+ * Fallback chain: requested locale → `en` (per-key, via `lookupWithFallback`)
+ * → the raw key itself as an absolute last resort — `t()` never returns
+ * `undefined` or throws.
+ */
+
+export type Locale = 'en' | 'ru';
+
+/** Locales the widget ships a translation table for. */
+export const SUPPORTED_LOCALES: readonly Locale[] = ['en', 'ru'];
+
+export type LocaleKey =
+  // Message list — tombstone / unseal-error / bubble
+  | 'tombstone'
+  | 'unsealError'
+  | 'unsealErrorAria'
+  | 'senderYou'
+  | 'bubbleAriaLabel'
+  | 'addReactionAria'
+  | 'retryLoadingMessagesAria'
+  | 'retry'
+  // Reactions
+  | 'reactionsGroupAria'
+  | 'chooseReactionAria'
+  | 'youReactedSuffix'
+  // Composer
+  | 'composerPlaceholder'
+  | 'messageInputAria'
+  | 'sendMessageAria'
+  | 'send'
+  | 'messageEmpty'
+  | 'sendingMessage'
+  | 'messageExceedsLimit'
+  | 'charactersRemaining'
+  | 'retrySendingMessageAria'
+  | 'attachFilesAria'
+  // Attachment picker
+  | 'chooseFilesToAttachAria'
+  | 'cancelUploadOfAria'
+  | 'uploadingProgressAria'
+  | 'announceUploadingFile'
+  | 'announceFileUploaded'
+  | 'announceUploadFailedFile'
+  | 'uploadFailed'
+  | 'queueUploadingCount'
+  | 'queueDoneCount'
+  | 'queueFailedCount'
+  // Attachment rendering (message bubbles)
+  | 'attachmentUnavailableAria'
+  | 'imageAria'
+  | 'audioAria'
+  | 'fileAria'
+  // Reconnect banner
+  | 'sessionExpired'
+  | 'refresh'
+  | 'refreshSessionAria'
+  | 'connectionLostReconnecting'
+  | 'connected'
+  | 'couldNotReconnect'
+  | 'reconnect'
+  | 'retryConnectionManuallyAria'
+  // Element loading state
+  | 'chatLoading';
+
+type LocaleTable = Record<LocaleKey, string>;
+
+/** `en` is the source-of-truth wording — every string verbatim as it shipped
+ *  before this i18n layer existed. Never reword these without a design review;
+ *  changing them changes copy for every English-speaking user. */
+const en: LocaleTable = {
+  tombstone: 'This message was deleted',
+  unsealError: "\u{1F512} This message couldn't be decrypted",
+  unsealErrorAria: "This message couldn't be decrypted",
+  senderYou: 'You',
+  bubbleAriaLabel: 'Message from {sender} at {time}: {body}',
+  addReactionAria: 'Add reaction',
+  retryLoadingMessagesAria: 'Retry loading messages',
+  retry: 'Retry',
+
+  reactionsGroupAria: 'Reactions',
+  chooseReactionAria: 'Choose reaction',
+  youReactedSuffix: ', you reacted',
+
+  composerPlaceholder: 'Type a message…',
+  messageInputAria: 'Message input',
+  sendMessageAria: 'Send message',
+  send: 'Send',
+  messageEmpty: 'Message is empty',
+  sendingMessage: 'Sending message…',
+  messageExceedsLimit: 'Message exceeds character limit',
+  charactersRemaining: '{remaining} characters remaining',
+  retrySendingMessageAria: 'Retry sending message',
+  attachFilesAria: 'Attach files',
+
+  chooseFilesToAttachAria: 'Choose files to attach',
+  cancelUploadOfAria: 'Cancel upload of {name}',
+  uploadingProgressAria: 'Uploading…',
+  announceUploadingFile: 'Uploading {name}',
+  announceFileUploaded: '{name} uploaded',
+  announceUploadFailedFile: 'Upload failed: {name}',
+  uploadFailed: 'Upload failed',
+  queueUploadingCount: '{n} uploading',
+  queueDoneCount: '{n} done',
+  queueFailedCount: '{n} failed',
+
+  attachmentUnavailableAria: 'Attachment: {name} (unavailable)',
+  imageAria: 'Image: {name}, {size}',
+  audioAria: 'Audio: {name}, {size}',
+  fileAria: 'File: {name}, {size}',
+
+  sessionExpired: 'Session expired.',
+  refresh: 'Refresh',
+  refreshSessionAria: 'Refresh session',
+  connectionLostReconnecting: 'Connection lost. Reconnecting… (attempt {n})',
+  connected: 'Connected.',
+  couldNotReconnect: 'Could not reconnect.',
+  reconnect: 'Reconnect',
+  retryConnectionManuallyAria: 'Retry connection manually',
+
+  chatLoading: 'Chat loading…',
+};
+
+/** Russian translations. oxpulse's userbase is heavily RU — this is the first
+ *  non-English locale, so every key ships fully translated (no partial rows). */
+const ru: LocaleTable = {
+  tombstone: 'Это сообщение удалено',
+  unsealError: '\u{1F512} Это сообщение не удалось расшифровать',
+  unsealErrorAria: 'Это сообщение не удалось расшифровать',
+  senderYou: 'Вы',
+  bubbleAriaLabel: 'Сообщение от {sender}, {time}: {body}',
+  addReactionAria: 'Добавить реакцию',
+  retryLoadingMessagesAria: 'Повторить загрузку сообщений',
+  retry: 'Повторить',
+
+  reactionsGroupAria: 'Реакции',
+  chooseReactionAria: 'Выбрать реакцию',
+  youReactedSuffix: ', вы отреагировали',
+
+  composerPlaceholder: 'Введите сообщение…',
+  messageInputAria: 'Поле ввода сообщения',
+  sendMessageAria: 'Отправить сообщение',
+  send: 'Отправить',
+  messageEmpty: 'Сообщение пустое',
+  sendingMessage: 'Отправка сообщения…',
+  messageExceedsLimit: 'Сообщение превышает лимит символов',
+  charactersRemaining: 'Осталось символов: {remaining}',
+  retrySendingMessageAria: 'Повторить отправку сообщения',
+  attachFilesAria: 'Прикрепить файлы',
+
+  chooseFilesToAttachAria: 'Выбрать файлы для прикрепления',
+  cancelUploadOfAria: 'Отменить загрузку {name}',
+  uploadingProgressAria: 'Загрузка…',
+  announceUploadingFile: 'Загрузка {name}',
+  announceFileUploaded: 'Загружено: {name}',
+  announceUploadFailedFile: 'Ошибка загрузки: {name}',
+  uploadFailed: 'Ошибка загрузки',
+  queueUploadingCount: 'загружается: {n}',
+  queueDoneCount: 'готово: {n}',
+  queueFailedCount: 'ошибок: {n}',
+
+  attachmentUnavailableAria: 'Вложение: {name} (недоступно)',
+  imageAria: 'Изображение: {name}, {size}',
+  audioAria: 'Аудио: {name}, {size}',
+  fileAria: 'Файл: {name}, {size}',
+
+  sessionExpired: 'Сессия истекла.',
+  refresh: 'Обновить',
+  refreshSessionAria: 'Обновить сессию',
+  connectionLostReconnecting: 'Соединение потеряно. Переподключение… (попытка {n})',
+  connected: 'Подключено.',
+  couldNotReconnect: 'Не удалось переподключиться.',
+  reconnect: 'Переподключиться',
+  retryConnectionManuallyAria: 'Повторить подключение вручную',
+
+  chatLoading: 'Загрузка чата…',
+};
+
+const LOCALES: Record<Locale, LocaleTable> = { en, ru };
+
+/**
+ * Look up `key` in `table`, falling back to `fallback`'s value, then to the
+ * raw key itself as an absolute last resort. Exported standalone (rather than
+ * inlined in `t()`) so the fallback CHAIN is unit-testable against fixture
+ * tables, independent of the production locale data — which, by design, is
+ * always fully translated (so the "missing key" branch is otherwise
+ * unreachable with real keys until a future key ships ahead of its
+ * translation).
+ */
+export function lookupWithFallback(
+  table: Partial<Record<string, string>>,
+  fallback: Partial<Record<string, string>>,
+  key: string,
+): string {
+  return table[key] ?? fallback[key] ?? key;
+}
+
+/**
+ * Resolve a BCP-47 language tag (the `lang` constructor/attribute option, or
+ * `undefined` when not set) to a supported `Locale`.
+ *
+ * Chain: explicit `lang` → `navigator.language` prefix → `'en'`. Only the
+ * primary subtag is matched (`ru-RU` → `ru`), and any tag we don't ship a
+ * translation for collapses to `en` — never throws, never returns undefined.
+ */
+export function resolveLocale(lang?: string | null): Locale {
+  const raw = lang ?? (typeof navigator !== 'undefined' ? navigator.language : undefined);
+  const prefix = raw?.split('-')[0]?.toLowerCase();
+  return prefix === 'ru' ? 'ru' : 'en';
+}
+
+/**
+ * Translate `key` for `lang`, substituting `{name}` placeholders from `params`.
+ * Falls back to `en` for a key missing from `lang`'s table (see
+ * `lookupWithFallback`); a `lang` outside `SUPPORTED_LOCALES` (reachable only
+ * via a type-unsafe cast, since `Locale` is a closed union) falls back to
+ * `en`'s table entirely.
+ */
+export function t(
+  key: LocaleKey,
+  lang: Locale,
+  params?: Record<string, string | number>,
+): string {
+  const table = LOCALES[lang] ?? LOCALES.en;
+  const template = lookupWithFallback(table, LOCALES.en, key);
+  if (!params) return template;
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match,
+  );
+}

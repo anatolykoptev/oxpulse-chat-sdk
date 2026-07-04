@@ -6,6 +6,7 @@
  */
 
 import { REACTION_EMOJIS, reactionAriaLabel } from '../utils/reaction-types.js';
+import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 
 // ── Constructor options ───────────────────────────────────────────────────────
 
@@ -16,6 +17,8 @@ export interface ReactionPickerOptions {
   onSelect: (emoji: string) => void;
   /** Optional abort signal — when aborted, show() becomes a no-op. */
   signal?: AbortSignal;
+  /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
+  lang?: string;
 }
 
 // ── ReactionPicker ────────────────────────────────────────────────────────────
@@ -35,6 +38,7 @@ export class ReactionPicker {
   #container: HTMLElement;
   #onSelect: (emoji: string) => void;
   #signal: AbortSignal | undefined;
+  #lang: Locale;
   #pickerEl: HTMLElement | null = null;
   #anchorEl: HTMLElement | null = null;
   #outsideClickHandler: ((e: MouseEvent) => void) | null = null;
@@ -50,6 +54,7 @@ export class ReactionPicker {
     this.#container = opts.container;
     this.#onSelect = opts.onSelect;
     this.#signal = opts.signal;
+    this.#lang = resolveLocale(opts.lang);
   }
 
   /**
@@ -158,7 +163,7 @@ export class ReactionPicker {
     el.setAttribute('role', 'dialog');
     // M2: aria-modal=true prevents Tab from escaping dialog (broken dialog pattern fix)
     el.setAttribute('aria-modal', 'true');
-    el.setAttribute('aria-label', 'Choose reaction');
+    el.setAttribute('aria-label', t('chooseReactionAria', this.#lang));
 
     const buttons: HTMLButtonElement[] = [];
 
@@ -166,7 +171,7 @@ export class ReactionPicker {
       const btn = document.createElement('button');
       btn.className = 'oxp-reaction-picker-button';
       btn.textContent = emoji;
-      btn.setAttribute('aria-label', reactionAriaLabel(emoji));
+      btn.setAttribute('aria-label', reactionAriaLabel(emoji, this.#lang));
       btn.type = 'button';
 
       btn.addEventListener('click', () => {

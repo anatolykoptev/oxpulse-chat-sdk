@@ -10,6 +10,7 @@
  */
 
 import { validate, sanitizeFilename } from '../utils/attachments.js';
+import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,8 @@ export interface AttachmentPickerOptions {
   roomId: string;
   container: HTMLElement;
   signal?: AbortSignal;
+  /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
+  lang?: string;
 }
 
 /** Per-file upload state. */
@@ -49,6 +52,7 @@ export class AttachmentPicker {
   readonly #client: AttachmentPickerClient;
   readonly #roomId: string;
   readonly #signal: AbortSignal | undefined;
+  readonly #lang: Locale;
 
   #root: HTMLElement | null = null;
   #input: HTMLInputElement | null = null;
@@ -66,6 +70,7 @@ export class AttachmentPicker {
     this.#client = opts.client;
     this.#roomId = opts.roomId;
     this.#signal = opts.signal;
+    this.#lang = resolveLocale(opts.lang);
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -83,14 +88,14 @@ export class AttachmentPicker {
     input.multiple = true;
     input.accept = 'image/*,audio/*,application/pdf';
     input.className = 'oxp-attachment-input';
-    input.setAttribute('aria-label', 'Choose files to attach');
+    input.setAttribute('aria-label', t('chooseFilesToAttachAria', this.#lang));
     input.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0';
 
     // Visible paperclip button
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'oxp-attachment-btn';
-    btn.setAttribute('aria-label', 'Attach files');
+    btn.setAttribute('aria-label', t('attachFilesAria', this.#lang));
     btn.textContent = '📎';
 
     // Queue list (popover)
@@ -201,7 +206,7 @@ export class AttachmentPicker {
 
     item.status = 'uploading';
     this.#renderQueue();
-    this.#announce(`Uploading ${item.file.name}`);
+    this.#announce(t('announceUploadingFile', this.#lang, { name: item.file.name }));
 
     try {
       // CB2: pass AbortSignal so server-side upload can be cancelled when user clicks ✕.
@@ -217,7 +222,7 @@ export class AttachmentPicker {
       item.progress = 100;
       item.msgId = result.msgId;
       item.attachmentId = result.attachmentId;
-      this.#announce(`${item.file.name} uploaded`);
+      this.#announce(t('announceFileUploaded', this.#lang, { name: item.file.name }));
       // F3: show done row for 2s before removing, so user sees completion feedback.
       this.#renderQueue();
       const timer = setTimeout(() => {
@@ -232,7 +237,7 @@ export class AttachmentPicker {
       if (this.#destroyed) return;
       item.status = 'error';
       item.error = err instanceof Error ? err.message : String(err);
-      this.#announce(`Upload failed: ${item.file.name}`);
+      this.#announce(t('announceUploadFailedFile', this.#lang, { name: item.file.name }));
       this.#dispatchError('upload_failed', item.file.name, item.error);
     }
 
@@ -298,7 +303,7 @@ export class AttachmentPicker {
         const bar = document.createElement('div');
         bar.className = 'oxp-attachment-progress';
         bar.setAttribute('role', 'progressbar');
-        bar.setAttribute('aria-valuetext', 'Uploading…');
+        bar.setAttribute('aria-valuetext', t('uploadingProgressAria', this.#lang));
         row.appendChild(bar);
 
         const errEl = document.createElement('span');
@@ -309,7 +314,7 @@ export class AttachmentPicker {
         const retryBtn = document.createElement('button');
         retryBtn.type = 'button';
         retryBtn.className = 'oxp-attachment-retry';
-        retryBtn.textContent = 'Retry';
+        retryBtn.textContent = t('retry', this.#lang);
         retryBtn.hidden = true;
         retryBtn.addEventListener('click', () => {
           item.status = 'queued';
@@ -323,7 +328,7 @@ export class AttachmentPicker {
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'oxp-attachment-cancel';
-        cancelBtn.setAttribute('aria-label', `Cancel upload of ${safeName}`);
+        cancelBtn.setAttribute('aria-label', t('cancelUploadOfAria', this.#lang, { name: safeName }));
         cancelBtn.textContent = '✕';
         cancelBtn.addEventListener('click', () => {
           // F5: cancel by item reference (captured in closure) — not by filename.
@@ -367,7 +372,7 @@ export class AttachmentPicker {
         }
       } else if (item.status === 'error') {
         if (bar) bar.hidden = true;
-        if (errEl) { errEl.hidden = false; errEl.textContent = item.error ?? 'Upload failed'; }
+        if (errEl) { errEl.hidden = false; errEl.textContent = item.error ?? t('uploadFailed', this.#lang); }
         if (retryBtn) retryBtn.hidden = false;
       } else {
         if (bar) { bar.hidden = false; bar.style.width = `${item.progress}%`; }
@@ -382,9 +387,9 @@ export class AttachmentPicker {
       const done = this.#items.filter(i => i.status === 'done').length;
       const errors = this.#items.filter(i => i.status === 'error').length;
       const parts: string[] = [];
-      if (uploading > 0) parts.push(`${uploading} uploading`);
-      if (done > 0) parts.push(`${done} done`);
-      if (errors > 0) parts.push(`${errors} failed`);
+      if (uploading > 0) parts.push(t('queueUploadingCount', this.#lang, { n: uploading }));
+      if (done > 0) parts.push(t('queueDoneCount', this.#lang, { n: done }));
+      if (errors > 0) parts.push(t('queueFailedCount', this.#lang, { n: errors }));
       this.#liveRegion.textContent = parts.join(', ');
     }
   }

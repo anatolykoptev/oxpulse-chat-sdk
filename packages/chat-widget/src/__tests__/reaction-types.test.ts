@@ -10,6 +10,7 @@ import {
   REACTION_EMOJIS,
   isOwnReaction,
   reactionAriaLabel,
+  reactionButtonAriaLabel,
 } from '../utils/reaction-types.js';
 
 describe('REACTION_EMOJIS', () => {
@@ -77,5 +78,45 @@ describe('reactionAriaLabel', () => {
 
   it('returns "React with emoji" for unknown emoji', () => {
     expect(reactionAriaLabel('🦄')).toBe('React with emoji');
+  });
+
+  // i18n follow-up: lang defaults to 'en' (all assertions above stay green
+  // unchanged); lang='ru' localizes the same emoji set.
+  it('returns the Russian label for lang="ru"', () => {
+    expect(reactionAriaLabel('\u{1F44D}', 'ru')).toBe('Реакция «палец вверх»');
+    expect(reactionAriaLabel('❤️', 'ru')).toBe('Реакция «сердце»');
+  });
+
+  it('falls back to the Russian "emoji" label for an unknown emoji in ru', () => {
+    expect(reactionAriaLabel('🦄', 'ru')).toBe('Реакция «эмодзи»');
+  });
+});
+
+describe('reactionButtonAriaLabel', () => {
+  it('composes emoji + singular count in English', () => {
+    expect(reactionButtonAriaLabel('❤️', 1, false)).toBe('React with heart, 1 reaction');
+  });
+
+  it('composes emoji + plural count in English', () => {
+    expect(reactionButtonAriaLabel('❤️', 3, false)).toBe('React with heart, 3 reactions');
+  });
+
+  it('appends the "you reacted" suffix when isOwn', () => {
+    expect(reactionButtonAriaLabel('❤️', 3, true)).toBe('React with heart, 3 reactions, you reacted');
+  });
+
+  it('applies Russian grammatical plural forms (1 / 2-4 / 5+)', () => {
+    expect(reactionButtonAriaLabel('❤️', 1, false, 'ru')).toBe('Реакция «сердце», 1 реакция');
+    expect(reactionButtonAriaLabel('❤️', 3, false, 'ru')).toBe('Реакция «сердце», 3 реакции');
+    expect(reactionButtonAriaLabel('❤️', 5, false, 'ru')).toBe('Реакция «сердце», 5 реакций');
+  });
+
+  it('applies the ru 11-14 exception (mod-100 wins over mod-10)', () => {
+    expect(reactionButtonAriaLabel('❤️', 11, false, 'ru')).toBe('Реакция «сердце», 11 реакций');
+    expect(reactionButtonAriaLabel('❤️', 21, false, 'ru')).toBe('Реакция «сердце», 21 реакция');
+  });
+
+  it('appends the Russian "you reacted" suffix when isOwn', () => {
+    expect(reactionButtonAriaLabel('❤️', 3, true, 'ru')).toBe('Реакция «сердце», 3 реакции, вы отреагировали');
   });
 });
