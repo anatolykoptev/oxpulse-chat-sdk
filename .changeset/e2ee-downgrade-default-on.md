@@ -32,4 +32,6 @@ No change for clients WITHOUT an `e2ee` provider: plaintext remains a valid auto
 
 Known follow-up (non-security): the per-room `crypto_mode` cache is evicted at subscription teardown,
 but rooms touched only via `list()` without a live subscription are not yet evicted — a client paging
-many distinct rooms accumulates a small (~100 B) per-room entry until it is recreated.
+many distinct rooms accumulates a small (~100 B) per-room entry until it is recreated. RESOLVED by
+CR17-01 (Item A of the CR17 hardening batch): the map is now capped and the oldest no-live-subscription
+entry is evicted on overflow.
