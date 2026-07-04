@@ -188,13 +188,24 @@ jobs:
       # published=false for reasons unrelated to whether the widget needed
       # deploying.)
       #
-      # Fix: run these steps on every push to main / workflow_dispatch, and rely
-      # on the script's own idempotency instead of a gate. `pnpm build:cdn` is a
-      # deterministic build; publish-widget-cdn.mjs's rsync --ignore-existing
-      # makes a re-deploy of an already-published version a byte-level no-op.
-      # The small always-on CI cost (a rebuild + a no-op rsync round-trip on
-      # non-widget releases) buys correctness for the case that matters: a
-      # widget-only version bump reliably reaches the CDN.
+      # Fix: run these steps on every push to main / workflow_dispatch. Correctness
+      # does NOT come from rsync --ignore-existing alone — that only protects the
+      # immutable versioned dir, not the mutable `latest/` pointer (a plain rsync
+      # overwrite). Running unconditionally on a "version" push (pending
+      # changesets, package.json not yet bumped, dist/ not built by this run)
+      # would both (a) fail the build — chat-widget's CDN bundle imports
+      # @oxpulse/chat-sdk's dist/, which only `release:ci`'s `pnpm build` produces
+      # — and (b) if the build somehow succeeded, clobber `latest/` with stale
+      # pre-bump bytes. So:
+      #   - "Build workspace packages" runs unconditionally, BEFORE "Build CDN
+      #     bundle", so chat-sdk's dist/ always exists regardless of which phase
+      #     this run is (fixes the build failure).
+      #   - publish-widget-cdn.mjs itself checks the live CDN (an HTTPS HEAD on
+      #     the versioned URL) before doing anything: if that exact version is
+      #     already deployed, it exits 0 without touching the versioned dir OR
+      #     `latest/`. This is the real idempotency gate (a fact about deployed
+      #     state), not a proxy signal from unrelated packages' publish status —
+      #     see the script header for the reasoning.
       #
       # Soft-skip: if CDN_DEPLOY_KEY secret is absent the publisher logs a
       # clear message and exits 0 — the release is not failed.  This lets the
@@ -205,12 +216,13 @@ jobs:
       # SSH_ORIGINAL_COMMAND whose first token is not "rsync".  Shell commands
       # (mv, rm, cat) are unconditionally refused.
       #
-      # Immutability: widget/<version>/ is deployed with rsync --ignore-existing.
-      # Files already present on the remote are not overwritten — a re-publish of
-      # the same version is a no-op at the byte level.
+      # Immutability: widget/<version>/ is deployed with rsync --ignore-existing
+      # as defense-in-depth. Files already present on the remote are not
+      # overwritten — belt-and-suspenders alongside the HEAD-check above.
       #
-      # latest/: deployed with plain rsync overwrite (intentionally mutable pointer).
-      # Only advanced for stable releases.
+      # latest/: deployed with plain rsync overwrite (intentionally mutable
+      # pointer), but ONLY reached when the HEAD-check found the version absent
+      # — i.e. only on an actual new release, never on a no-op run.
       #
       # Operator setup required (one-time, before this step goes live):
       #   1. Generate ed25519 key pair:
@@ -233,6 +245,15 @@ jobs:
       #                           succeeds on a fresh runner — see
       #                           publish-widget-cdn.mjs header for why this is
       #                           NOT a bare ssh-keyscan (TOFU) call.
+
+      - name: Build workspace packages
+        # Unconditional: chat-widget's CDN bundle imports @oxpulse/chat-sdk's
+        # dist/ (a value import, not types-only), which otherwise only exists
+        # when release:ci's own `pnpm build` ran — i.e. never on a "version"
+        # phase push (pending changesets, publish command not invoked). Without
+        # this, "Build CDN bundle" fails to resolve @oxpulse/chat-sdk on every
+        # ordinary feature merge that carries a changeset.
+        run: pnpm build
 
       - name: Build CDN bundle
         run: pnpm --filter @oxpulse/chat-widget build:cdn

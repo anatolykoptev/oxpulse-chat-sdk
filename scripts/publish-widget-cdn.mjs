@@ -146,6 +146,34 @@ log(`version: ${VERSION}`);
 log(`local sha256(index.js): ${localSha256}`);
 log(`SRI: ${sriAttr}`);
 
+// ── Already-deployed check (the real idempotency gate) ────────────────────────
+// The CI workflow runs this script on every push, not just "a release actually
+// happened" (see release.yml's Phase-3 comment — a proxy signal like another
+// package's npm-publish status can't represent chat-widget's own state). So
+// THIS script is where the "is there actually anything new to do" decision has
+// to live. A live HTTPS HEAD against the CDN is a fact about deployed state,
+// not a proxy — read-only, no secrets needed, safe to run even in DRY_RUN
+// (it can't mutate anything, and DRY_RUN should report what would REALLY
+// happen, including "nothing").
+async function isAlreadyDeployed(version) {
+	const url = `https://cdn.oxpulse.chat/widget/${version}/index.js`;
+	try {
+		const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(10_000) });
+		if (res.status === 200) return true;
+		if (res.status === 404) return false;
+		log(`unexpected HEAD status ${res.status} for ${url} — treating as not-yet-deployed (rsync --ignore-existing still guards the versioned dir if this was wrong)`);
+		return false;
+	} catch (err) {
+		log(`HEAD check failed for ${url} (${err.message ?? err}) — treating as not-yet-deployed (rsync --ignore-existing still guards the versioned dir if this was wrong)`);
+		return false;
+	}
+}
+
+if (await isAlreadyDeployed(VERSION)) {
+	log(`widget/${VERSION}/ is already live — nothing to do (this run is not the one that released this version)`);
+	process.exit(0);
+}
+
 // ── Validate required env (unless dry-run) ────────────────────────────────────
 
 const SSH_KEY_TYPE_RE = /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-\S+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-\S+)\s/;
