@@ -26,14 +26,17 @@ DurableReplayGuard.
   there is no mode-dependent dispatch — the poison gate is the relevant boundary. The gate class is
   now documented at `#assertRoomNotPoisoned`: message-content reads/writes are gated;
   interaction-metadata (reactions / typing / presence / markRead / pins) is cleartext by wire
-  contract and stays EXEMPT (not governed by `crypto_mode`).
+  contract and stays EXEMPT (not governed by `crypto_mode`). `searchByProductRef` (the direct
+  sibling — another bare-array sealed-content read) is likewise gated when scoped to a `roomId`
+  (SEC-CR-17-B-01).
 
 - **Item C — `flushOutbox` dequeues a permanently-failed entry (robustness).** `flushOutbox`'s catch
   swallowed all errors and left the message queued, so a poisoned-room entry (`send` throws
-  `crypto_mode_poisoned`, a non-network error) was retried forever — unlike
-  `sendOptimistic`/`sendTextOptimistic`. It now mirrors that branch: a non-network error (4xx /
-  `crypto_mode_poisoned`) is permanent → dequeue; only network errors stay queued. The outbox holds
-  ciphertext only, so this is a stuck-entry fix, not a confidentiality change.
+  `crypto_mode_poisoned`) was retried forever. It now scrubs ONLY a PERMANENTLY-failed entry
+  (`crypto_mode_*` / `invalid_args` / `unsupported` / `forbidden` / `not_found`); a TRANSIENT failure
+  (`network` / `unauthorized` / `rate_limited` / `server_error`) stays queued for the next flush
+  (SEC-CR-17-C-01 — this is a background durability path with no caller notification, so dropping a
+  retriable ciphertext message would be silent E2EE message loss). The outbox holds ciphertext only.
 
 - **Item D — regression test for co-subscriber crypto-mode eviction.** Locks the `=== 0` guard in
   teardown: two subscribers on one room → first teardown must NOT evict (refCount 2→1), second must
@@ -60,7 +63,9 @@ DurableReplayGuard.
 - **Item G — reconnect-replay: immediate teardown on downgrade + one-page-cap flag (robustness).**
   `replayMissed`'s catch called only `reportError` on a thrown `crypto_mode_mismatch`, so enforcement
   landed a microtask late via the next attach's connected handler. It now tears the subscription down
-  immediately (mirrors the connected handler's contract), so no second stream re-attaches. Also flags
+  immediately (mirrors the connected handler's contract) on `crypto_mode_mismatch` OR
+  `crypto_mode_poisoned` (an already-poisoned room hit during replay — SEC-CR-17-G-02, avoids an
+  endless reconnect loop against a bricked room), so no second stream re-attaches. Also flags
   (`TODO(#43)`, no behavior change) the one-page replay cap: `replayMissed` replays only the first
   page (limit 50); whether >50 missed messages are recovered depends on the oxpulse-chat server
   backfilling the full gap past the re-attach `after_seq` cursor — needs server-team confirmation.

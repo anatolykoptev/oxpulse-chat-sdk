@@ -190,8 +190,43 @@ describe('outbox', () => {
 
     await c.flushOutbox('poison-room');
 
-    // Scrubbed: send threw crypto_mode_poisoned (non-network) → dequeued, not retried.
+    // Scrubbed: send threw crypto_mode_poisoned (permanent) → dequeued, not retried.
     const remaining = await pending('poison-room');
     expect(remaining.every((m) => m.msgId !== 'stuck-1')).toBe(true);
+  });
+
+  // CR17-C-01 (crypto-review HIGH): a TRANSIENT failure (5xx / 429 / network / 401) must
+  // NOT be dropped — flushOutbox is a background durability path with no caller callback, so
+  // dropping a retriable ciphertext message is silent E2EE message loss. Only permanent
+  // failures are scrubbed.
+  it('flushOutbox keeps a transient-failure (5xx / 429) entry queued for the next flush', async () => {
+    await enqueue('room-transient', {
+      msgId: 't-1',
+      roomId: 'room-transient',
+      senderUid: 'u',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+    await enqueue('room-transient', {
+      msgId: 't-2',
+      roomId: 'room-transient',
+      senderUid: 'u',
+      sealedB64: 'BB==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+
+    // send() POSTs fail transiently: 503 (server_error) then 429 (rate_limited).
+    const statuses = [503, 429];
+    let i = 0;
+    globalThis.fetch = vi.fn(async () => new Response('busy', { status: statuses[i++] ?? 503 }));
+
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    await c.flushOutbox('room-transient');
+
+    // Both entries survive — transient failures stay queued.
+    const remaining = await pending('room-transient');
+    expect(remaining.map((m) => m.msgId).sort()).toEqual(['t-1', 't-2']);
   });
 });

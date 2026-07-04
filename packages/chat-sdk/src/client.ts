@@ -46,7 +46,7 @@ import type {
   BatchAppendItem,
   RoomVisibility,
 } from './types.js';
-import { SDKChatBatchError, SDKChatError } from './errors.js';
+import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
 import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
@@ -252,6 +252,25 @@ const DEFAULT_MIN_COMPRESS_BYTES = 256;
  * #poisonedRooms are never touched.
  */
 const ACTIVE_CRYPTO_MODE_MAP_CAP = 256;
+
+/**
+ * CR17-C-01: outbox failure codes that are PERMANENT — a later flushOutbox retry can
+ * never succeed, so the entry is scrubbed instead of retried forever. Everything NOT in
+ * this set — network / unauthorized (refreshable token) / rate_limited (429) /
+ * server_error (5xx, e.g. a deploy) — is TRANSIENT and stays queued for the next flush.
+ * flushOutbox is a background, last-resort durability path with no caller notification, so
+ * this is fail-SAFE by design: an ambiguous failure keeps the ciphertext queued (a queued
+ * message can be re-flushed; a dropped one is silent E2EE message loss).
+ */
+const PERMANENT_OUTBOX_FAILURE_CODES: ReadonlySet<SDKChatErrorCode> = new Set<SDKChatErrorCode>([
+  'crypto_mode_poisoned',
+  'crypto_mode_mismatch',
+  'crypto_mode_undiscovered',
+  'invalid_args',
+  'unsupported',
+  'forbidden',
+  'not_found',
+]);
 
 /**
  * Server-side maximum number of user_ids accepted in a single bulk
@@ -1234,12 +1253,17 @@ export class SDKChatClient {
         // Surface replay failures to the caller; the reconnect flow still re-attaches for
         // transient (network / server) failures.
         reportError(err);
-        // #43: a crypto_mode_mismatch during replay is an ENFORCEMENT signal, not a
-        // transient failure — #resolveRoomCryptoMode has already poisoned the room. Tear
-        // THIS subscription down immediately (mirror the connected handler's contract)
-        // instead of letting the reconnect re-attach and land teardown a microtask later
-        // via the new stream's connected prelude.
-        if (err instanceof SDKChatError && err.code === 'crypto_mode_mismatch') {
+        // #43 + SEC-CR-17-G-02: a crypto_mode enforcement failure during replay is not a
+        // transient error — either #resolveRoomCryptoMode just poisoned this room
+        // (crypto_mode_mismatch), or the room was ALREADY poisoned by a sibling
+        // co-subscriber (#fetchRows → #assertRoomNotPoisoned throws crypto_mode_poisoned).
+        // Tear THIS subscription down immediately (mirror the connected handler's contract)
+        // instead of re-attaching — a re-attach would only re-throw poisoned on the next
+        // replay, an endless reconnect loop against a bricked room.
+        if (
+          err instanceof SDKChatError &&
+          (err.code === 'crypto_mode_mismatch' || err.code === 'crypto_mode_poisoned')
+        ) {
           teardownSubscriber();
         }
       }
@@ -2213,11 +2237,12 @@ export class SDKChatClient {
 
   /**
    * Retry all queued messages for a room (e.g. on reconnect after page reload).
-   * Messages that succeed are dequeued. A message that fails with a NON-network error
-   * (4xx / crypto_mode_poisoned) is also dequeued — that failure is permanent, so
-   * retrying it forever would wedge the outbox (CR17 Item C: mirrors sendOptimistic's
-   * `err.code !== 'network' → dequeue` branch). Only network errors stay queued for the
-   * next flush.
+   * Messages that succeed are dequeued. A message that fails with a PERMANENT error
+   * (crypto_mode_poisoned / 4xx client error — see PERMANENT_OUTBOX_FAILURE_CODES) is
+   * also dequeued, so a truly-undeliverable entry does not retry forever (CR17 Item C).
+   * A TRANSIENT failure (network / 401 / 429 / 5xx) stays queued for the next flush —
+   * this is a background durability path with no caller notification, so dropping a
+   * retriable ciphertext message would be silent E2EE message loss (CR17-C-01).
    */
   async flushOutbox(roomId: string): Promise<void> {
     for (const m of await pending(roomId)) {
@@ -2233,10 +2258,8 @@ export class SDKChatClient {
         await dequeue(roomId, m.msgId);
       } catch (e) {
         const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-        // Permanent failure (4xx / crypto_mode_poisoned) — scrub the entry so a poisoned
-        // room's outbox does not retry forever. A network error is transient: leave it
-        // queued for the next flush attempt.
-        if (err.code !== 'network') {
+        // Scrub ONLY a permanently-failed entry; keep transient failures queued (fail-safe).
+        if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
           await dequeue(roomId, m.msgId);
         }
       }
@@ -2487,6 +2510,15 @@ export class SDKChatClient {
     productRef: string,
     opts?: { roomId?: string; limit?: number },
   ): Promise<MessageRow[]> {
+    // SEC-CR-17-B-01: searchByProductRef returns sealed message-content rows (same gate
+    // class as getThread / list()). When scoped to a single room, fail CLOSED if that room
+    // was poisoned by a prior crypto_mode_mismatch. The cross-room variant (no roomId) has
+    // no single room to gate — its result may include rows from a poisoned room; callers who
+    // need per-room fail-closed must pass roomId. (Documented residual, not a leak: rows come
+    // back sealed and a tampered row fails AEAD on unseal.)
+    if (opts?.roomId) {
+      this.#assertRoomNotPoisoned(opts.roomId);
+    }
     const params = new URLSearchParams({ product_ref: productRef });
     if (opts?.roomId) params.set('room_id', opts.roomId);
     if (opts?.limit !== undefined) params.set('limit', String(opts.limit));

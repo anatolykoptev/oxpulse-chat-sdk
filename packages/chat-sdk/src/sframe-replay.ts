@@ -61,10 +61,15 @@ function idbAvailable(): boolean {
   }
 }
 
-/** Detect the Web Locks API (cross-tab mutual exclusion), mirroring sframe-ratchet's allocator. */
+/**
+ * Detect a USABLE Web Locks API (cross-tab mutual exclusion), mirroring sframe-ratchet's
+ * allocator. Probes `navigator.locks.request` as a function — a partial polyfill exposing
+ * `navigator.locks` without `.request` must NOT pass (persistMerged calls `.request`
+ * directly with no fallback).
+ */
 function locksAvailable(): boolean {
   try {
-    return typeof navigator !== 'undefined' && navigator.locks != null;
+    return typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function';
   } catch {
     return false;
   }

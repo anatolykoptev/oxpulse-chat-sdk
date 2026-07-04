@@ -73,4 +73,29 @@ describe('CR17 Item B — getThread fails closed on a poisoned room', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.seq).toBe(1);
   });
+
+  // SEC-CR-17-B-01 (crypto-review MEDIUM): searchByProductRef is the direct sibling of
+  // getThread — it returns sealed message-content rows from a bare array. When scoped to a
+  // room it must fail closed on that room's poison, same gate class.
+  it('refuses a room-scoped searchByProductRef for a poisoned room', async () => {
+    globalThis.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes('product_ref=')) return makeThreadResponse();
+      // list() → downgrade mismatch → poison.
+      return makeListResponse('AA==', { cryptoMode: 'plaintext' });
+    });
+
+    const c = new SDKChatClient({
+      baseUrl: TEST_BASE_URL,
+      jwt: TEST_JWT,
+      cryptoMode: 'sframe-static',
+    });
+
+    await expect(c.list('room-x', {})).rejects.toMatchObject({ code: 'crypto_mode_mismatch' });
+
+    // Room-scoped search on the poisoned room must refuse (before any search fetch).
+    await expect(
+      c.searchByProductRef('prod-1', { roomId: 'room-x' }),
+    ).rejects.toMatchObject({ code: 'crypto_mode_poisoned' });
+  });
 });
