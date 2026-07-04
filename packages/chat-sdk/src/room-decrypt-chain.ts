@@ -103,7 +103,10 @@ export class RoomDecryptChain {
    * still has draining work, re-opening the concurrent-unseal hole. Any acquire()
    * or append() after a release bumps the generation and cancels its pending
    * delete; the later release schedules the delete that actually fires.
-   * Relies on tasks settling (subscribe()'s 5s unseal timeout guarantees it).
+   * Relies on tasks settling: #appendDecryptTask bounds every task with an abort
+   * deadline AND a force-drain fallback (deadline+grace), so a task ALWAYS settles —
+   * even if a provider ignores the AbortSignal and hangs — and this deferred cleanup
+   * always fires (no leaked entry). See #appendDecryptTask.
    */
   release(roomId: string): void {
     const entry = this.#byRoom.get(roomId);
@@ -131,5 +134,11 @@ export class RoomDecryptChain {
   /** Current live-subscriber count for `roomId` (0 when the room has no entry). */
   refCountOf(roomId: string): number {
     return this.#byRoom.get(roomId)?.refCount ?? 0;
+  }
+
+  /** Number of live room entries (test-only leak assertion: an entry must be removed
+   *  once its chain drains and its last subscriber has released). */
+  entryCount(): number {
+    return this.#byRoom.size;
   }
 }

@@ -119,15 +119,66 @@ directly, off-chain — there is no chain entry to append to and no streamed
 unseal can race it, so a one-shot fetch still delivers every row (and has no
 timeout, unlike the on-chain path's 5s-per-row bound).
 
-**Documented residual (not fixed, by design for now):** the 5s per-row
-timeout is a `Promise.race` that **abandons**, not cancels, a slow unseal —
-the abandoned call keeps running detached while the task settles as an
-`unsealError` and the chain starts the next unseal, so more than one unseal
-CAN be in flight for a >5s case. This is bounded to idempotent
-double-**delivery** (not a replay or confidentiality break) by
-`sframe-ratchet`'s static per-(room, sender) key. The categorical fix is an
-`AbortSignal`-based `CryptoProvider.unseal` interface change, tracked
-separately (see `.changeset/e2ee-scrollback-onchain.md`).
+**Residual — now closed for the concurrent-unseal class
+(`fix/e2ee-unseal-cancel`, `.changeset/e2ee-unseal-cancel.md`).** The 5s per-row
+deadline WAS a `Promise.race` that **abandoned** (did not cancel) a slow unseal:
+the abandoned call kept running detached while the task settled as an
+`unsealError` and the chain started the next unseal, so two unseals COULD be in
+flight for a >5s row. That is fixed with **two bounds**. (1) An `AbortController`
+fires at the abort deadline — passed through the new **optional**
+`CryptoProvider.unseal(sealed, ctx, signal?)` parameter — so a signal-honoring
+provider rejects promptly and the chain advances at the deadline. The task
+**awaits the unseal's real settle** (it no longer races the timeout and abandons
+the loser), so a healthy provider gives **at most one unseal in flight per room**.
+(2) A **force-drain** at `deadline + grace`: if the unseal has STILL not settled
+(a provider that both ignores the signal AND hangs), that one row is bailed as an
+`unsealError` so the chain **drains** — the next unseal runs, `list()` /
+`Promise.all` resolves, and the `RoomDecryptChain` entry is cleaned up. Both bounds
+hold across all three producers (streamed / reconnect-replay / scrollback), which
+funnel through the single `#appendDecryptTask`.
+
+**Honest claim scope (what the `AbortSignal` does and does NOT do).** The built-in
+sframe / WebCrypto provider's decrypt bottoms out at `crypto.subtle.decrypt`
+(AES-GCM), which takes **no** `AbortSignal` and is **atomic — it cannot be
+cancelled mid-flight**. So for the built-in provider the signal is advisory: the
+provider honors it only at its `await` boundaries (before the decrypt, see
+`sframe.ts` `throwIfAborted`), and the one-in-flight guarantee holds not because
+the decrypt is cancelled but because the chain *awaits the real settle* and that
+decrypt is sub-millisecond for chat payloads (so it never even reaches the abort
+deadline). A **cancel-capable** provider (a future worker / streaming /
+KMS-with-abort backend) gets a genuine prompt cancel. The `signal?` parameter is
+**optional and backward-compatible** — a custom `CryptoProvider` that ignores it
+(or predates it, a 2-arg `unseal`) still typechecks and works, just non-cancelling.
+(Implementation note: the built-in provider reuses the stdlib
+`signal.throwIfAborted()`; the client-side deadline uses a manual `AbortController`
++ `setTimeout` rather than `AbortSignal.timeout()` because the latter is not driven
+by the test harness's fake timers.)
+
+**The new, narrower residual (a deliberate, bounded trade-off).** A provider that
+**both** ignores the `AbortSignal` **and** never settles no longer black-holes the
+room: the force-drain bails that one row as `unsealError` at `deadline + grace`,
+the chain drains, `list()` resolves, and the `RoomDecryptChain` entry is removed
+(no Map leak, no room-wide black-hole for the client's lifetime). The residual is
+narrowed to two bounded facts: (a) for that genuinely-stuck row, the orphaned
+unseal stays *pending* (JS cannot cancel a live promise) while the chain advances,
+so `maxInFlight` can transiently reach 2 — but only for a row that already crossed
+`deadline + grace`, and the orphan is *parked* (not progressing, not racing the
+ratchet); its late result is dropped by a `settled` guard, so it can never
+re-deliver or advance the chain. (b) the orphaned continuation (its captured row /
+callback) lives until the provider's own operation eventually settles — inherent,
+since only the provider honoring the signal can release it. Both are contained
+per-room (rooms are independent) and **observable**: `#appendDecryptTask` emits a
+distinct `deadline` warn at the abort bound and a distinct `force-drain` warn at
+the hard bound. The built-in providers effectively never trigger this (sub-ms
+decrypt, fast durable steps); the one theoretical exception is a durable-replay
+IndexedDB write hanging past the grace, which would force-drain an
+*already-decrypted* row as `unsealError` — a data-loss/UX edge only, not a replay
+or confidentiality break (the CTR the durable window already recorded is never
+re-accepted, and per-message keys mean no ratchet desync). A **late-but-successful** unseal (a non-cancelling provider
+that finishes *within* the grace) delivers its **real plaintext in order** — never
+re-delivered, never discarded. The **off-chain** `list()` path (a room with no live
+subscription) is unchanged: it has no chain to violate and, by design, no deadline
+(a stuck row there still hangs that one fetch — pre-existing, tracked separately).
 
 ---
 

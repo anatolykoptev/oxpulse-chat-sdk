@@ -107,7 +107,13 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
       return result.slice().buffer as ArrayBuffer;
     },
 
-    async unseal(sealed: ArrayBuffer, ctx: SealContext): Promise<ArrayBuffer> {
+    async unseal(sealed: ArrayBuffer, ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer> {
+      // Advisory cancel: the SDK aborts `signal` at its per-row deadline. We honor it
+      // (stdlib signal.throwIfAborted) only at await boundaries, because the AES-GCM
+      // decrypt below is atomic and non-cancellable; an abort during a slow durable step
+      // skips the uncancellable decrypt entirely. Once the decrypt has run we complete
+      // normally (record + return) — a valid plaintext is never discarded.
+      signal?.throwIfAborted();
       const bytes = new Uint8Array(sealed);
 
       // Durable pre-filter: reject a CTR we have already accepted (survives page reload).
@@ -142,6 +148,9 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
         }
       }
 
+      // Last chance to skip the (uncancellable) decrypt if the deadline fired during
+      // the durable pre-filter above. Past this point the decrypt runs to completion.
+      signal?.throwIfAborted();
       const result = await inner.unseal(bytes, ctx);
 
       // Record ONLY after a successful AEAD verify (inner.unseal throws on forgery / in-session

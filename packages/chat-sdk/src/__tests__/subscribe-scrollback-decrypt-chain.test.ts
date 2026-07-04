@@ -54,7 +54,7 @@ interface RoomTrackingProvider extends CryptoProvider {
   releaseAll(): void;
 }
 
-function makeRoomTrackingProvider(): RoomTrackingProvider {
+function makeRoomTrackingProvider(honorSignal = true): RoomTrackingProvider {
   const resolvers = new Map<string, () => void>();
   const p: RoomTrackingProvider = {
     inFlightByRoom: new Map(),
@@ -63,18 +63,38 @@ function makeRoomTrackingProvider(): RoomTrackingProvider {
     async seal(plaintext: ArrayBuffer, _ctx: SealContext): Promise<ArrayBuffer> {
       return plaintext;
     },
-    unseal(sealed: ArrayBuffer, ctx: SealContext): Promise<ArrayBuffer> {
+    unseal(sealed: ArrayBuffer, ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer> {
       const seq = new Uint8Array(sealed)[0] ?? 0;
       const room = ctx.roomId;
       const now = (p.inFlightByRoom.get(room) ?? 0) + 1;
       p.inFlightByRoom.set(room, now);
       p.maxInFlightByRoom.set(room, Math.max(p.maxInFlightByRoom.get(room) ?? 0, now));
       p.startedOrder.push({ room, seq });
-      return new Promise<ArrayBuffer>((resolve) => {
-        resolvers.set(`${room}:${seq}`, () => {
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        let settled = false;
+        const dec = (): void => {
+          if (settled) return;
+          settled = true;
           p.inFlightByRoom.set(room, (p.inFlightByRoom.get(room) ?? 1) - 1);
+        };
+        resolvers.set(`${room}:${seq}`, () => {
+          dec();
           resolve(new Uint8Array([seq]).buffer);
         });
+        // Signal-honoring (default): the SDK's abort deadline rejects a stuck unseal so a
+        // hung scrollback row bails at the deadline. Inert for tests that release before
+        // the deadline. honorSignal=false models a provider that IGNORES the abort — it
+        // hangs until the SDK's force-drain bound bails the row (fix/e2ee-unseal-cancel).
+        if (honorSignal) {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              dec();
+              reject(signal.reason ?? new Error('aborted'));
+            },
+            { once: true },
+          );
+        }
       });
     },
     maxFor(room: string): number {
@@ -387,6 +407,45 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
     expect(res.items.map((r) => r.seq)).toEqual([2]);
     expect(res.items[0]!.unsealError).toBe('unknown');
     expect(res.items[0]!.plaintext).toBeUndefined();
+
+    provider.releaseAll();
+    await flushMicrotasks();
+  });
+
+  it('on-chain scrollback: list() RESOLVES via force-drain even if the provider IGNORES the abort and never settles (no list() hang)', async () => {
+    // The HIGH the pr-council caught for the scrollback path: awaiting the real settle
+    // without a bound makes #unsealRowsOnChain's Promise.all — and thus the public
+    // list() promise — hang forever on a non-honoring stuck provider. The force-drain
+    // bounds it: the row bails as unsealError and list() resolves.
+    const room = 'room-scrollback-forcedrain';
+    const provider = makeRoomTrackingProvider(false); // ignores the abort; never released
+    const es = installMockEventSource();
+    const pageByRoom = new Map<string, unknown[]>();
+    installFetchRouter(pageByRoom);
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    client.subscribe(room, { onMessage: vi.fn() });
+    await settleInitialSubscribe();
+
+    pageByRoom.set(room, [listRow(2)]);
+    const listPromise = client.list(room, { beforeSeq: 100 });
+    await flushMicrotasks();
+    expect(provider.inFlightByRoom.get(room)).toBe(1);
+
+    // Deadline (5s) alone: the abort is ignored, the unseal is still hung, list() not resolved.
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushMicrotasks();
+    expect(provider.maxFor(room)).toBe(1);
+
+    // Cross the force-drain bound (deadline+grace = 10s) → the row bails, Promise.all
+    // resolves, list() resolves (RED against #25 code — list() would hang forever here).
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushMicrotasks();
+    const res = await listPromise;
+    expect(res.items.map((r) => r.seq)).toEqual([2]);
+    expect(res.items[0]!.unsealError).toBe('unknown');
+    expect(res.items[0]!.plaintext).toBeUndefined();
+    expect(provider.maxFor(room)).toBe(1);
 
     provider.releaseAll();
     await flushMicrotasks();

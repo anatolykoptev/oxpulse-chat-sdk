@@ -167,6 +167,21 @@ function classifyUnsealError(err: unknown): 'replay' | 'auth' | 'unknown' {
   return 'unknown';
 }
 
+/**
+ * Per-row unseal ABORT deadline (ms). At this point the chain fires an AbortController
+ * passed to provider.unseal so a signal-honoring provider settles promptly and the room
+ * advances. The built-in WebCrypto decrypt is sub-ms and never reaches this.
+ */
+const DECRYPT_DEADLINE_MS = 5000;
+/**
+ * Grace after the abort deadline before the chain FORCE-DRAINS a still-unsettled unseal
+ * (a provider that both ignores the AbortSignal and hangs). At `DECRYPT_DEADLINE_MS +
+ * DECRYPT_FORCE_DRAIN_GRACE_MS` the row is bailed as unsealError so the room's chain
+ * drains (bounded) instead of black-holing. The grace lets a slow-but-eventually-settling
+ * provider (e.g. a KMS round-trip) deliver its real plaintext rather than being dropped.
+ */
+const DECRYPT_FORCE_DRAIN_GRACE_MS = 5000;
+
 // ─── Phase 2: crypto_mode helpers ────────────────────────────────────────────
 
 /**
@@ -592,6 +607,15 @@ export class SDKChatClient {
   }
 
   /**
+   * @internal test-only: number of live per-room decrypt-chain entries. Lets tests
+   * assert the chain DRAINS + its entry is cleaned up after a force-drain (no Map leak)
+   * without exposing the private field. Not exported/stable.
+   */
+  _decryptChainSize(): number {
+    return this.#decryptChain.entryCount();
+  }
+
+  /**
    * W6 E2EE: encrypt text and send as a sealed message.
    *
    * Requires e2ee to be configured in the constructor options.
@@ -832,10 +856,11 @@ export class SDKChatClient {
       //
       // Timeout ASYMMETRY (by design, same list() call, different failure
       // semantics by subscription state): the on-chain path (refCount > 0)
-      // inherits #appendDecryptTask's 5s per-row timeout — a stuck row bails with
-      // an unsealError so the chain drains — whereas the off-chain path
-      // (refCount 0) awaits provider.unseal with NO timeout and hangs the fetch
-      // indefinitely on a stuck row (unchanged from before this fix). See the
+      // inherits #appendDecryptTask's abort-deadline + force-drain bound — a stuck
+      // row is aborted at the deadline and, if it still hasn't settled, bailed as an
+      // unsealError at deadline+grace so the chain drains (bounded) — whereas the
+      // off-chain path (refCount 0) awaits provider.unseal with NO bound and hangs the
+      // fetch indefinitely on a stuck row (unchanged from before this fix). See the
       // changeset for the caller-facing note.
       if (this.#decryptChain.refCountOf(roomId) > 0) {
         items = await this.#unsealRowsOnChain(roomId, rawItems);
@@ -876,23 +901,45 @@ export class SDKChatClient {
 
   /**
    * Append a per-room serial decrypt task onto the room's #decryptChain: unseal
-   * `mappedRow` (5s timeout) then deliver via `onMessage`. The task NEVER rejects
+   * `mappedRow`, deliver via `onMessage`, exactly once. The task NEVER rejects
    * (unseal failure → unsealError; a throwing onMessage is caught) so a link can't
    * poison the room's chain. Shared by the live subscribe() SSE stream, the
    * reconnect replay path (SEC-CR-14-01), and list() scrollback (SEC-CR-14-02) so
    * all three serialize on the SAME queue.
    *
-   * The at-most-one-unseal-in-flight invariant holds for unseal calls that SETTLE
-   * within the 5s timeout. It is NOT categorical: the timeout is a `Promise.race`,
-   * which ABANDONS (does not cancel) a slow unseal — a >5s unseal keeps running
-   * detached while this task settles (as an unsealError) and the chain starts the
-   * next task's unseal, so two unseals can be in flight for the room. That residual
-   * is pre-existing across all three call sites, and is bounded to idempotent
-   * double-DELIVERY by sframe-ratchet's static per-(room,sender) key (NOT a replay
-   * or confidentiality break). A genuine AbortSignal cancel would need a
-   * CryptoProvider.unseal interface change across every implementer — tracked
-   * separately. The `isTimeout` branch below emits a DISTINCT warn so a real >5s
-   * abandonment is observable in prod, not silently folded into unsealError.
+   * Two bounds (fix/e2ee-unseal-cancel), reconciling one-in-flight with bounded-drain:
+   *   1. **Abort deadline (`DEADLINE_MS`)** — an AbortController fired at the deadline
+   *      and passed to `provider.unseal`. A signal-honoring provider (a future worker /
+   *      streaming / KMS-with-abort backend, or the built-in provider at its await
+   *      boundaries) rejects promptly, so the chain advances at the deadline without
+   *      waiting the full grace. The task AWAITS the unseal's REAL settle (no
+   *      Promise.race that abandons the loser), so a healthy provider gives strictly
+   *      **at most one unseal in flight per room** — the built-in WebCrypto decrypt is
+   *      atomic + non-cancellable but sub-ms, so it never even reaches the deadline.
+   *   2. **Force-drain bound (`DEADLINE_MS + GRACE_MS`)** — if the unseal has STILL not
+   *      settled by deadline+grace (a provider that both ignores the AbortSignal AND
+   *      hangs), this ONE row is bailed as `unsealError` so the chain **drains**: the
+   *      next unseal runs, `list()`/`Promise.all` resolves, `RoomDecryptChain`'s entry
+   *      is cleaned up (no Map leak / no room-wide black-hole). The stuck unseal is
+   *      orphaned; the `settled` guard drops its late result so it can neither
+   *      re-deliver nor advance the chain / room ratchet-observable state.
+   *
+   * So: healthy provider (incl. built-in) → strict one-in-flight, real plaintext in
+   * order; genuinely-stuck non-honoring provider → that one row lost as `unsealError`,
+   * chain bounded-drains after grace, contained per-room (rooms are independent). The
+   * ONLY inherent residual is that JS cannot cancel a still-pending promise, so a
+   * hang-forever provider leaks its own orphaned unseal continuation (one per
+   * force-drained row) until IT settles — honoring the signal is what releases it.
+   * Each timer boundary emits a distinct warn (repo rule: a decrypt failure must log
+   * or bump a metric; the SDK has no metric seam, so a warn in the existing idiom).
+   *
+   * NOTE on the deadline timer: a manual `AbortController` + `setTimeout` is used
+   * rather than `AbortSignal.timeout()` because the latter is NOT controllable by the
+   * test harness's fake timers (empirically: `vi.advanceTimersByTimeAsync` does not
+   * fire it, and `toFake: ['AbortSignal']` does not bridge it), and a manual
+   * force-drain `setTimeout` is required regardless (there is no stdlib
+   * "resolve-after-timeout"). The stdlib `signal.throwIfAborted()` IS reused inside
+   * the built-in provider (`sframe.ts`), where it is timer-independent.
    *
    * `source` tags the log line (e.g. 'decrypt task' for the stream, 'list()
    * scrollback' for pagination) so a failure's origin is legible in triage.
@@ -909,41 +956,92 @@ export class SDKChatClient {
   ): void {
     const provider = this.#cryptoProvider;
     if (provider === null) return;
+    const deadlineMs = DECRYPT_DEADLINE_MS;
+    const forceDrainMs = deadlineMs + DECRYPT_FORCE_DRAIN_GRACE_MS;
     this.#decryptChain.append(roomId, async () => {
       const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
-      const timeoutMs = 5000;
-      const timeoutPromise = new Promise<ArrayBuffer>((_res, rej) =>
-        setTimeout(() => rej(new Error('unseal timeout')), timeoutMs),
-      );
-      let out: MessageRow;
-      try {
-        const plaintext = await Promise.race([
-          provider.unseal(mappedRow.sealed, ctx),
-          timeoutPromise,
-        ]);
-        out = { ...mappedRow, plaintext };
-      } catch (err) {
-        const isTimeout = err instanceof Error && err.message === 'unseal timeout';
-        if (isTimeout) {
-          // A real >5s timeout: the unseal was ABANDONED (Promise.race does not
-          // cancel it) and is still running detached, so the chain's next unseal
-          // may now start concurrently. Distinct signal (repo rule: a
-          // write/decrypt failure must log or bump a metric; the SDK has no
-          // metric seam, so a warn in the existing idiom) so this is not silent.
-          console.warn(
-            `[chat-sdk] ${source}: unseal TIMED OUT after ${timeoutMs}ms (abandoned, still running detached) for seq`,
-            mappedRow.seq,
-          );
-        } else {
-          console.warn(`[chat-sdk] ${source}: unseal failed for seq`, mappedRow.seq, err);
+
+      // The row is delivered exactly once, by whichever fires first: the real unseal
+      // settle, or the force-drain bound. `settled` gates every delivery site so a
+      // late orphaned unseal (a hung non-honoring provider) can neither re-deliver nor
+      // advance the chain.
+      let settled = false;
+      let out: MessageRow | null = null;
+      const settleWith = (row: MessageRow): boolean => {
+        if (settled) return false;
+        settled = true;
+        out = row;
+        return true;
+      };
+
+      // (1) Abort deadline: ask the provider to stop. A signal-honoring provider
+      // rejects promptly so the chain advances at the deadline; the built-in provider
+      // honors it at its await boundaries. Manual AbortController (not
+      // AbortSignal.timeout) so the test harness's fake timers can drive it.
+      const controller = new AbortController();
+      const deadlineTimer = setTimeout(() => {
+        controller.abort(new DOMException(`unseal deadline exceeded (${deadlineMs}ms)`, 'TimeoutError'));
+        console.warn(
+          `[chat-sdk] ${source}: unseal exceeded ${deadlineMs}ms deadline; signalling abort (delivers normally if it still settles within the force-drain grace) for seq`,
+          mappedRow.seq,
+        );
+      }, deadlineMs);
+
+      // (2) Force-drain bound: if the unseal has STILL not settled by deadline+grace,
+      // bail this ONE row as unsealError so the chain DRAINS (bounded) instead of
+      // black-holing the room for the client's lifetime. The stuck unseal is orphaned
+      // (JS cannot cancel a pending promise); the `settled` guard drops its late result.
+      let forceDrainTimer: ReturnType<typeof setTimeout> | undefined;
+      const forceDrain = new Promise<void>((resolve) => {
+        forceDrainTimer = setTimeout(() => {
+          if (settleWith({ ...mappedRow, unsealError: 'unknown', plaintext: undefined })) {
+            console.warn(
+              `[chat-sdk] ${source}: unseal did not settle within ${forceDrainMs}ms; force-draining the room chain (row lost as unsealError, stuck unseal orphaned) for seq`,
+              mappedRow.seq,
+            );
+          }
+          resolve();
+        }, forceDrainMs);
+      });
+
+      // Run the unseal; it delivers only if the force-drain has not already claimed
+      // this row (the `settled` guard). It catches internally so a hung, later-settling
+      // provider never surfaces an unhandled rejection.
+      const runUnseal = (async (): Promise<void> => {
+        try {
+          const plaintext = await provider.unseal(mappedRow.sealed, ctx, controller.signal);
+          settleWith({ ...mappedRow, plaintext });
+        } catch (err) {
+          if (settled) return; // force-drain already delivered this row → drop the late error
+          // Suppress the generic warn only for OUR abort (identified by its own reason),
+          // NOT by elapsed time: a genuine AEAD/replay error — even one surfacing after
+          // the deadline — keeps its logged detail and its own classification.
+          if (err !== controller.signal.reason) {
+            console.warn(`[chat-sdk] ${source}: unseal failed for seq`, mappedRow.seq, err);
+          }
+          settleWith({ ...mappedRow, unsealError: classifyUnsealError(err), plaintext: undefined });
         }
-        out = { ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined };
-      }
-      // Deliver exactly once, AFTER the try/catch, so a throwing caller callback
-      // neither re-delivers the row as an unseal error nor rejects the link (which
-      // would wedge the room's serial chain).
+      })();
+
+      // Advance when the FIRST of (unseal settles | force-drain fires) delivers. For a
+      // hung provider `runUnseal` never resolves, so the force-drain arm is what lets
+      // the chain drain.
       try {
-        onMessage(out);
+        await Promise.race([runUnseal, forceDrain]);
+      } finally {
+        // On the healthy path both timers are cleared so no deadline/force-drain timer
+        // (and its captured closure) lingers; clearTimeout on an already-fired timer is a
+        // safe no-op.
+        clearTimeout(deadlineTimer);
+        clearTimeout(forceDrainTimer);
+      }
+
+      // Deliver exactly once, AFTER the race, so a throwing caller callback neither
+      // re-delivers the row as an unseal error nor rejects the link (which would wedge
+      // the room's serial chain). `out` is always set — the race resolves only via a
+      // settleWith() call.
+      try {
+        onMessage(out!);
       } catch (cbErr) {
         console.warn(`[chat-sdk] ${source}: onMessage threw for seq`, mappedRow.seq, cbErr);
       }
