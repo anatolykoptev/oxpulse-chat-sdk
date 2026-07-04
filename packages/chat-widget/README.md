@@ -11,8 +11,8 @@ for production. The `crossorigin` attribute is **required** when `integrity` is 
 
 ```html
 <script type="module"
-  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
-  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  src="https://cdn.oxpulse.chat/widget/0.4.0/index.js"
+  integrity="sha384-PnbVBbsLURwmH6l5DUgolRHP4H+u4slfzLMjNwCb+vf4VcuW9LQRDK85Sjv6fFwz"
   crossorigin="anonymous"></script>
 
 <oxpulse-chat
@@ -22,7 +22,7 @@ for production. The `crossorigin` attribute is **required** when `integrity` is 
 </oxpulse-chat>
 ```
 
-**Versioning.** Pin to a specific version path (`/widget/0.3.0/`) in production.
+**Versioning.** Pin to a specific version path (`/widget/0.4.0/`) in production.
 `/widget/latest/` resolves to the current release and is provided for convenience only —
 do not use it where SRI or reproducible deployments matter.
 
@@ -38,8 +38,15 @@ Content-Security-Policy:
 If your policy restricts `wasm-unsafe-eval` or `script-src` to a `'nonce-…'`-only list,
 add `https://cdn.oxpulse.chat` explicitly or use the npm+bundler path instead.
 
-> **Note:** The npm package channel (`@oxpulse/chat-widget` on npmjs.com) is not yet
-> bootstrapped. The CDN `<script>` tag is the primary embed channel for 0.x.
+### npm (bundler / framework projects)
+
+```
+npm install @oxpulse/chat-widget
+```
+
+The CDN `<script>` tag above remains the primary embed channel for zero-build pages;
+use npm when your project already goes through a bundler (React/Vue/Svelte examples below)
+or when CSP forbids adding `https://cdn.oxpulse.chat` to `script-src`.
 
 ### React
 

@@ -2,9 +2,9 @@
 
 Embeddable group chat for web applications. This monorepo contains three packages:
 
-- **`@oxpulse/wire-codec`** v0.3.1 — CBOR+zstd binary message codec for the OxPulse chat wire protocol
-- **`@oxpulse/chat-sdk`** v1.6.0 — core chat client: rooms, messages, SSE subscribe, E2EE, reactions, and member management
-- **`@oxpulse/chat-widget`** v0.3.1 — zero-dependency embeddable UI widget (Custom Element + iframe modes) built on top of `chat-sdk`. CDN delivery is **live**: `https://cdn.oxpulse.chat/widget/0.3.1/index.js` (HTTP 200, immutable, CORS `*`). The npm channel is not yet bootstrapped — CDN `<script>` tag is the primary embed path for 0.x.
+- **`@oxpulse/wire-codec`** v0.4.0 — CBOR+zstd binary message codec for the OxPulse chat wire protocol
+- **`@oxpulse/chat-sdk`** v2.0.0 — core chat client: rooms, messages, SSE subscribe, E2EE, reactions, and member management
+- **`@oxpulse/chat-widget`** v0.4.0 — zero-dependency embeddable UI widget (Custom Element + iframe modes) built on top of `chat-sdk`. Available both via CDN (`https://cdn.oxpulse.chat/widget/0.4.0/index.js`, HTTP 200, immutable, CORS `*`) and npm (`npm install @oxpulse/chat-widget`) — CDN `<script>` tag remains the primary embed path for zero-build pages.
 
 ## Documentation
 
