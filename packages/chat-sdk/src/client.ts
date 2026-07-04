@@ -480,6 +480,16 @@ export class SDKChatClient {
   /**
    * SEC-CR-001: fail CLOSED for a single poisoned room. A room poisoned by a prior
    * crypto_mode_mismatch refuses send/list/subscribe; sibling rooms are unaffected.
+   *
+   * Gate class = MESSAGE-CONTENT reads/writes (anything carrying or returning sealed_b64
+   * whose interpretation crypto_mode governs): send / sendText / sendFile / sendProductCard /
+   * updateMessage / batchAppend / #fetchRows (list) / subscribe / getThread. A proven
+   * downgrade must fail these closed.
+   *
+   * EXEMPT tier = INTERACTION-METADATA, cleartext by wire contract and NOT governed by
+   * crypto_mode: sendReaction / removeReaction / sendTyping / sendPresence / markRead /
+   * pinMessage / unpinMessage / listPins. Intentionally NOT gated — a poisoned room's
+   * sealed content is refused, but its cleartext metadata channel is not message content.
    */
   #assertRoomNotPoisoned(roomId: string): void {
     if (this.#poisonedRooms.has(roomId)) {
@@ -1720,8 +1730,18 @@ export class SDKChatClient {
    * Wire-contract: GET /api/sdk/rooms/:room_id/threads/:root_msg_id
    * Returns: Array<MessageRow> sorted by seq ascending (server-side ORDER BY seq).
    * Requires scope: chat:read:<room_id>.
+   *
+   * SEC-CR-17-02: fails CLOSED for a poisoned room — a thread is message content, so it
+   * belongs to the same gate class as list()/#fetchRows (a room proven to have a
+   * downgraded/tampered crypto_mode must not keep serving its content). Unlike list(),
+   * getThread does NOT resolve crypto_mode: the threads endpoint returns a BARE JSON array
+   * with no per-response crypto_mode field (crates/sdk/src/messages/dtos.rs — only list()'s
+   * page wrapper carries it), and getThread returns rows with `sealed` intact (the caller
+   * unseals), so there is no plaintext-vs-sframe dispatch that would need the mode. The
+   * poison gate is the relevant boundary here.
    */
   async getThread(roomId: string, rootMsgId: string): Promise<MessageRow[]> {
+    this.#assertRoomNotPoisoned(roomId);
     let resp: Response;
     try {
       resp = await fetch(
