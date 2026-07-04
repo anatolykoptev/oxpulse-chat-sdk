@@ -2196,8 +2196,11 @@ export class SDKChatClient {
 
   /**
    * Retry all queued messages for a room (e.g. on reconnect after page reload).
-   * Messages that succeed are dequeued. Messages that fail are left in the outbox.
-   * Errors are silently swallowed — caller can retry again later.
+   * Messages that succeed are dequeued. A message that fails with a NON-network error
+   * (4xx / crypto_mode_poisoned) is also dequeued — that failure is permanent, so
+   * retrying it forever would wedge the outbox (CR17 Item C: mirrors sendOptimistic's
+   * `err.code !== 'network' → dequeue` branch). Only network errors stay queued for the
+   * next flush.
    */
   async flushOutbox(roomId: string): Promise<void> {
     for (const m of await pending(roomId)) {
@@ -2211,8 +2214,14 @@ export class SDKChatClient {
           threadRootMsgId: m.threadRootMsgId,
         });
         await dequeue(roomId, m.msgId);
-      } catch {
-        // Leave queued for next flush attempt.
+      } catch (e) {
+        const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
+        // Permanent failure (4xx / crypto_mode_poisoned) — scrub the entry so a poisoned
+        // room's outbox does not retry forever. A network error is transient: leave it
+        // queued for the next flush attempt.
+        if (err.code !== 'network') {
+          await dequeue(roomId, m.msgId);
+        }
       }
     }
   }

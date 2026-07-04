@@ -149,4 +149,49 @@ describe('outbox', () => {
     const remaining = await pending('room2');
     expect(remaining.every((m) => m.msgId !== 'flush-msg-1')).toBe(true);
   });
+
+  // CR17 Item C: flushOutbox's catch swallowed ALL errors and left the entry queued,
+  // so a poisoned-room outbox entry (send throws crypto_mode_poisoned, a non-network
+  // error) would be retried forever. Mirror sendOptimistic: a non-network error is
+  // permanent → dequeue.
+  it('flushOutbox dequeues a poisoned-room entry instead of retrying forever', async () => {
+    globalThis.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes('/api/sdk/messages?')) {
+        // list() → downgrade mismatch → poison the room.
+        return new Response(
+          JSON.stringify({ items: [], has_more: false, next_cursor: null, crypto_mode: 'plaintext' }),
+          { status: 200 },
+        );
+      }
+      // A POST send would land here, but #assertRoomNotPoisoned throws before any fetch.
+      return new Response(JSON.stringify({ seq: 1, msg_id: 'x', created_at: 0 }), { status: 200 });
+    });
+
+    const c = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      cryptoMode: 'sframe-static',
+      _testNoSleep: true,
+    });
+
+    // Poison the room.
+    await expect(c.list('poison-room', {})).rejects.toMatchObject({ code: 'crypto_mode_mismatch' });
+
+    // A queued outbox entry for the now-poisoned room.
+    await enqueue('poison-room', {
+      msgId: 'stuck-1',
+      roomId: 'poison-room',
+      senderUid: 'u',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+
+    await c.flushOutbox('poison-room');
+
+    // Scrubbed: send threw crypto_mode_poisoned (non-network) → dequeued, not retried.
+    const remaining = await pending('poison-room');
+    expect(remaining.every((m) => m.msgId !== 'stuck-1')).toBe(true);
+  });
 });
