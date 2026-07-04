@@ -172,11 +172,55 @@ jobs:
           TRUSTED_PUBLISH: '1'
 
       # ── CDN publish (Phase 3) ────────────────────────────────────────────────
-      # Runs ONLY on the publish phase (no pending changesets → packages were
-      # just bumped and npm-published). Gated on steps.changesets.outputs.published
-      # == 'true', which is set by changesets/action when the publish script emits
-      # "New tag: <pkg>@<version>" lines (release-npm-packages.mjs now emits these
-      # on every successful OIDC publish).
+      # Deliberately UNGATED on steps.changesets.outputs.published. That output
+      # reflects whether release-npm-packages.mjs emitted a "New tag:" line for
+      # wire-codec/chat-sdk — it says nothing about chat-widget specifically:
+      #   - chat-widget is in SOFT_PACKAGES_OIDC (not yet bootstrapped on npm),
+      #     so it NEVER emits "New tag:" — it structurally cannot make
+      #     `published` true on its own.
+      #   - wire-codec/chat-sdk report published=true only when THEIR version
+      #     changed. A release that bumps ONLY chat-widget (no sdk/codec churn)
+      #     would leave published=false, permanently skipping the CDN deploy for
+      #     the one package that actually needs it.
+      # (This was found the hard way: the first real CDN deploy attempt gated
+      # on this signal and silently skipped, because at that moment sdk/codec
+      # were already at registry-parity and widget was still un-bootstrapped —
+      # published=false for reasons unrelated to whether the widget needed
+      # deploying.)
+      #
+      # Fix: run these steps on every push to main / workflow_dispatch. Two
+      # separate problems needed separate fixes:
+      #   (a) chat-widget's CDN bundle imports @oxpulse/chat-sdk's dist/, which
+      #       only `release:ci`'s `pnpm build` produces — never built on a
+      #       "version" phase push (pending changesets, publish not invoked).
+      #       Fixed by "Build workspace packages" below, running UNCONDITIONALLY
+      #       before "Build CDN bundle", so dist/ always exists regardless of
+      #       which phase this run is.
+      #   (b) `latest/` is a mutable plain-rsync-overwrite pointer (no
+      #       --ignore-existing) — running its update unconditionally would
+      #       clobber it with un-released, pre-bump bytes during the entire
+      #       Version-PR window. Fixed INSIDE publish-widget-cdn.mjs: it probes
+      #       the live CDN (an HTTPS HEAD on the versioned URL) and advances
+      #       `latest/` ONLY when that probe confirms the version was absent
+      #       beforehand (a genuinely new release) — never on "already live" or
+      #       on an indeterminate/network-error result. The versioned dir itself
+      #       is NOT gated on this probe — it deploys unconditionally on every
+      #       run, relying solely on --ignore-existing (no-op when complete,
+      #       self-heals a partial prior deploy). See the script header and
+      #       probeDeployedState()'s doc comment for the full reasoning,
+      #       including the known residual: if the ONE run that would have seen
+      #       "absent" instead sees an indeterminate result (a CDN network
+      #       blip), `latest/` can be stranded on the previous version with no
+      #       automatic recovery — the script emits a GHA ::warning:: annotation
+      #       specifically on that indeterminate case (never on the routine
+      #       "already live" case, which would cry wolf on every ordinary push)
+      #       so a genuine strand is operator-visible without opening the raw
+      #       log, rather than silently retrying forever (a full self-heal for
+      #       `latest/` itself would need a
+      #       public read-and-compare against the remote's currently-live
+      #       version, which isn't determinable from the versioned-dir's
+      #       immutable-SRI alone — judged not worth the added complexity for
+      #       how rare the window is).
       #
       # Soft-skip: if CDN_DEPLOY_KEY secret is absent the publisher logs a
       # clear message and exits 0 — the release is not failed.  This lets the
@@ -187,12 +231,15 @@ jobs:
       # SSH_ORIGINAL_COMMAND whose first token is not "rsync".  Shell commands
       # (mv, rm, cat) are unconditionally refused.
       #
-      # Immutability: widget/<version>/ is deployed with rsync --ignore-existing.
-      # Files already present on the remote are not overwritten — a re-publish of
-      # the same version is a no-op at the byte level.
+      # Immutability: widget/<version>/ is deployed with rsync --ignore-existing,
+      # unconditionally, on every run — this IS the idempotency mechanism for the
+      # versioned dir (not a backstop to some other gate). Files already present
+      # on the remote are never overwritten; files missing from a partial prior
+      # deploy get uploaded.
       #
-      # latest/: deployed with plain rsync overwrite (intentionally mutable pointer).
-      # Only advanced for stable releases.
+      # latest/: deployed with plain rsync overwrite (intentionally mutable
+      # pointer), gated on publish-widget-cdn.mjs's live-CDN probe confirming
+      # this version was absent beforehand — see (b) above.
       #
       # Operator setup required (one-time, before this step goes live):
       #   1. Generate ed25519 key pair:
@@ -216,12 +263,19 @@ jobs:
       #                           publish-widget-cdn.mjs header for why this is
       #                           NOT a bare ssh-keyscan (TOFU) call.
 
+      - name: Build workspace packages
+        # Unconditional: chat-widget's CDN bundle imports @oxpulse/chat-sdk's
+        # dist/ (a value import, not types-only), which otherwise only exists
+        # when release:ci's own `pnpm build` ran — i.e. never on a "version"
+        # phase push (pending changesets, publish command not invoked). Without
+        # this, "Build CDN bundle" fails to resolve @oxpulse/chat-sdk on every
+        # ordinary feature merge that carries a changeset.
+        run: pnpm build
+
       - name: Build CDN bundle
-        if: steps.changesets.outputs.published == 'true'
         run: pnpm --filter @oxpulse/chat-widget build:cdn
 
       - name: Publish widget bundle to cdn.oxpulse.chat
-        if: steps.changesets.outputs.published == 'true'
         env:
           CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
           CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
