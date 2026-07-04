@@ -11,6 +11,11 @@ Embeddable group chat for web applications. This monorepo contains three package
 - **[docs/quickstart.md](docs/quickstart.md)** — integrate `@oxpulse/chat-sdk` into a web app: install, auth model, send/list/subscribe, E2EE, rooms
 - **[docs/embedding.md](docs/embedding.md)** — drop-in `@oxpulse/chat-widget` with no framework: Custom Element attributes, events, iframe postMessage protocol, CSS theming
 
+### Architecture
+
+- **[docs/architecture/e2ee-model.md](docs/architecture/e2ee-model.md)** — the E2EE design: per-room serial decrypt chain, downgrade/poison-gate defense, durable replay guard, wire-codec brand boundary
+- **[docs/architecture/threat-model.md](docs/architecture/threat-model.md)** — SDK-scoped threat model (server-as-adversary: downgrade, replay, message loss)
+
 ## Node.js version requirements
 
 The workspace tooling (`pnpm`, scripts) requires **Node.js >= 22** (set in the root `package.json` `engines` field).
