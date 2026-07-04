@@ -63,18 +63,36 @@ function makeRoomTrackingProvider(): RoomTrackingProvider {
     async seal(plaintext: ArrayBuffer, _ctx: SealContext): Promise<ArrayBuffer> {
       return plaintext;
     },
-    unseal(sealed: ArrayBuffer, ctx: SealContext): Promise<ArrayBuffer> {
+    unseal(sealed: ArrayBuffer, ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer> {
       const seq = new Uint8Array(sealed)[0] ?? 0;
       const room = ctx.roomId;
       const now = (p.inFlightByRoom.get(room) ?? 0) + 1;
       p.inFlightByRoom.set(room, now);
       p.maxInFlightByRoom.set(room, Math.max(p.maxInFlightByRoom.get(room) ?? 0, now));
       p.startedOrder.push({ room, seq });
-      return new Promise<ArrayBuffer>((resolve) => {
-        resolvers.set(`${room}:${seq}`, () => {
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        let settled = false;
+        const dec = (): void => {
+          if (settled) return;
+          settled = true;
           p.inFlightByRoom.set(room, (p.inFlightByRoom.get(room) ?? 1) - 1);
+        };
+        resolvers.set(`${room}:${seq}`, () => {
+          dec();
           resolve(new Uint8Array([seq]).buffer);
         });
+        // Signal-honoring: the SDK's 5s deadline aborts a stuck unseal, which the chain
+        // now AWAITS (fix/e2ee-unseal-cancel). Reject on abort so a hung scrollback row
+        // bails as unsealError instead of stalling the chain. Inert for tests that
+        // release before the deadline (the abort never fires).
+        signal?.addEventListener(
+          'abort',
+          () => {
+            dec();
+            reject(signal.reason ?? new Error('aborted'));
+          },
+          { once: true },
+        );
       });
     },
     maxFor(room: string): number {

@@ -367,8 +367,18 @@ describe('subscribe per-room decrypt chain (M3)', () => {
     // Custom provider: unseal never resolves
     const mockProvider: CryptoProvider = {
       async seal(plaintext: ArrayBuffer, _ctx: SealContext): Promise<ArrayBuffer> { return plaintext; },
-      async unseal(_sealed: ArrayBuffer, _ctx: SealContext): Promise<ArrayBuffer> {
-        return new Promise(() => {}); // hangs forever
+      async unseal(_sealed: ArrayBuffer, _ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer> {
+        // Hangs until the SDK's 5s deadline aborts the signal, then rejects — a
+        // signal-honoring provider (fix/e2ee-unseal-cancel). The SDK now gates the
+        // room's chain on this REAL settle, so the abort is what surfaces the row as
+        // unsealError instead of abandoning a still-running unseal.
+        return new Promise<ArrayBuffer>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(signal.reason ?? new Error('aborted')),
+            { once: true },
+          );
+        });
       },
     };
 

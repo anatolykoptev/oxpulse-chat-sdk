@@ -876,23 +876,26 @@ export class SDKChatClient {
 
   /**
    * Append a per-room serial decrypt task onto the room's #decryptChain: unseal
-   * `mappedRow` (5s timeout) then deliver via `onMessage`. The task NEVER rejects
+   * `mappedRow` (5s deadline) then deliver via `onMessage`. The task NEVER rejects
    * (unseal failure → unsealError; a throwing onMessage is caught) so a link can't
    * poison the room's chain. Shared by the live subscribe() SSE stream, the
    * reconnect replay path (SEC-CR-14-01), and list() scrollback (SEC-CR-14-02) so
    * all three serialize on the SAME queue.
    *
-   * The at-most-one-unseal-in-flight invariant holds for unseal calls that SETTLE
-   * within the 5s timeout. It is NOT categorical: the timeout is a `Promise.race`,
-   * which ABANDONS (does not cancel) a slow unseal — a >5s unseal keeps running
-   * detached while this task settles (as an unsealError) and the chain starts the
-   * next task's unseal, so two unseals can be in flight for the room. That residual
-   * is pre-existing across all three call sites, and is bounded to idempotent
-   * double-DELIVERY by sframe-ratchet's static per-(room,sender) key (NOT a replay
-   * or confidentiality break). A genuine AbortSignal cancel would need a
-   * CryptoProvider.unseal interface change across every implementer — tracked
-   * separately. The `isTimeout` branch below emits a DISTINCT warn so a real >5s
-   * abandonment is observable in prod, not silently folded into unsealError.
+   * At-most-one-unseal-in-flight is now categorical (fix/e2ee-unseal-cancel): the
+   * 5s deadline fires an AbortController (passed to provider.unseal) AND the task
+   * AWAITS the unseal's REAL settle — it no longer Promise.race()s the timeout and
+   * abandons the loser. So the chain never advances to the next unseal until the
+   * current one has actually settled: a signal-honoring provider rejects promptly on
+   * abort; the built-in WebCrypto provider cannot cancel its atomic AES-GCM decrypt
+   * but that decrypt is sub-ms, so the room advances the instant it returns. The
+   * residual is narrowed from "two unseals in flight on any >5s row" to "a provider
+   * that ignores the AbortSignal AND hangs forever stalls THIS room's chain" —
+   * contained per-room (rooms are independent) and surfaced by the distinct deadline
+   * warn (repo rule: a decrypt failure must log or bump a metric; the SDK has no
+   * metric seam, so a warn in the existing idiom). A late-but-successful unseal (a
+   * non-cancelling provider that finishes AFTER the deadline) delivers its REAL
+   * plaintext in order — never re-delivered, never discarded.
    *
    * `source` tags the log line (e.g. 'decrypt task' for the stream, 'list()
    * scrollback' for pagination) so a failure's origin is legible in triage.
@@ -912,32 +915,42 @@ export class SDKChatClient {
     this.#decryptChain.append(roomId, async () => {
       const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
       const timeoutMs = 5000;
-      const timeoutPromise = new Promise<ArrayBuffer>((_res, rej) =>
-        setTimeout(() => rej(new Error('unseal timeout')), timeoutMs),
-      );
+      // Delivery/settle deadline. Unlike the prior Promise.race (which ABANDONED a
+      // slow unseal — it kept running detached while the chain advanced to the next
+      // unseal), we ABORT the unseal via an AbortController and `await` its REAL
+      // settle. The chain therefore never advances past an unsettled unseal, so at
+      // most one unseal is in flight per room. clearTimeout on settle prevents a
+      // spurious abort/timer leak on the fast path.
+      const controller = new AbortController();
+      let deadlineFired = false;
+      const timer = setTimeout(() => {
+        deadlineFired = true;
+        controller.abort(new Error(`unseal deadline exceeded (${timeoutMs}ms)`));
+        // Distinct, non-silent signal that a >5s unseal occurred: the room advances
+        // only once this unseal actually settles, so a provider that both ignores the
+        // AbortSignal AND hangs forever would stall THIS room here (contained per-room).
+        console.warn(
+          `[chat-sdk] ${source}: unseal exceeded ${timeoutMs}ms deadline; aborting (room advances only once the unseal settles) for seq`,
+          mappedRow.seq,
+        );
+      }, timeoutMs);
       let out: MessageRow;
       try {
-        const plaintext = await Promise.race([
-          provider.unseal(mappedRow.sealed, ctx),
-          timeoutPromise,
-        ]);
+        const plaintext = await provider.unseal(mappedRow.sealed, ctx, controller.signal);
+        // Settled (possibly AFTER the deadline for a non-cancelling provider): deliver
+        // the REAL plaintext in order — not re-delivered, not discarded.
         out = { ...mappedRow, plaintext };
       } catch (err) {
-        const isTimeout = err instanceof Error && err.message === 'unseal timeout';
-        if (isTimeout) {
-          // A real >5s timeout: the unseal was ABANDONED (Promise.race does not
-          // cancel it) and is still running detached, so the chain's next unseal
-          // may now start concurrently. Distinct signal (repo rule: a
-          // write/decrypt failure must log or bump a metric; the SDK has no
-          // metric seam, so a warn in the existing idiom) so this is not silent.
-          console.warn(
-            `[chat-sdk] ${source}: unseal TIMED OUT after ${timeoutMs}ms (abandoned, still running detached) for seq`,
-            mappedRow.seq,
-          );
-        } else {
+        // deadlineFired suppresses the generic "unseal failed" warn (the deadline warn
+        // already fired). classifyUnsealError maps an abort/timeout error to 'unknown'
+        // and a real AEAD/replay error to 'auth'/'replay' — correct even for an error
+        // that surfaced after the deadline.
+        if (!deadlineFired) {
           console.warn(`[chat-sdk] ${source}: unseal failed for seq`, mappedRow.seq, err);
         }
-        out = { ...mappedRow, unsealError: isTimeout ? 'unknown' : classifyUnsealError(err), plaintext: undefined };
+        out = { ...mappedRow, unsealError: classifyUnsealError(err), plaintext: undefined };
+      } finally {
+        clearTimeout(timer);
       }
       // Deliver exactly once, AFTER the try/catch, so a throwing caller callback
       // neither re-delivers the row as an unseal error nor rejects the link (which

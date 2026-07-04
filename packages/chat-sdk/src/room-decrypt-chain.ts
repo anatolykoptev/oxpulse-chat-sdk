@@ -103,7 +103,11 @@ export class RoomDecryptChain {
    * still has draining work, re-opening the concurrent-unseal hole. Any acquire()
    * or append() after a release bumps the generation and cancels its pending
    * delete; the later release schedules the delete that actually fires.
-   * Relies on tasks settling (subscribe()'s 5s unseal timeout guarantees it).
+   * Relies on tasks settling: #appendDecryptTask awaits the unseal's real settle and
+   * fires an AbortController at a 5s deadline, so a signal-honoring provider settles
+   * promptly; a provider that ignores the signal AND hangs forever would defer this
+   * cleanup along with the room's chain (the honest, contained residual documented on
+   * #appendDecryptTask).
    */
   release(roomId: string): void {
     const entry = this.#byRoom.get(roomId);

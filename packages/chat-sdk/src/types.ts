@@ -45,8 +45,20 @@ export interface CryptoProvider {
    * Decrypt ciphertext bytes. Returns plaintext as ArrayBuffer.
    * Called by list() and subscribe() on each received row.
    * Should throw on auth failure or replay (row will be skipped with a warn log).
+   *
+   * `signal` (OPTIONAL, backward-compatible) is aborted by the SDK when the per-row
+   * unseal deadline (5s) is exceeded. The SDK gates the per-room serial decrypt chain
+   * on the REAL settle of this promise (no longer a Promise.race that abandons a slow
+   * unseal), so honoring the signal is what lets a stuck unseal reject promptly instead
+   * of stalling the room's chain. A cancel-capable provider (worker / streaming /
+   * KMS-with-abort) SHOULD honor it and reject; a provider that ignores it is still
+   * correct (just non-cancelling). NOTE: the built-in WebCrypto AES-GCM decrypt is
+   * atomic and takes no AbortSignal — it cannot be cancelled mid-flight — so the
+   * built-in provider honors the signal only at its await boundaries (before the
+   * decrypt); that is why the parameter is optional and advisory, not a guaranteed
+   * cancel for every provider.
    */
-  unseal(sealed: ArrayBuffer, ctx: SealContext): Promise<ArrayBuffer>;
+  unseal(sealed: ArrayBuffer, ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer>;
 
   /** Release any resources held by the provider. */
   dispose?(): void;
