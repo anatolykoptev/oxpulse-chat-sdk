@@ -1,13 +1,16 @@
 # @oxpulse/chat-sdk
 
-[![version](https://img.shields.io/badge/version-1.0.0-blue)](./CHANGELOG.md)
-[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](../../LICENSE)
+[![version](https://img.shields.io/badge/version-2.0.0-blue)](./CHANGELOG.md)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](./LICENSE)
 
 TypeScript client for the OxPulse encrypted chat message log API.
 
-> **v1.0.0 — production release.**
+> **v2.0.0 — production release.**
 > The `web/` mirror (`$lib/api/sdkChat`) has been deleted.
 > All production code imports directly from this package.
+>
+> **v2.0.0 is a security-driven major bump (SEC-CR-001):** with an `e2ee` provider
+> configured, downgrade defense to plaintext is now default-on — see [E2EE](#e2ee).
 
 ## Install
 
@@ -61,6 +64,7 @@ teardown();
 | `baseUrl` | `string?` | URL prefix; default `''` (same-origin). |
 | `compression` | `'none' \| 'auto' \| 'dict'` | Wire compression; default `'none'`. |
 | `e2ee` | `E2EEOptions?` | End-to-end encryption config. |
+| `cryptoMode` | `'sframe-static' \| 'plaintext'` | Expected server crypto mode. Defaults to `'sframe-static'` when `e2ee` is configured (downgrade defense, SEC-CR-001), otherwise auto-detected. |
 
 ### Methods
 
@@ -88,14 +92,15 @@ Send multiple pre-sealed messages in a single `POST /api/sdk/messages/batch` tra
 
 - `room_id` is injected automatically per item.
 - `created_at` is set server-side; do not include it.
-- Does **NOT** auto-seal — callers must set `sealed_b64` to base64-encoded
-  ciphertext before calling. Use `sendText` / `sendTextOptimistic` for auto-seal.
+- Does **NOT** auto-seal — callers must set `sealed` to the pre-sealed ciphertext as
+  an `ArrayBuffer` before calling (the SDK base64-encodes it for the wire internally).
+  Use `sendText` / `sendTextOptimistic` for auto-seal.
 - Scope required: `chat:write:<room_id>`.
 
 ```ts
 const items: BatchAppendItem[] = messages.map((m) => ({
-  msg_id: m.id,
-  sealed_b64: m.sealedBase64,
+  msgId: m.id,
+  sealed: m.sealedBytes, // ArrayBuffer
 }));
 await client.batchAppend('room-123', items);
 ```
@@ -170,15 +175,28 @@ const client = new SDKChatClient({
 chain to preserve ordering. Rows that fail decryption are delivered with
 `MessageRow.unsealError: 'replay' | 'auth' | 'unknown'` instead of being dropped.
 
+#### Downgrade defense (default-on since v2.0.0, SEC-CR-001)
+
+When an `e2ee` provider is configured, `cryptoMode` defaults to `'sframe-static'` —
+the client refuses to accept a server-emitted `crypto_mode: 'plaintext'` for that
+room. A mismatch throws `SDKChatError('crypto_mode_mismatch')` and poisons **only
+that room** (sibling rooms on the same client keep working); recreate the client
+instance to retry a poisoned room. Constructing with an `e2ee` provider **and**
+`cryptoMode: 'plaintext'` now throws `invalid_args` at construction (contradictory
+config) instead of silently sending plaintext. An e2ee client with no explicit
+`cryptoMode` seals and sends immediately by default — no discovery round-trip
+required before the first send. Clients with no `e2ee` provider are unaffected:
+plaintext remains a valid auto-detected mode.
+
 ### `BatchAppendItem`
 
 ```ts
 interface BatchAppendItem {
-  msg_id: string;               // UUID
-  sealed_b64?: string | null;   // base64-encoded ciphertext
-  thread_root_msg_id?: string | null;
-  product_ref?: string | null;
-  product_meta?: unknown;
+  msgId: string;                 // UUID
+  sealed?: ArrayBuffer | null;   // pre-sealed ciphertext; SDK base64-encodes for the wire
+  threadRootMsgId?: string | null;
+  productRef?: string | null;
+  productMeta?: unknown;
 }
 ```
 
@@ -195,7 +213,10 @@ interface MessageRow {
   createdAt: string;       // ISO 8601
   threadRootMsgId: string | null;
   productRef: string | null;
-  productMeta: unknown;
+  productMeta: unknown;    // catalog metadata (title/price/currency/imageUrl/productUrl); set when productRef is set
+  editedAt?: string;       // last-edit timestamp; unset when never edited
+  deletedAt?: string;      // soft-delete timestamp; unset when not deleted
+  editCount?: number;      // number of edits; 0 when never edited
 }
 ```
 
@@ -209,9 +230,13 @@ All failures throw `SDKChatError` with a typed `code` field:
 | `forbidden` | 403 — missing scope |
 | `not_found` | 404 |
 | `rate_limited` | 429 |
-| `invalid_args` | 400–4xx (other than above) |
-| `server_5xx` | 5xx |
+| `invalid_args` | 400–4xx (other than above); also thrown at construct time for contradictory options (e.g. `e2ee` + `cryptoMode: 'plaintext'`) |
+| `server_error` | 5xx |
 | `network` | fetch/network-level failure |
+| `unsupported` | an e2ee-only operation (e.g. `sendText`) called without `e2ee` configured |
+| `crypto_mode_mismatch` | server-emitted `crypto_mode` doesn't match the configured/discovered expectation (SEC-CR-001 downgrade defense) — poisons that room |
+| `crypto_mode_poisoned` | room already poisoned by a prior `crypto_mode_mismatch`; recreate the client to retry |
+| `crypto_mode_undiscovered` | `sendText` called before `crypto_mode` is known and no `e2ee` provider is configured (e2ee clients default to `'sframe-static'` and never hit this) |
 
 ## Compression (optional)
 
@@ -281,4 +306,4 @@ All failures throw `SDKPushError` with a typed `code: SDKPushErrorCode` field.
 
 ## License
 
-AGPL-3.0-or-later. See root [LICENSE](../../LICENSE).
+AGPL-3.0-or-later. See [LICENSE](./LICENSE).

@@ -8,8 +8,6 @@ TypeScript codec for binary chat envelopes. Supports zstd compression with optio
 npm i @oxpulse/wire-codec
 ```
 
-> **Note:** the package is currently `private: true` (workspace-only). See [Publishing](#publishing) below.
-
 ## Quick start
 
 ### HTTP body encode/decode
@@ -73,6 +71,12 @@ const obj = decode(frame);
 | `ALL_DICTS` | `readonly DictName[]` — all shipped dicts in negotiation-priority order |
 | `DictName` | `'zstd-dict-ru-v1' \| 'zstd-dict-fa-v1' \| 'zstd-dict-en-v1'` |
 | `DictLoader` | `(name: DictName) => Promise<Uint8Array>` |
+| `encodeMeshBundle(args)` | Mesh-bundle v1: signed relay envelope (Ed25519), magic `0xC9` |
+| `decodeMeshBundle(bytes)` | Mesh-bundle v1 decode + Ed25519 signature verification |
+| `meshBundleSignedRange(bytes)` | Byte range covered by the mesh-bundle's Ed25519 signature |
+| `asMeshBundleBytes(bytes)` | Lift a raw `Uint8Array` into the `MeshBundleBytes` domain |
+| `MeshBundleBytes` | Phantom-branded type — mesh-bundle pre-verify wire bytes |
+| `MESH_BUNDLE_MAGIC_V1` / `MESH_BUNDLE_VERSION` / `MESH_BUNDLE_MAX_BODY` | Mesh-bundle wire constants: magic `0xC9`, version `0x01`, max body `1500` B |
 
 ## Compression decision matrix
 
@@ -90,6 +94,7 @@ const obj = decode(frame);
 | `0xC6` | zstd-dictless | `[0xC6][zstd_frame]` |
 | `0xC7` | zstd-with-dict (HTTP) | `[0xC7][dict_id u16 BE][zstd_frame]` |
 | `0xC8` | peer envelope v2 (CBOR) | NOT for HTTP — use peer `encode()` |
+| `0xC9` | mesh-bundle v1 (signed) | `[0xC9][version][header][body][Ed25519 sig]` — use `encodeMeshBundle`/`decodeMeshBundle` |
 
 ## Bundled dictionaries
 
@@ -168,14 +173,11 @@ Source of truth: `packages/wire-codec/src/dicts.ts`.
 
 ## Publishing
 
-The package is `private: true` — workspace-only for now. To publish:
-
-1. Flip `"private": false` in `packages/wire-codec/package.json`.
-2. Add `"publishConfig": { "access": "public" }`.
-3. Run `npm publish --workspace packages/wire-codec` from the repo root.
-
-No npm publish pipeline exists yet in this repo (GHA workflows were removed — see project memory). Wire up a release workflow before flipping `private`.
+Published to npm as a public package via automated [Changesets](https://github.com/changesets/changesets)
++ npm OIDC trusted publishing — see [`.github/workflows/release.yml`](../../.github/workflows/release.yml).
+Merging a "Version Packages" PR triggers the release; no manual `npm publish` step
+or token is involved.
 
 ## License
 
-AGPL-3.0-or-later. Internal workspace-only; publish step is a deliberate future decision.
+AGPL-3.0-or-later. See [LICENSE](./LICENSE).
