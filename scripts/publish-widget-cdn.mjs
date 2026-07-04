@@ -5,17 +5,27 @@
 // via rsync.  Assumes `build:cdn` has already run (dist-cdn/ exists).
 //
 // Key properties:
-//   Immutability:  widget/<version>/ is deployed with rsync --ignore-existing.
-//                  This means a re-run of the same version is a no-op — rrsync
-//                  permits rsync writes, and --ignore-existing refuses to touch
-//                  any file already present on the remote.  No read probe is
-//                  needed: if the bytes are already there they are not overwritten.
-//   latest/:       refreshed ONLY if this version is the highest stable semver.
-//                  Deployed with a plain rsync overwrite (intentionally mutable
-//                  pointer — no --ignore-existing).
+//   Immutability:  widget/<version>/ is ALWAYS deployed with rsync
+//                  --ignore-existing, unconditionally — a re-run of the same
+//                  version is a no-op (rrsync permits rsync writes, and
+//                  --ignore-existing refuses to touch any file already present
+//                  on the remote), and a PARTIAL prior deploy self-heals
+//                  (missing files get uploaded, present ones untouched). No SSH
+//                  read is needed for this — rrsync -wo blocks reads entirely,
+//                  and --ignore-existing doesn't need one.
+//   latest/:       refreshed ONLY when a separate public HTTPS HEAD probe (see
+//                  probeDeployedState) confirms this version was ABSENT from
+//                  the CDN before this run — i.e. this run is a confirmed new
+//                  release, not a re-run or a network hiccup. Deployed with a
+//                  plain rsync overwrite (intentionally mutable pointer — no
+//                  --ignore-existing), which is exactly why it's gated on a
+//                  confirmed-absent probe rather than running unconditionally.
 //   Soft-skip:     if CDN_DEPLOY_KEY is absent → log + exit 0 (pipeline safe
 //                  before the operator installs the key).
-//   DRY_RUN=1:     does everything EXCEPT remote writes — prints the exact plan.
+//   DRY_RUN=1:     skips remote WRITES and prints the exact plan, but still
+//                  performs the live HTTPS HEAD probe (read-only, can't mutate
+//                  anything) — DRY_RUN reports what would REALLY happen,
+//                  including whether latest/ would actually advance.
 //
 // Deploy is rsync-ONLY (no ssh mv, no ssh rm-rf, no read probes).  The
 // authorized_keys jail is command="rrsync -wo …",restrict — rrsync refuses
@@ -146,33 +156,46 @@ log(`version: ${VERSION}`);
 log(`local sha256(index.js): ${localSha256}`);
 log(`SRI: ${sriAttr}`);
 
-// ── Already-deployed check (the real idempotency gate) ────────────────────────
+// ── Probe live CDN state (drives the latest/ decision, NOT a skip-everything gate) ──
 // The CI workflow runs this script on every push, not just "a release actually
 // happened" (see release.yml's Phase-3 comment — a proxy signal like another
-// package's npm-publish status can't represent chat-widget's own state). So
-// THIS script is where the "is there actually anything new to do" decision has
-// to live. A live HTTPS HEAD against the CDN is a fact about deployed state,
-// not a proxy — read-only, no secrets needed, safe to run even in DRY_RUN
-// (it can't mutate anything, and DRY_RUN should report what would REALLY
-// happen, including "nothing").
-async function isAlreadyDeployed(version) {
+// package's npm-publish status can't represent chat-widget's own state). A live
+// HTTPS HEAD against the CDN is a fact about deployed state, not a proxy.
+//
+// This is deliberately tri-state, not a boolean short-circuit. An earlier
+// version of this script exit(0)'d on a 200 before ever reaching the versioned
+// rsync — which defeated --ignore-existing's own self-heal property: rsync
+// transfers index.js/index.js.map/zstd.wasm/index.js.sha384 as a set, roughly
+// alphabetically, so a mid-transfer failure can leave index.js present (HEAD
+// 200) while zstd.wasm is still missing. Skipping the rsync entirely on 200
+// would leave that partial deploy broken forever. So the versioned-dir rsync
+// below now ALWAYS runs unconditionally — --ignore-existing already makes it a
+// no-op when everything is present and a self-heal when only some files are —
+// and this probe result is used ONLY to decide whether to advance the mutable
+// `latest/` pointer, never to skip the versioned dir.
+//
+// Assumption this relies on: the CDN origin hard-404s a missing path (no SPA/
+// catch-all fallback that would 200 everything). True for the current static
+// file-server config; if that ever changes, this probe would wrongly read
+// every version as "live" and latest/ would stop advancing — silently.
+async function probeDeployedState(version) {
 	const url = `https://cdn.oxpulse.chat/widget/${version}/index.js`;
 	try {
 		const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(10_000) });
-		if (res.status === 200) return true;
-		if (res.status === 404) return false;
-		log(`unexpected HEAD status ${res.status} for ${url} — treating as not-yet-deployed (rsync --ignore-existing still guards the versioned dir if this was wrong)`);
-		return false;
+		if (res.status === 200) return 'live';
+		if (res.status === 404) return 'absent';
+		log(`unexpected HEAD status ${res.status} for ${url} — indeterminate (treated conservatively: versioned dir still deploys, latest/ does not advance)`);
+		return 'indeterminate';
 	} catch (err) {
-		log(`HEAD check failed for ${url} (${err.message ?? err}) — treating as not-yet-deployed (rsync --ignore-existing still guards the versioned dir if this was wrong)`);
-		return false;
+		log(`HEAD check failed for ${url} (${err.message ?? err}) — indeterminate (treated conservatively: versioned dir still deploys, latest/ does not advance)`);
+		return 'indeterminate';
 	}
 }
 
-if (await isAlreadyDeployed(VERSION)) {
-	log(`widget/${VERSION}/ is already live — nothing to do (this run is not the one that released this version)`);
-	process.exit(0);
-}
+// Read even in DRY_RUN — it's a read-only network call, and DRY_RUN should
+// report what would REALLY happen (including whether latest/ would advance).
+const deployState = await probeDeployedState(VERSION);
+log(`CDN probe: widget/${VERSION}/ is ${deployState}`);
 
 // ── Validate required env (unless dry-run) ────────────────────────────────────
 
@@ -246,18 +269,27 @@ function rsync(extraArgs, src, dest, description) {
 
 // ── Determine if this version should advance `latest/` ───────────────────────
 // The rrsync -wo jail blocks reads (rsync --list-only is refused: it acts as
-// a sender, which -wo forbids). We cannot query the remote for existing versions.
-// Conservative policy: update latest/ for every stable release. This is correct
-// because the release pipeline (changesets) processes one release at a time in
-// semver order — a stable publish is always the newest stable at publish time.
-// Prerelease versions never advance latest/.
+// a sender, which -wo forbids), so this can't query the remote for "what's the
+// current latest/". Instead it relies on the deployState probe above: advance
+// latest/ ONLY when the probe CONFIRMED this version is absent (deployState ===
+// 'absent') — i.e. this run is genuinely the one releasing it. On 'live' (this
+// version was already released, latest/ was already advanced correctly back
+// then) or 'indeterminate' (network blip / CDN hiccup — NOT proof this is a
+// real new release) latest/ is deliberately left untouched: the versioned-dir
+// rsync always runs regardless (self-heals via --ignore-existing either way),
+// but the mutable latest/ pointer only ever moves on a confirmed new release.
+// Prerelease versions never advance latest/, confirmed or not.
 
 function shouldUpdateLatest() {
 	if (!isStable(VERSION)) {
 		log(`Version ${VERSION} is a prerelease — skipping latest/ update`);
 		return false;
 	}
-	log(`Version ${VERSION} is stable — will update latest/`);
+	if (deployState !== 'absent') {
+		log(`Version ${VERSION} is stable but CDN probe=${deployState} (not a confirmed new release) — skipping latest/ update`);
+		return false;
+	}
+	log(`Version ${VERSION} is stable and confirmed absent from the CDN — will update latest/`);
 	return true;
 }
 
