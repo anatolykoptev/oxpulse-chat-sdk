@@ -29,7 +29,7 @@
 # Trusted publishers configured on npm (npmjs.com → package → Publishing):
 #   @oxpulse/wire-codec  → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
 #   @oxpulse/chat-sdk    → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
-#   @oxpulse/chat-widget → NOT YET (package must exist on npm first — bootstrap manually)
+#   @oxpulse/chat-widget → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml  environment: release
 #
 # GitHub Releases note:
 #   changesets/action creates GitHub Releases automatically when the publish

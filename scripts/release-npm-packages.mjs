@@ -23,17 +23,18 @@
 //   NPM_PROVENANCE=1 in the workflow while the repo is private.
 //   Requirement: npm >= 11.5.1, Node >= 22.14 (enforced in release.yml).
 //
-// ── CHAT-WIDGET SOFT-SKIP ────────────────────────────────────────────────────
-//   @oxpulse/chat-widget does not yet exist on npm, so npm Trusted Publishing
-//   cannot be configured for it (npm requires the package to exist first for
-//   the trusted-publisher UI). Until then:
-//   - In OIDC mode: if `npm view` returns E404 (never published), we LOG a clear
-//     skip message and CONTINUE rather than fail the whole run.
-//   - Once the package exists on npm (bootstrap via manual publish), it will be
-//     treated like the others (trusted publisher configured, version gate runs).
+// ── SOFT-SKIP FOR UN-BOOTSTRAPPED PACKAGES ───────────────────────────────────
+//   npm Trusted Publishing cannot be configured for a package until it exists
+//   on the registry (npm requires the trusted-publisher UI to be reached from
+//   the package's own settings page) — so a brand-new package needs one manual
+//   bootstrap publish (token mode) before OIDC works for it.
+//   - In OIDC mode: if `npm view` returns E404 for a package in SOFT_PACKAGES_OIDC,
+//     we LOG a clear skip message and CONTINUE rather than fail the whole run.
 //   - In token mode: behaviour is unchanged (publish if local > registry).
-//   The SOFT_PACKAGES set below controls which packages get soft-skip in OIDC
-//   mode. Remove '@oxpulse/chat-widget' from it once its trusted publisher is
+//   All three current packages (wire-codec, chat-sdk, chat-widget) are
+//   bootstrapped and have trusted publishers configured — SOFT_PACKAGES_OIDC is
+//   empty. Add a package name here if a future 4th package needs the same
+//   bootstrap grace period; remove it once that package's trusted publisher is
 //   configured on npm.
 //
 // ── ORDERING INVARIANT ────────────────────────────────────────────────────────
@@ -89,8 +90,9 @@ const PACKAGES = [
 // instead of failing the run. Once a package is bootstrapped on npm and its
 // trusted publisher is configured, remove it from this set.
 //
-// wire-codec and chat-sdk must NOT be in this set — their failures are fatal.
-const SOFT_PACKAGES_OIDC = new Set(['@oxpulse/chat-widget']);
+// Bootstrapped packages (wire-codec, chat-sdk, chat-widget) must NOT be in
+// this set — their publish failures are fatal.
+const SOFT_PACKAGES_OIDC = new Set([]);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
