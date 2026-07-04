@@ -204,7 +204,9 @@ jobs:
       #        CDN_DEPLOY_KEY   — content of cdn_deploy_key (private key, PEM)
       #        CDN_SSH_HOST     — 192.9.243.148
       #        CDN_SSH_USER     — krolik
-      #        CDN_SSH_PORT     — box's sshd port (non-default; check sshd_config)
+      #        CDN_SSH_PORT     — box's sshd port (optional — publish-widget-cdn.mjs
+      #                           defaults to "22" if unset; this box uses a
+      #                           non-default port, check sshd_config)
       #        CDN_SSH_HOST_KEY — box's host public key, WITHOUT the hostname
       #                           prefix (cat /etc/ssh/ssh_host_ed25519_key.pub
       #                           on the box, or ssh-keyscan and strip the

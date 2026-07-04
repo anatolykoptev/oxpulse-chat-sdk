@@ -148,10 +148,17 @@ log(`SRI: ${sriAttr}`);
 
 // ── Validate required env (unless dry-run) ────────────────────────────────────
 
+const SSH_KEY_TYPE_RE = /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-\S+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-\S+)\s/;
+
 if (!DRY_RUN) {
 	if (!CDN_SSH_HOST) fail('CDN_SSH_HOST env is not set');
 	if (!CDN_SSH_USER) fail('CDN_SSH_USER env is not set');
 	if (!CDN_SSH_HOST_KEY) fail('CDN_SSH_HOST_KEY env is not set (see script header for how to obtain it)');
+	if (CDN_SSH_HOST_KEY.includes('\n')) fail('CDN_SSH_HOST_KEY must be a single line (no embedded newline)');
+	if (!SSH_KEY_TYPE_RE.test(CDN_SSH_HOST_KEY)) {
+		fail(`CDN_SSH_HOST_KEY must start with a key type (ssh-ed25519, ssh-rsa, ...) — got: "${CDN_SSH_HOST_KEY.slice(0, 30)}...". Did you leave the hostname prefix in? Strip the leading "host:port " token.`);
+	}
+	if (!/^\d+$/.test(CDN_SSH_PORT)) fail(`CDN_SSH_PORT must be numeric — got: "${CDN_SSH_PORT}"`);
 }
 
 const SSH_TARGET = `${CDN_SSH_USER}@${CDN_SSH_HOST}`;
