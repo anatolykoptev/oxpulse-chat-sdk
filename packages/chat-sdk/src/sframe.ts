@@ -77,25 +77,6 @@ export interface SFrameProviderOptions {
 }
 
 /**
- * Throw if `signal` is already aborted. Honors an abort only at await boundaries:
- * the built-in AES-GCM decrypt (inner.unseal -> crypto.subtle.decrypt) is atomic and
- * takes no AbortSignal, so it cannot be cancelled mid-flight. Checking before the
- * durable pre-filter and before the (uncancellable) decrypt lets an abort that fires
- * during a slow durable/Web-Locks step skip the decrypt entirely instead of doing work
- * whose result the SDK will discard. Once the decrypt has run we complete normally
- * (record + return) — the plaintext is valid and discarding it would leave the frame
- * unrecorded in the durable replay window.
- */
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    const reason: unknown = signal.reason;
-    throw reason instanceof Error
-      ? reason
-      : new Error('sframe-chat: unseal aborted (deadline exceeded)');
-  }
-}
-
-/**
  * Create a CryptoProvider backed by sframe-ratchet v0.5 chat-mode.
  *
  * The returned provider is stateful (key cache + replay window).
@@ -127,11 +108,12 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
     },
 
     async unseal(sealed: ArrayBuffer, ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer> {
-      // Advisory cancel: the SDK aborts `signal` at its 5s per-row deadline. We honor it
-      // only at await boundaries (see throwIfAborted) because the AES-GCM decrypt below
-      // is atomic and non-cancellable; still, an abort during a slow durable step skips
-      // the uncancellable decrypt entirely.
-      throwIfAborted(signal);
+      // Advisory cancel: the SDK aborts `signal` at its per-row deadline. We honor it
+      // (stdlib signal.throwIfAborted) only at await boundaries, because the AES-GCM
+      // decrypt below is atomic and non-cancellable; an abort during a slow durable step
+      // skips the uncancellable decrypt entirely. Once the decrypt has run we complete
+      // normally (record + return) — a valid plaintext is never discarded.
+      signal?.throwIfAborted();
       const bytes = new Uint8Array(sealed);
 
       // Durable pre-filter: reject a CTR we have already accepted (survives page reload).
@@ -168,7 +150,7 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
 
       // Last chance to skip the (uncancellable) decrypt if the deadline fired during
       // the durable pre-filter above. Past this point the decrypt runs to completion.
-      throwIfAborted(signal);
+      signal?.throwIfAborted();
       const result = await inner.unseal(bytes, ctx);
 
       // Record ONLY after a successful AEAD verify (inner.unseal throws on forgery / in-session

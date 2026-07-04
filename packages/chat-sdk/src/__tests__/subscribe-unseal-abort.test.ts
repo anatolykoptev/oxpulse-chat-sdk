@@ -11,12 +11,13 @@
  * Fix under test (fix/e2ee-unseal-cancel):
  *   - `CryptoProvider.unseal(sealed, ctx, signal?)` gains an OPTIONAL AbortSignal
  *     (backward-compatible — a 2-arg provider still works, just non-cancelling).
- *   - `#appendDecryptTask` fires an AbortController at the 5s deadline AND AWAITS
- *     the real settle of `provider.unseal` (no more Promise.race abandonment), so
- *     the chain never advances to the next unseal until the current one actually
- *     settles. A signal-honoring provider settles promptly on abort; a provider
- *     that ignores the signal blocks the room's chain until it settles on its own
- *     (the honest, narrower residual — a stalled room, not a concurrent unseal).
+ *   - `#appendDecryptTask` bounds each unseal TWICE: an AbortController at the abort
+ *     deadline (a signal-honoring provider rejects promptly → chain advances, strict
+ *     one-in-flight), AND a FORCE-DRAIN at deadline+grace — if the unseal STILL has
+ *     not settled (a provider that ignores the signal AND hangs), that one row is
+ *     bailed as unsealError so the chain DRAINS (bounded), rather than black-holing
+ *     the room. No more Promise.race abandonment (which started the next unseal while
+ *     the loser ran detached → two-in-flight).
  *
  * Invariant under test: for one room, at most ONE provider.unseal() is ever in
  * flight — across the >5s deadline boundary too.
@@ -237,8 +238,12 @@ describe('subscribe() unseal deadline — abort + chain-advance gating (>5s resi
     teardown();
   });
 
-  it('honest residual: a provider that ignores the AbortSignal AND never settles stalls its room (contained + observable), never concurrent', async () => {
-    const provider = makeProvider(false);
+  it('bounded-drain: a non-honoring provider that NEVER settles force-drains each row as unsealError after deadline+grace — chain keeps advancing, no black-hole, no leak', async () => {
+    // This is the HIGH the pr-council caught: awaiting the real settle without a bound
+    // turns a hung non-honoring provider into a permanent room black-hole + Map leak.
+    // The force-drain restores the bounded-settle guarantee WITHOUT reintroducing
+    // two-in-flight for the healthy path.
+    const provider = makeProvider(false); // ignores the abort AND we never releaseSeq → hangs forever
     const es = installMockEventSource();
     stubTicketFetch();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -252,23 +257,57 @@ describe('subscribe() unseal deadline — abort + chain-advance gating (>5s resi
     ctrl.emitMessage(frame(2));
     await flush();
 
+    // At the abort DEADLINE (5s) alone the chain is still gated (the abort is ignored,
+    // the unseal has not settled, force-drain has not fired) — nothing delivered yet,
+    // strictly one in flight. This proves the deadline does not itself abandon the row.
     await vi.advanceTimersByTimeAsync(5000);
     await flush();
-
-    // The trade-off: rather than a concurrent second unseal, the room's chain stalls
-    // on the hung unseal. Nothing is double-delivered; maxInFlight never exceeds 1.
     expect(provider.startedOrder).toEqual([1]);
     expect(delivered).toEqual([]);
     expect(provider.maxInFlight).toBe(1);
-    // Observable: a distinct deadline signal fired (the abandonment/stall is not silent).
+
+    // Cross the FORCE-DRAIN bound (deadline+grace = 10s) for row 1 → it bails as
+    // unsealError and the chain DRAINS: unseal(2) now starts (RED against #25 code,
+    // where the chain awaited the real settle and hung here → delivered stays []).
+    await vi.advanceTimersByTimeAsync(5000);
+    await flush();
+    expect(delivered).toEqual([{ seq: 1, ok: false, err: 'unknown' }]);
+    expect(provider.startedOrder).toEqual([1, 2]);
+    // INHERENT residual: row 1's unseal is ORPHANED (JS cannot cancel a pending promise),
+    // so while unseal(2) runs, the still-pending unseal(1) counts as in-flight → maxInFlight
+    // reaches 2 for the genuinely-stuck case. This is NOT the every->5s-row two-in-flight of
+    // the old Promise.race — it happens ONLY after deadline+grace, and the orphan is PARKED
+    // (not progressing / not racing the ratchet), its late result dropped (asserted next).
+    expect(provider.maxInFlight).toBe(2);
+    // Observable: the force-drain is not silent.
     expect(
-      warnSpy.mock.calls.some((c) => String(c[0]).toLowerCase().includes('deadline')),
+      warnSpy.mock.calls.some((c) => String(c[0]).toLowerCase().includes('force-drain')),
     ).toBe(true);
+
+    // SAFETY: if the orphaned stuck unseal(1) settles LATE, its result MUST be dropped —
+    // no re-delivery, no chain advance from it (the `settled` guard). Release it now.
+    provider.releaseSeq(1);
+    await flush();
+    expect(delivered).toEqual([{ seq: 1, ok: false, err: 'unknown' }]); // unchanged — not re-delivered
+
+    // Tear down the (only) subscriber, then force-drain row 2 too. release() defers the
+    // chain-entry delete until the chain drains — which force-drain guarantees.
+    teardown();
+    await vi.advanceTimersByTimeAsync(10000);
+    await flush();
+    expect(delivered).toEqual([
+      { seq: 1, ok: false, err: 'unknown' },
+      { seq: 2, ok: false, err: 'unknown' },
+    ]);
+
+    // No leak: the room's decrypt-chain entry is removed once its chain drained and its
+    // last subscriber released (RED against #25 code — the eternally-pending tail never
+    // fires release()'s deferred delete).
+    expect(client._decryptChainSize()).toBe(0);
 
     provider.releaseAll();
     await flush();
     warnSpy.mockRestore();
-    teardown();
   });
 
   it('regression: a normal (<5s) unseal is unaffected — delivered as plaintext, no deadline signal, timer cleared', async () => {
