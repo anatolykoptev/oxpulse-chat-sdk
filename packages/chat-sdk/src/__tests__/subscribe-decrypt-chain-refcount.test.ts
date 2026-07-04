@@ -463,4 +463,46 @@ describe('subscribe() per-room decrypt chain — shared-subscriber refcount', ()
     warnSpy.mockRestore();
     teardown();
   });
+
+  // CR17 Item D: the per-room crypto-mode eviction (teardownSubscriber, chain refCount 0)
+  // must fire ONLY on the LAST subscriber's teardown. This locks the `=== 0` guard against
+  // a future refactor that drops it — which would evict a room's cached mode while a
+  // co-subscriber is still live (re-introducing the sibling-brick class #16 closed).
+  it('co-subscriber crypto-mode eviction: first teardown keeps the entry, second evicts it', async () => {
+    const provider = makeControllableProvider();
+    const instances = installMockEventSource();
+    stubTicketFetch();
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+
+    // Two subscribers on the SAME room → chain refCount 2.
+    const teardownA = client.subscribe(ROOM_ID, { onMessage: vi.fn() });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    const teardownB = client.subscribe(ROOM_ID, { onMessage: vi.fn() });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1);
+    await flushMicrotasks();
+
+    expect(instances.length).toBe(2);
+
+    // A `connected` prelude resolves + caches the room's crypto-mode entry.
+    instances[0]!.listeners['connected']?.({
+      data: JSON.stringify({ crypto_mode: 'sframe-static' }),
+    } as MessageEvent);
+    await flushMicrotasks();
+    expect(client._roomCryptoStateSize().modes).toBe(1);
+
+    // First teardown: refCount 2 → 1. Co-subscriber still live → entry SURVIVES.
+    teardownA();
+    await flushMicrotasks();
+    expect(client._roomCryptoStateSize().modes).toBe(1);
+
+    // Second teardown: refCount 1 → 0. Last subscriber gone → entry evicted.
+    teardownB();
+    await flushMicrotasks();
+    expect(client._roomCryptoStateSize().modes).toBe(0);
+  });
 });
