@@ -211,9 +211,12 @@ jobs:
       #       including the known residual: if the ONE run that would have seen
       #       "absent" instead sees an indeterminate result (a CDN network
       #       blip), `latest/` can be stranded on the previous version with no
-      #       automatic recovery — the script logs a loud WARNING when this
-      #       happens so it's operator-visible, rather than silently retrying
-      #       forever (a full self-heal for `latest/` itself would need a
+      #       automatic recovery — the script emits a GHA ::warning:: annotation
+      #       specifically on that indeterminate case (never on the routine
+      #       "already live" case, which would cry wolf on every ordinary push)
+      #       so a genuine strand is operator-visible without opening the raw
+      #       log, rather than silently retrying forever (a full self-heal for
+      #       `latest/` itself would need a
       #       public read-and-compare against the remote's currently-live
       #       version, which isn't determinable from the versioned-dir's
       #       immutable-SRI alone — judged not worth the added complexity for

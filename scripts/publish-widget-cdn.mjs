@@ -100,6 +100,15 @@ function fail(msg) {
 	process.exit(1);
 }
 
+// GitHub Actions workflow-command annotation: shows up in the run's Job
+// Summary / Checks UI, unlike a plain stdout line which is invisible on a
+// green job unless someone opens the raw log. Message must have %/\r/\n
+// percent-encoded per GHA's workflow-command escaping rules.
+function ghaWarning(title, message) {
+	const escaped = String(message).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+	console.log(`::warning title=${title}::${escaped}`);
+}
+
 // ── Soft-skip when deploy key is absent ──────────────────────────────────────
 // Mirror the SOFT_PACKAGES pattern in release-npm-packages.mjs.
 // Pipeline safe to merge before the operator installs the key.
@@ -338,16 +347,29 @@ async function main() {
 			);
 
 			log(`widget/latest/ updated → ${VERSION}`);
+		} else if (isStable(VERSION) && deployState === 'indeterminate') {
+			// This is the genuine strand-risk case, not the benign steady state:
+			// deployState === 'live' (handled below) is the NORMAL outcome on every
+			// ordinary push during the Version-PR window (this version was already
+			// released last time, so of course it's live) — warning on that would
+			// cry wolf on every routine merge and drown out the rare real signal.
+			// 'indeterminate' means the probe itself couldn't tell (network blip,
+			// unexpected status) on what may be the ONE run that would have caught
+			// this version genuinely absent. If so, latest/ misses its only chance
+			// to advance here, and every SUBSEQUENT run sees the version as 'live'
+			// (the versioned dir deployed regardless) — permanently stranding
+			// latest/ on the OLD version with no automatic recovery. Surfaced as a
+			// real GHA annotation (not just a log line) so it's visible without
+			// opening the raw log on an otherwise-green run.
+			ghaWarning(
+				'latest/ not advanced — CDN probe was indeterminate',
+				`widget/${VERSION}/ is stable but the live-CDN probe returned 'indeterminate' (not a confirmed absent), so latest/ was NOT advanced this run. If this was meant to be the release of ${VERSION}, latest/ may now be stranded on an older version — investigate (curl -I https://cdn.oxpulse.chat/widget/latest/index.js) or re-run workflow_dispatch.`
+			);
 		} else if (isStable(VERSION)) {
-			// Not a prerelease — shouldUpdateLatest() already logged the real reason
-			// (deployState !== 'absent'). Flag it loudly: latest/ only ever advances
-			// on the one run where the probe catches this version genuinely absent.
-			// If THAT run's probe was 'indeterminate' (a network blip) or the version
-			// was already 'live' from a prior partial run, every SUBSEQUENT run also
-			// sees 'live' — latest/ can be permanently stranded on the OLD version
-			// with no automatic recovery. The versioned dir is unaffected (it always
-			// deploys/self-heals regardless) — only this mutable pointer can strand.
-			log(`WARNING: widget/${VERSION}/ is stable but latest/ was NOT advanced (CDN probe=${deployState}, not confirmed-absent). If this version was just released and latest/ still doesn't point to it after this run, latest/ may be stranded on an older version — investigate manually (curl -I https://cdn.oxpulse.chat/widget/latest/index.js, or re-run workflow_dispatch).`);
+			// deployState === 'live': the normal, expected case for most pushes —
+			// this version was already released and latest/ was already correctly
+			// advanced back then. Nothing wrong; no need to shout.
+			log(`widget/${VERSION}/ already live — latest/ presumed current, not touched`);
 		} else {
 			log(`Skipping latest/ update (${VERSION} is a prerelease)`);
 		}
