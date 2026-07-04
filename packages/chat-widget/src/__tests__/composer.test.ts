@@ -470,6 +470,49 @@ describe('Composer', () => {
     composer.destroy();
   });
 
+  // i18n follow-up: lang defaults to English (unchanged from before); lang='ru'
+  // localizes the default placeholder unless an explicit `placeholder` override wins.
+  it('textarea_default_placeholder_is_english_by_default', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    expect(getInput(container).placeholder).toBe('Type a message…');
+    composer.destroy();
+  });
+
+  it('textarea_default_placeholder_is_russian_for_lang_ru', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container, lang: 'ru' });
+    composer.mount();
+
+    expect(getInput(container).placeholder).toBe('Введите сообщение…');
+    composer.destroy();
+  });
+
+  it('explicit placeholder option wins over the localized default even with lang=ru', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container, lang: 'ru', placeholder: 'Write something…' });
+    composer.mount();
+
+    expect(getInput(container).placeholder).toBe('Write something…');
+    composer.destroy();
+  });
+
+  it('localizes aria-labels and the Send button text for lang=ru', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container, lang: 'ru' });
+    composer.mount();
+
+    const textarea = getInput(container);
+    const sendBtn = container.querySelector('.oxp-composer-send') as HTMLButtonElement;
+    expect(textarea.getAttribute('aria-label')).toBe('Поле ввода сообщения');
+    expect(sendBtn.getAttribute('aria-label')).toBe('Отправить сообщение');
+    expect(sendBtn.textContent).toBe('Отправить');
+
+    composer.destroy();
+  });
+
   // ── M7: IME composition guard ──────────────────────────────────────────────
 
   it('ignores_cmd_enter_during_ime_composition', async () => {

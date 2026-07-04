@@ -8,6 +8,7 @@
 
 import { shouldShowCounter, isCmdEnter, MAX_BODY_CHARS, autogrowHeightPx } from '../utils/textfield-helpers.js';
 import { AttachmentPicker } from './attachment-picker.js';
+import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -29,8 +30,10 @@ export interface ComposerOptions {
   roomId: string;
   container: HTMLElement;
   signal?: AbortSignal;
-  /** M5: Optional placeholder text. Default: 'Type a message…' */
+  /** M5: Optional placeholder text. Default: the localized 'composerPlaceholder' key. */
   placeholder?: string;
+  /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
+  lang?: string;
 }
 
 // ── Composer ──────────────────────────────────────────────────────────────────
@@ -42,6 +45,7 @@ export class Composer {
   #roomId: string;
   #signal: AbortSignal | undefined;
   #placeholder: string;
+  #lang: Locale;
 
   // DOM refs — set during mount()
   #root: HTMLElement | null = null;
@@ -66,7 +70,8 @@ export class Composer {
     this.#client = opts.client;
     this.#roomId = opts.roomId;
     this.#signal = opts.signal;
-    this.#placeholder = opts.placeholder ?? 'Type a message…';
+    this.#lang = resolveLocale(opts.lang);
+    this.#placeholder = opts.placeholder ?? t('composerPlaceholder', this.#lang);
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -90,7 +95,7 @@ export class Composer {
 
     const textarea = document.createElement('textarea');
     textarea.className = 'oxp-composer-input';
-    textarea.setAttribute('aria-label', 'Message input');
+    textarea.setAttribute('aria-label', t('messageInputAria', this.#lang));
     textarea.rows = 1;
     // M5: placeholder text
     textarea.placeholder = this.#placeholder;
@@ -101,14 +106,14 @@ export class Composer {
     const sendHint = document.createElement('span');
     sendHint.id = 'oxp-send-hint';
     sendHint.className = 'oxp-sr-only';
-    sendHint.textContent = 'Message is empty';
+    sendHint.textContent = t('messageEmpty', this.#lang);
 
     const sendBtn = document.createElement('button');
     sendBtn.className = 'oxp-composer-send';
     sendBtn.type = 'button';
-    sendBtn.setAttribute('aria-label', 'Send message');
+    sendBtn.setAttribute('aria-label', t('sendMessageAria', this.#lang));
     sendBtn.setAttribute('aria-describedby', 'oxp-send-hint');
-    sendBtn.textContent = 'Send';
+    sendBtn.textContent = t('send', this.#lang);
     sendBtn.disabled = true;
 
     // M9: footer row wraps counter + send button (no magic position:absolute)
@@ -125,7 +130,7 @@ export class Composer {
       const attachBtn = document.createElement('button');
       attachBtn.type = 'button';
       attachBtn.className = 'oxp-composer-attachment-btn';
-      attachBtn.setAttribute('aria-label', 'Attach files');
+      attachBtn.setAttribute('aria-label', t('attachFilesAria', this.#lang));
       attachBtn.textContent = '📎';
       attachBtn.addEventListener('click', () => {
         this.#attachmentPicker?.openFileDialog();
@@ -163,6 +168,7 @@ export class Composer {
         roomId: this.#roomId,
         container: pickerContainer,
         signal: this.#signal,
+        lang: this.#lang,
       });
       this.#attachmentPicker.mount();
 
@@ -304,9 +310,9 @@ export class Composer {
     const hint = this.#root?.querySelector('#oxp-send-hint');
     if (hint) {
       if (this.#sending) {
-        hint.textContent = 'Sending message…';
+        hint.textContent = t('sendingMessage', this.#lang);
       } else {
-        hint.textContent = overLimit ? 'Message exceeds character limit' : 'Message is empty';
+        hint.textContent = overLimit ? t('messageExceedsLimit', this.#lang) : t('messageEmpty', this.#lang);
       }
     }
 
@@ -316,7 +322,7 @@ export class Composer {
     if (showCounter) {
       const remaining = Math.max(MAX_BODY_CHARS - len, 0);
       // M10: announce units for screen readers
-      this.#counter.textContent = `${remaining} characters remaining`;
+      this.#counter.textContent = t('charactersRemaining', this.#lang, { remaining });
       this.#counter.dataset['overLimit'] = overLimit ? 'true' : 'false';
     }
   }
@@ -412,8 +418,8 @@ export class Composer {
 
     const retryBtn = document.createElement('button');
     retryBtn.type = 'button';
-    retryBtn.textContent = 'Retry';
-    retryBtn.setAttribute('aria-label', 'Retry sending message');
+    retryBtn.textContent = t('retry', this.#lang);
+    retryBtn.setAttribute('aria-label', t('retrySendingMessageAria', this.#lang));
     retryBtn.addEventListener('click', () => {
       this.#clearErrorChip();
       void this.#send(this.#lastText);

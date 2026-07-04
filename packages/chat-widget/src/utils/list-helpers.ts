@@ -2,6 +2,8 @@
 // web/src/lib/chat/list/helpers.ts (commit: W2.2 slice 1).
 // Widget package is standalone — no runtime import from web/.
 
+import { t, type Locale } from './i18n.js';
+
 /** Pure decision: is the user pinned to the bottom of a scroll container?
  *  Threshold defaults to 80px — small enough that a user who has genuinely
  *  scrolled up to read history is not jolted, large enough that subpixel
@@ -72,9 +74,11 @@ export function formatTimeRemaining(remainMs: number): string {
 }
 
 /** Tombstone replacement text — same wording for both scopes
- *  (see Task 5 spec; scope is informational, identical visuals). */
-export function tombstoneText(_scope: "self" | "everyone"): string {
-  return "This message was deleted";
+ *  (see Task 5 spec; scope is informational, identical visuals).
+ *  i18n follow-up: `lang` defaults to 'en' so every existing call site (and
+ *  the direct-import unit tests) keeps working without a signature change. */
+export function tombstoneText(_scope: "self" | "everyone", lang: Locale = 'en'): string {
+  return t('tombstone', lang);
 }
 
 /** U2: Failed-decrypt placeholder text (visible) — same wording regardless of
@@ -82,12 +86,10 @@ export function tombstoneText(_scope: "self" | "everyone"): string {
  *  tombstoneText's one-wording-for-all-cases precedent: the UI doesn't need
  *  to expose crypto failure-class detail to the end user, only that the
  *  content is unavailable. Lock glyph gives a visual cue distinct from the
- *  plain-italic tombstone. No i18n layer exists in this package (lang option
- *  is accepted but unused for strings — see MessageListOptions.lang) so this
- *  hardcoded-English string matches every other user-facing string in the
- *  widget (tombstoneText, "Retry", "Add reaction", inline list-error text). */
-export function unsealErrorText(): string {
-  return "\u{1F512} This message couldn't be decrypted";
+ *  plain-italic tombstone. i18n follow-up: routed through the widget's
+ *  locale table (see ./i18n.ts) — `lang` defaults to 'en'. */
+export function unsealErrorText(lang: Locale = 'en'): string {
+  return t('unsealError', lang);
 }
 
 /** U2 review-fix: aria/screen-reader variant of unsealErrorText() — same
@@ -95,8 +97,8 @@ export function unsealErrorText(): string {
  *  the glyph-bearing string would read as "locked This message couldn't be
  *  decrypted" — redundant once the words themselves are spoken. The glyph is
  *  a visual-only affordance; keep it out of the announced text. */
-export function unsealErrorAriaText(): string {
-  return "This message couldn't be decrypted";
+export function unsealErrorAriaText(lang: Locale = 'en'): string {
+  return t('unsealErrorAria', lang);
 }
 
 /** Does the current user have a ❤️ reaction on the given message?

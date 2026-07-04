@@ -83,6 +83,27 @@ describe('Reconnector', () => {
     r.clear();
   });
 
+  // i18n follow-up: lang defaults to English (unchanged); lang='ru' localizes
+  // the banner text and button label/aria.
+  it('notifyAuthExpired_localizes_banner_and_button_for_lang_ru', () => {
+    const r = new Reconnector({ container, host, lang: 'ru' });
+    r.notifyAuthExpired();
+    const banner = container.querySelector('.oxp-reconnect-banner')!;
+    expect(banner.textContent).toContain('Сессия истекла.');
+    const btn = banner.querySelector('button')!;
+    expect(btn.textContent).toBe('Обновить');
+    expect(btn.getAttribute('aria-label')).toBe('Обновить сессию');
+    r.clear();
+  });
+
+  it('notifyNetworkLost_localizes_the_attempt_count_message_for_lang_ru', () => {
+    const r = new Reconnector({ container, host, lang: 'ru' });
+    r.notifyNetworkLost(3);
+    const banner = container.querySelector('.oxp-reconnect-banner')!;
+    expect(banner.textContent).toBe('Соединение потеряно. Переподключение… (попытка 3)');
+    r.clear();
+  });
+
   it('notifyNetworkLost_shows_reconnecting_banner', () => {
     const r = new Reconnector({ container, host });
     r.notifyNetworkLost(1);

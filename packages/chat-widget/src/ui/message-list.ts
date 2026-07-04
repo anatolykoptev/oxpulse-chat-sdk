@@ -13,7 +13,8 @@ import { renderMarkdown } from '../utils/markdown.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl } from '../utils/attachments.js';
 import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText } from '../utils/list-helpers.js';
-import { reactionAriaLabel } from '../utils/reaction-types.js';
+import { reactionButtonAriaLabel } from '../utils/reaction-types.js';
+import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { ReactionPicker } from './reaction-picker.js';
 
 // ── Duck-typed SDK interface ──────────────────────────────────────────────────
@@ -94,7 +95,12 @@ export interface MessageListOptions {
   client: MessageListClient;
   roomId: string;
   container: HTMLElement;
-  lang: string;
+  /**
+   * BCP-47 tag or an already-resolved Locale. Optional — defaults via
+   * resolveLocale() (lang → navigator.language prefix → 'en') so direct
+   * construction (tests, advanced consumers) never has to think about it.
+   */
+  lang?: string;
   selfUid: string;
   /** Optional AbortSignal to cancel mount mid-flight (C1). */
   signal?: AbortSignal;
@@ -126,19 +132,19 @@ function formatSizeKb(bytes: number): string {
  * CB1: Render a placeholder for attachments with unsafe URLs.
  * Never sets src/href — shows filename only so no code executes.
  */
-function renderUnsafePlaceholder(att: AttachmentMeta, container: HTMLElement): void {
+function renderUnsafePlaceholder(att: AttachmentMeta, container: HTMLElement, lang: Locale): void {
   const el = document.createElement('div');
   el.className = 'oxp-attachment-unsafe';
   // CM1: setAttribute is HTML-attribute context — use escapeHtml to prevent injection via filename.
   // Other sites in this file already escape; this was the missed case (F2 fix).
-  el.setAttribute('aria-label', `Attachment: ${escapeHtml(att.filename)} (unavailable)`);
+  el.setAttribute('aria-label', t('attachmentUnavailableAria', lang, { name: escapeHtml(att.filename) }));
   // CM1: textContent is text-safe — assign raw filename (no escaping needed)
   el.textContent = `📎 ${att.filename}`;
   container.appendChild(el);
 }
 
 /** Render a single attachment element based on its MIME type. */
-function renderAttachment(att: AttachmentMeta): HTMLElement {
+function renderAttachment(att: AttachmentMeta, lang: Locale): HTMLElement {
   // CM1: use raw att.filename for DOM property/textContent assignments — these treat
   // the value as text, not HTML. escapeHtml() is only needed for innerHTML/setAttribute.
   const filename = att.filename;
@@ -151,7 +157,7 @@ function renderAttachment(att: AttachmentMeta): HTMLElement {
 
     // CB1: reject non-safe URL schemes before setting img.src
     if (!isSafeAttachmentUrl(att.url)) {
-      renderUnsafePlaceholder(att, wrap);
+      renderUnsafePlaceholder(att, wrap, lang);
       return wrap;
     }
 
@@ -163,7 +169,7 @@ function renderAttachment(att: AttachmentMeta): HTMLElement {
     // CM1: setAttribute for aria-label (HTML attribute context) — use escapeHtml for safety
     img.setAttribute(
       'aria-label',
-      `Image: ${escapeHtml(filename)}, ${formatSizeKb(att.sizeBytes)}`,
+      t('imageAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
     );
     // DM4: set width/height when available to prevent CLS.
     // F4 fix: only set minHeight when dimensions are unknown — otherwise the explicit
@@ -193,7 +199,7 @@ function renderAttachment(att: AttachmentMeta): HTMLElement {
 
     // CB1: reject non-safe URL schemes before setting audio.src
     if (!isSafeAttachmentUrl(att.url)) {
-      renderUnsafePlaceholder(att, wrap);
+      renderUnsafePlaceholder(att, wrap, lang);
       return wrap;
     }
 
@@ -204,7 +210,7 @@ function renderAttachment(att: AttachmentMeta): HTMLElement {
     // CM1: setAttribute for aria-label — use escapeHtml
     audio.setAttribute(
       'aria-label',
-      `Audio: ${escapeHtml(filename)}, ${formatSizeKb(att.sizeBytes)}`,
+      t('audioAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
     );
     wrap.appendChild(audio);
     return wrap;
@@ -216,7 +222,7 @@ function renderAttachment(att: AttachmentMeta): HTMLElement {
 
   // CB1: reject non-safe URL schemes before setting link.href
   if (!isSafeAttachmentUrl(att.url)) {
-    renderUnsafePlaceholder(att, wrap);
+    renderUnsafePlaceholder(att, wrap, lang);
     return wrap;
   }
 
@@ -230,7 +236,7 @@ function renderAttachment(att: AttachmentMeta): HTMLElement {
   // CM1: setAttribute for aria-label — use escapeHtml
   link.setAttribute(
     'aria-label',
-    `File: ${escapeHtml(filename)}, ${formatSizeKb(att.sizeBytes)}`,
+    t('fileAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
   );
   // CM1: textContent is text-safe — assign raw filename (no escapeHtml)
   link.textContent = `${filename} (${formatSizeKb(att.sizeBytes)})`;
@@ -268,6 +274,9 @@ export class MessageList {
   #roomId: string;
   #container: HTMLElement;
   #selfUid: string;
+  /** i18n: resolved once at construction (see resolveLocale()) — every
+   *  hardcoded string this class renders goes through t(key, this.#lang). */
+  #lang: Locale;
   #signal: AbortSignal;
   #abortController!: AbortController;
   #unsubscribe: (() => void) | null = null;
@@ -300,6 +309,7 @@ export class MessageList {
     this.#roomId = opts.roomId;
     this.#container = opts.container;
     this.#selfUid = opts.selfUid;
+    this.#lang = resolveLocale(opts.lang);
     this.#shadowHost = opts.shadowHost;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
@@ -537,7 +547,7 @@ export class MessageList {
       clusterEl = document.createElement('div');
       clusterEl.className = 'oxp-bubble-reactions';
       clusterEl.setAttribute('role', 'group');
-      clusterEl.setAttribute('aria-label', 'Reactions');
+      clusterEl.setAttribute('aria-label', t('reactionsGroupAria', this.#lang));
       // Insert before footer element (which contains time + reaction-add button)
       const footerEl = bubble.querySelector('.oxp-bubble-footer');
       if (footerEl) {
@@ -577,7 +587,7 @@ export class MessageList {
         existing.setAttribute('aria-pressed', String(isOwn));
         existing.setAttribute(
           'aria-label',
-          `${reactionAriaLabel(emoji)}, ${count} reaction${count !== 1 ? 's' : ''}${isOwn ? ', you reacted' : ''}`,
+          reactionButtonAriaLabel(emoji, count, isOwn, this.#lang),
         );
       } else {
         const chip = this.#buildReactionChip(msgId, emoji, count, isOwn);
@@ -592,7 +602,7 @@ export class MessageList {
     btn.setAttribute('data-emoji', emoji);
     btn.setAttribute('data-own', String(isOwn));
     btn.setAttribute('aria-pressed', String(isOwn));
-    btn.setAttribute('aria-label', `${reactionAriaLabel(emoji)}, ${count} reaction${count !== 1 ? 's' : ''}${isOwn ? ', you reacted' : ''}`);
+    btn.setAttribute('aria-label', reactionButtonAriaLabel(emoji, count, isOwn, this.#lang));
     btn.type = 'button';
     btn.textContent = `${emoji} ${count}`;
 
@@ -752,7 +762,7 @@ export class MessageList {
     const isSelf = row.senderUid === this.#selfUid;
     // T18: use roster name for other writers; "You" for self.
     // escapeHtml on roster name in case it contains special chars in the attribute context.
-    const rosterName = isSelf ? 'You' : (this.#roster.get(row.senderUid) ?? row.senderUid.slice(0, 8));
+    const rosterName = isSelf ? t('senderYou', this.#lang) : (this.#roster.get(row.senderUid) ?? row.senderUid.slice(0, 8));
     const senderLabel = escapeHtml(rosterName);
     const timeText = formatTime(rowTime(row));
     // U2: announce the tombstone / failed-decrypt placeholder text instead of
@@ -764,11 +774,11 @@ export class MessageList {
     // U2 review-fix: aria uses the glyph-free variant (unsealErrorAriaText) —
     // see its doc comment for why the lock emoji is dropped from speech.
     const plainBody = row.deletedAt
-      ? tombstoneText('everyone')
+      ? tombstoneText('everyone', this.#lang)
       : row.unsealError
-        ? unsealErrorAriaText()
+        ? unsealErrorAriaText(this.#lang)
         : decodeText(row).replace(/\n/g, ' ').slice(0, 200);
-    return `Message from ${senderLabel} at ${timeText}: ${plainBody}`;
+    return t('bubbleAriaLabel', this.#lang, { sender: senderLabel, time: timeText, body: plainBody });
   }
 
   /** Populate or update the interior of a bubble element. */
@@ -791,7 +801,7 @@ export class MessageList {
     senderEl.className = 'oxp-bubble-sender';
     if (isSelf) {
       // Own messages: show "You" or selfUid short-form — not from attacker-controlled roster.
-      senderEl.textContent = 'You';
+      senderEl.textContent = t('senderYou', this.#lang);
     } else {
       // Other writers: resolve from roster map; miss → epid short-form (first 8 chars).
       const rosterName = this.#roster.get(row.senderUid);
@@ -807,7 +817,7 @@ export class MessageList {
     if (row.deletedAt) {
       const tombEl = document.createElement('span');
       tombEl.className = 'oxp-tombstone';
-      tombEl.textContent = tombstoneText('everyone');
+      tombEl.textContent = tombstoneText('everyone', this.#lang);
       bodyEl.appendChild(tombEl);
     } else if (row.unsealError) {
       // U2: preserved-but-undecryptable row (SDK sets unsealError instead of
@@ -816,7 +826,7 @@ export class MessageList {
       // content mistaken for a real message.
       const unsealEl = document.createElement('span');
       unsealEl.className = 'oxp-unseal-error';
-      unsealEl.textContent = unsealErrorText();
+      unsealEl.textContent = unsealErrorText(this.#lang);
       bodyEl.appendChild(unsealEl);
     } else {
       const text = decodeText(row);
@@ -834,7 +844,7 @@ export class MessageList {
       const attachmentsEl = document.createElement('div');
       attachmentsEl.className = 'oxp-bubble-attachments';
       for (const att of row.attachments) {
-        attachmentsEl.appendChild(renderAttachment(att));
+        attachmentsEl.appendChild(renderAttachment(att, this.#lang));
       }
       el.appendChild(attachmentsEl);
     }
@@ -851,7 +861,7 @@ export class MessageList {
     const reactionBtn = document.createElement('button');
     reactionBtn.className = 'oxp-reaction-add-btn';
     reactionBtn.type = 'button';
-    reactionBtn.setAttribute('aria-label', 'Add reaction');
+    reactionBtn.setAttribute('aria-label', t('addReactionAria', this.#lang));
     reactionBtn.textContent = '+😀';
     reactionBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -887,6 +897,7 @@ export class MessageList {
         void this.#optimisticAddReaction(msgId, emoji);
       },
       signal: this.#signal,
+      lang: this.#lang,
     });
     // MAJOR-5: mount picker into shadow host (ShadowRoot) to escape overflow:hidden widgetRoot.
     // ShadowRoot is not HTMLElement but supports appendChild; cast is safe at runtime.
@@ -951,9 +962,9 @@ export class MessageList {
 
     const retryBtn = document.createElement('button');
     retryBtn.type = 'button';
-    retryBtn.textContent = 'Retry';
+    retryBtn.textContent = t('retry', this.#lang);
     // DM1 (design MAJOR): aria-label disambiguates from any other "Retry" in multi-context.
-    retryBtn.setAttribute('aria-label', 'Retry loading messages');
+    retryBtn.setAttribute('aria-label', t('retryLoadingMessagesAria', this.#lang));
     retryBtn.addEventListener('click', () => {
       if (this.#listEl) this.#listEl.innerHTML = '';
       void this.#retryMount();
