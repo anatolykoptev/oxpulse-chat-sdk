@@ -16,6 +16,7 @@ import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText
 import { reactionButtonAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { ReactionPicker } from './reaction-picker.js';
+import { createAvatarElement } from './avatar.js';
 
 // ── Duck-typed SDK interface ──────────────────────────────────────────────────
 
@@ -69,6 +70,16 @@ interface ReactionState {
   users: Record<string, string[]>;
 }
 
+/**
+ * Roster entry as consumed by the widget — display name plus optional avatar.
+ * Structural mirror of chat-sdk's `RosterEntry` (the widget stays SDK-import-
+ * free; element.ts bridges the concrete SDK type at the seam).
+ */
+export interface RosterEntry {
+  displayName: string;
+  avatarUrl: string | null;
+}
+
 /** Duck-typed subset of SDKChatClient used by MessageList. */
 export interface MessageListClient {
   list(roomId: string, args: { limit: number }): Promise<{ items: MessageRow[]; hasNext: boolean }>;
@@ -84,9 +95,9 @@ export interface MessageListClient {
   removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
   /**
    * T18: Fetch roster for the room.
-   * Returns a Map<epid, displayName>.  Optional — when absent roster is disabled.
+   * Returns a Map<epid, RosterEntry> (display name + optional avatar URL).  Optional — when absent roster is disabled.
    */
-  getRoster?(roomId: string): Promise<Map<string, string>>;
+  getRoster?(roomId: string): Promise<Map<string, RosterEntry>>;
 }
 
 // ── Constructor options ───────────────────────────────────────────────────────
@@ -301,7 +312,7 @@ export class MessageList {
    * Populated on mount via getRoster() and refreshed on `type:"roster"` SSE signal.
    * Debounce timer: coalesces rapid SSE roster signals (avoid N concurrent fetches).
    */
-  #roster: Map<string, string> = new Map();
+  #roster: Map<string, RosterEntry> = new Map();
   #rosterDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: MessageListOptions) {
@@ -744,7 +755,27 @@ export class MessageList {
     if (chained) el.setAttribute('data-chained', 'true');
 
     this.#populateBubble(el, row, chained);
-    return el;
+
+    // T18-avatar: wrap the bubble in a row so the sender's avatar can lead it.
+    // Shown for OTHER writers only (own messages read "You" and, WhatsApp-style,
+    // carry no self-avatar). Bubbles are still located by [role="article"], so
+    // the wrapper does not disturb update/reaction lookups.
+    const rowEl = document.createElement('div');
+    rowEl.className = 'oxp-row';
+    rowEl.setAttribute('data-self', String(isSelf));
+    if (chained) rowEl.setAttribute('data-chained', 'true');
+    if (!isSelf) {
+      const entry = this.#roster.get(row.senderUid);
+      rowEl.appendChild(
+        createAvatarElement({
+          name: entry?.displayName ?? row.senderUid.slice(0, 8),
+          avatarUrl: entry?.avatarUrl ?? null,
+          seed: row.senderUid,
+        }),
+      );
+    }
+    rowEl.appendChild(el);
+    return rowEl;
   }
 
   /**
@@ -762,7 +793,7 @@ export class MessageList {
     const isSelf = row.senderUid === this.#selfUid;
     // T18: use roster name for other writers; "You" for self.
     // escapeHtml on roster name in case it contains special chars in the attribute context.
-    const rosterName = isSelf ? t('senderYou', this.#lang) : (this.#roster.get(row.senderUid) ?? row.senderUid.slice(0, 8));
+    const rosterName = isSelf ? t('senderYou', this.#lang) : (this.#roster.get(row.senderUid)?.displayName ?? row.senderUid.slice(0, 8));
     const senderLabel = escapeHtml(rosterName);
     const timeText = formatTime(rowTime(row));
     // U2: announce the tombstone / failed-decrypt placeholder text instead of
@@ -804,7 +835,7 @@ export class MessageList {
       senderEl.textContent = t('senderYou', this.#lang);
     } else {
       // Other writers: resolve from roster map; miss → epid short-form (first 8 chars).
-      const rosterName = this.#roster.get(row.senderUid);
+      const rosterName = this.#roster.get(row.senderUid)?.displayName;
       // SEC-CR-003: textContent assignment is XSS-safe — no innerHTML or attribute sink.
       senderEl.textContent = rosterName ?? row.senderUid.slice(0, 8);
     }

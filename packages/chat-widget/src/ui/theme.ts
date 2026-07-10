@@ -179,6 +179,50 @@ export const THEME_CSS = `
   margin-bottom: 1px;
 }
 
+/* T18-avatar: message row = leading avatar + bubble (avatar for OTHER writers). */
+.oxp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  max-width: 80%;
+}
+.oxp-row[data-self='true'] {
+  align-self: flex-end;
+}
+.oxp-row[data-self='false'] {
+  align-self: flex-start;
+}
+/* The row now owns left/right placement; let the bubble fill the row width. */
+.oxp-row .oxp-bubble {
+  max-width: 100%;
+}
+.oxp-bubble-avatar {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  margin-top: 2px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  user-select: none;
+}
+.oxp-bubble-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Chained rows: keep the avatar footprint but hide it so bubbles stay aligned. */
+.oxp-row[data-chained='true'] .oxp-bubble-avatar {
+  visibility: hidden;
+}
+
 /* Placeholder + error states using theme tokens */
 .oxp-placeholder {
   font-family: var(--oxp-font);

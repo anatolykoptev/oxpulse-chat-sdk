@@ -54,8 +54,8 @@ export type { MintNamedWriteOptions, NamedWriteMintErrorCode } from './named-wri
 
 // ─── Roster (T18) ────────────────────────────────────────────────────────────
 
-export { fetchRoster, rosterDisplayName } from './roster.js';
-export type { FetchRosterOptions } from './roster.js';
+export { fetchRoster, rosterDisplayName, rosterAvatar } from './roster.js';
+export type { FetchRosterOptions, RosterEntry } from './roster.js';
 
 // ─── Wire-codec re-exports (compression API) ─────────────────────────────────
 // Production-safe symbols only. Test-only helpers (_evictDictForTesting,
