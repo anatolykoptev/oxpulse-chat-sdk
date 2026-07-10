@@ -4,8 +4,9 @@
  * Covers:
  *   1. avatarInitials — 1-word, 2-word, extra whitespace, empty, unicode.
  *   2. avatarColor — deterministic, valid hsl, differs across seeds.
- *   3. createAvatarElement — <img> for http(s) url (src+alt via property),
- *      initials fallback for null, onerror → initials, javascript: rejected.
+ *   3. createAvatarElement — <img> for http(s) url (src+alt via property,
+ *      referrerPolicy=no-referrer), initials fallback for null, onerror →
+ *      initials, javascript: rejected.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -49,6 +50,9 @@ describe('createAvatarElement', () => {
     expect(img).not.toBeNull();
     expect(img!.getAttribute('src')).toBe('https://cdn.example.com/a.png');
     expect(img!.alt).toBe('Alice');
+    // Privacy: no-referrer — an avatar host must not see the embedding page
+    // URL or visitor IP via the Referer header.
+    expect(img!.referrerPolicy).toBe('no-referrer');
     // Container is not aria-hidden when it carries a labelled image.
     expect(el.getAttribute('aria-hidden')).toBeNull();
   });

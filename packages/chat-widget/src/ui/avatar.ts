@@ -75,6 +75,10 @@ export function createAvatarElement(opts: AvatarOptions): HTMLElement {
     img.alt = opts.name; // property assignment — safe
     img.decoding = 'async';
     img.loading = 'lazy';
+    // Privacy: without this, loading a third-party avatar leaks the embedding
+    // page URL (Referer) + visitor IP to the avatar host — sharper for a
+    // privacy-adjacent product.
+    img.referrerPolicy = 'no-referrer';
     img.addEventListener(
       'error',
       () => {
