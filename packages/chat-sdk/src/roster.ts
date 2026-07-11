@@ -2,29 +2,49 @@
  * roster.ts — fetch the named-writer roster from the server.
  *
  * GET /api/sdk/roster?app_id=<app_id>&room_id=<room_id>
- * Response: { roster: Record<epid, display_name>, avatars?: Record<epid, avatar_url> }
+ * Response: { roster: Record<epid, display_name>, avatars?: Record<epid, avatar_url>,
+ *             roles?: Record<epid, "moderator"|"owner"> }
  *
  * The roster endpoint requires the same SDK JWT the widget already uses
  * for message reads.  The returned Map<epid, RosterEntry> is the client's
- * only source of truth for writer names + avatars; SSE `type:"roster"` events
- * are invalidation signals that trigger a re-fetch (they carry no data).
+ * only source of truth for writer names + avatars + roles; SSE `type:"roster"`
+ * events are invalidation signals that trigger a re-fetch (they carry no data).
  *
  * The `avatars` map is ADDITIVE (T18-avatar): a server that predates avatar
  * support simply omits it, and every member's `avatarUrl` resolves to `null`.
+ *
+ * The `roles` map is ADDITIVE + SPARSE (P5): only members with a privileged
+ * role (`moderator`/`owner`) appear — the default `member` role is implied by
+ * absence, same sparse convention as `avatars`. A server that predates role
+ * support omits the key entirely, and every member's `role` resolves to
+ * `undefined`. An unrecognised role string (future server-side role we don't
+ * yet know) is dropped at parse time — fail closed to "no badge", never
+ * surface an unknown value to the UI.
+ *
+ * These are UX-only presentation hints. The server remains the sole source of
+ * truth for authorization — callers MUST NOT use `role` to gate privileged
+ * operations client-side, only to show/hide affordance hints.
  */
 
 import { SDKChatError } from './errors.js';
 import { httpStatusToCode } from './utils.js';
 
+/** Privileged roster roles. Absence (`undefined`) means the default `member` role. */
+export type PrivilegedRole = 'moderator' | 'owner';
+
 /**
- * One roster member: their display name plus an optional avatar URL.
+ * One roster member: their display name plus optional avatar URL and role.
  *
  * `avatarUrl` is `null` when the member has no avatar (the common case) or
  * when talking to a server that predates avatar support.
+ *
+ * `role` is `undefined` for a plain member (the common case), a server that
+ * predates role support, or an unrecognised role string.
  */
 export interface RosterEntry {
   displayName: string;
   avatarUrl: string | null;
+  role?: PrivilegedRole;
 }
 
 /** Injectable fetch for tests. */
@@ -40,6 +60,12 @@ export interface FetchRosterOptions {
 interface RosterResponseBody {
   roster?: Record<string, string>;
   avatars?: Record<string, string>;
+  roles?: Record<string, string>;
+}
+
+/** Narrow a raw wire role string to a known `PrivilegedRole`, or `undefined` (fail closed). */
+function parseRole(raw: string | undefined): PrivilegedRole | undefined {
+  return raw === 'moderator' || raw === 'owner' ? raw : undefined;
 }
 
 /**
@@ -81,12 +107,14 @@ export async function fetchRoster(
   const body = (await resp.json()) as RosterResponseBody;
   const map = new Map<string, RosterEntry>();
   const avatars = body.avatars && typeof body.avatars === 'object' ? body.avatars : undefined;
+  const roles = body.roles && typeof body.roles === 'object' ? body.roles : undefined;
   if (body.roster && typeof body.roster === 'object') {
     for (const [epid, name] of Object.entries(body.roster)) {
       if (typeof epid !== 'string' || typeof name !== 'string') continue;
       const rawAvatar = avatars ? avatars[epid] : undefined;
       const avatarUrl = typeof rawAvatar === 'string' && rawAvatar.length > 0 ? rawAvatar : null;
-      map.set(epid, { displayName: name, avatarUrl });
+      const role = parseRole(roles ? roles[epid] : undefined);
+      map.set(epid, { displayName: name, avatarUrl, role });
     }
   }
   return map;
@@ -116,4 +144,15 @@ export function rosterDisplayName(roster: Map<string, RosterEntry>, epid: string
  */
 export function rosterAvatar(roster: Map<string, RosterEntry>, epid: string): string | null {
   return roster.get(epid)?.avatarUrl ?? null;
+}
+
+/**
+ * Return the privileged role for an epid from the roster map, or `undefined`
+ * for a plain member (or when the epid is absent from the roster).
+ *
+ * UX-only: never use this to gate a privileged operation client-side — the
+ * server is the sole source of truth for authorization.
+ */
+export function rosterRole(roster: Map<string, RosterEntry>, epid: string): PrivilegedRole | undefined {
+  return roster.get(epid)?.role;
 }

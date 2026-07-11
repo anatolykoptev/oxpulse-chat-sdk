@@ -25,7 +25,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { fetchRoster, rosterDisplayName, rosterAvatar, type RosterEntry } from '../roster.js';
+import { fetchRoster, rosterDisplayName, rosterAvatar, rosterRole, type RosterEntry } from '../roster.js';
 import { SDKChatError } from '../errors.js';
 import { mintNamedWriteToken, NamedWriteMintError } from '../named-write.js';
 
@@ -284,5 +284,64 @@ describe('rosterAvatar (T18-avatar)', () => {
   it('miss: absent epid returns null', () => {
     const roster = new Map<string, RosterEntry>();
     expect(rosterAvatar(roster, 'ep_missing')).toBeNull();
+  });
+});
+
+// ── roles (P5) ──────────────────────────────────────────────────────────────
+
+describe('fetchRoster — roles (P5)', () => {
+  it('parses moderator/owner roles from the sparse roles map', async () => {
+    const fetchImpl = makeFetch(200, {
+      roster: { ep_a: 'Alice', ep_b: 'Bob', ep_c: 'Carol' },
+      roles: { ep_a: 'moderator', ep_b: 'owner' },
+    });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.get('ep_a')?.role).toBe('moderator');
+    expect(map.get('ep_b')?.role).toBe('owner');
+    // ep_c is a plain member — absent from the sparse roles map → undefined, not 'member'.
+    expect(map.get('ep_c')?.role).toBeUndefined();
+  });
+
+  it('backward-compat: a response with no roles key parses with role undefined (old engine)', async () => {
+    const fetchImpl = makeFetch(200, { roster: { ep_a: 'Alice' } });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.get('ep_a')?.displayName).toBe('Alice');
+    expect(map.get('ep_a')?.role).toBeUndefined();
+  });
+
+  it('unknown role string: fails closed to role undefined', async () => {
+    const fetchImpl = makeFetch(200, {
+      roster: { ep_a: 'Alice' },
+      roles: { ep_a: 'superadmin' },
+    });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.get('ep_a')?.role).toBeUndefined();
+  });
+
+  it('ignores a role for an epid absent from the roster', async () => {
+    const fetchImpl = makeFetch(200, {
+      roster: { ep_a: 'Alice' },
+      roles: { ep_ghost: 'owner' },
+    });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.has('ep_ghost')).toBe(false);
+    expect(map.get('ep_a')?.role).toBeUndefined();
+  });
+});
+
+describe('rosterRole (P5)', () => {
+  it('hit: returns the privileged role', () => {
+    const roster = new Map<string, RosterEntry>([
+      ['ep_a', { displayName: 'Alice', avatarUrl: null, role: 'owner' }],
+    ]);
+    expect(rosterRole(roster, 'ep_a')).toBe('owner');
+  });
+  it('plain member: returns undefined', () => {
+    const roster = new Map<string, RosterEntry>([['ep_a', { displayName: 'Alice', avatarUrl: null }]]);
+    expect(rosterRole(roster, 'ep_a')).toBeUndefined();
+  });
+  it('miss: absent epid returns undefined', () => {
+    const roster = new Map<string, RosterEntry>();
+    expect(rosterRole(roster, 'ep_missing')).toBeUndefined();
   });
 });

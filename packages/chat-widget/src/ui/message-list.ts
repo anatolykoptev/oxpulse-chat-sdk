@@ -17,6 +17,7 @@ import { reactionButtonAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { ReactionPicker } from './reaction-picker.js';
 import { createAvatarElement } from './avatar.js';
+import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
 
 // ── Duck-typed SDK interface ──────────────────────────────────────────────────
 
@@ -71,13 +72,18 @@ interface ReactionState {
 }
 
 /**
- * Roster entry as consumed by the widget — display name plus optional avatar.
- * Structural mirror of chat-sdk's `RosterEntry` (the widget stays SDK-import-
- * free; element.ts bridges the concrete SDK type at the seam).
+ * Roster entry as consumed by the widget — display name plus optional avatar
+ * and privileged role. Structural mirror of chat-sdk's `RosterEntry` (the
+ * widget stays SDK-import-free; element.ts bridges the concrete SDK type at
+ * the seam).
+ *
+ * `role` is UX-only (P5): a presentation hint for the role badge, never
+ * client-side authorization for a privileged operation.
  */
 export interface RosterEntry {
   displayName: string;
   avatarUrl: string | null;
+  role?: PrivilegedRole;
 }
 
 /** Duck-typed subset of SDKChatClient used by MessageList. */
@@ -121,6 +127,12 @@ export interface MessageListOptions {
    * escaping the overflow:hidden clip of the widgetRoot.
    */
   shadowHost?: ShadowRoot;
+  /**
+   * P5: label overrides for the roster role badge (config `roleLabels`), e.g.
+   * `{ moderator: "Seller" }`. Presentation only — falls back to the built-in
+   * i18n label ("mod" / "owner") for a role with no override.
+   */
+  roleLabels?: Record<string, string>;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -314,6 +326,8 @@ export class MessageList {
    */
   #roster: Map<string, RosterEntry> = new Map();
   #rosterDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** P5: role-badge label overrides from widget config `roleLabels`. */
+  #roleLabels: Record<string, string> | undefined;
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -322,6 +336,7 @@ export class MessageList {
     this.#selfUid = opts.selfUid;
     this.#lang = resolveLocale(opts.lang);
     this.#shadowHost = opts.shadowHost;
+    this.#roleLabels = opts.roleLabels;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
     const internal = new AbortController();
@@ -830,16 +845,32 @@ export class MessageList {
     // XSS-safe: always textContent, never innerHTML (SEC-CR-003 / FF3).
     const senderEl = document.createElement('div');
     senderEl.className = 'oxp-bubble-sender';
+    // P5: sender label + optional role badge live in a row wrapper so
+    // senderEl's own textContent stays name-only (existing callers/tests read
+    // `.oxp-bubble-sender`'s textContent as the display name — a badge
+    // appended as a *child* of senderEl would leak into that string).
+    const senderRow = document.createElement('div');
+    senderRow.className = 'oxp-bubble-sender-row';
     if (isSelf) {
       // Own messages: show "You" or selfUid short-form — not from attacker-controlled roster.
       senderEl.textContent = t('senderYou', this.#lang);
     } else {
       // Other writers: resolve from roster map; miss → epid short-form (first 8 chars).
-      const rosterName = this.#roster.get(row.senderUid)?.displayName;
+      const entry = this.#roster.get(row.senderUid);
       // SEC-CR-003: textContent assignment is XSS-safe — no innerHTML or attribute sink.
-      senderEl.textContent = rosterName ?? row.senderUid.slice(0, 8);
+      senderEl.textContent = entry?.displayName ?? row.senderUid.slice(0, 8);
+      // P5: role badge — mirrors the avatar's "OTHER writers only" convention
+      // (own messages read "You" and carry no roster-derived decoration).
+      // entry?.role is undefined for a plain member or an unrecognised wire
+      // value (chat-sdk fails closed at parse time) — no badge in either case.
+      if (entry?.role === 'moderator' || entry?.role === 'owner') {
+        senderRow.appendChild(
+          createRoleBadgeElement({ role: entry.role, lang: this.#lang, roleLabels: this.#roleLabels }),
+        );
+      }
     }
-    el.appendChild(senderEl);
+    senderRow.prepend(senderEl);
+    el.appendChild(senderRow);
 
     // Body
     const bodyEl = document.createElement('div');

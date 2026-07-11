@@ -247,6 +247,142 @@ describe('MessageList — roster (T18)', () => {
   });
 });
 
+// ── Role badge (P5) ─────────────────────────────────────────────────────────
+
+describe('MessageList — roster role badge (P5)', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    container.style.height = '400px';
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    capturedSubscribeArgs = null;
+  });
+
+  it('renders a "mod" badge for a moderator (other writer)', async () => {
+    const writerEpid = 'ep_writer_mod';
+    const roster = new Map<string, RosterEntry>([
+      [writerEpid, { displayName: 'Mod Writer', avatarUrl: null, role: 'moderator' }],
+    ]);
+    const rows = [makeRow({ senderUid: writerEpid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const badge = container.querySelector('.oxp-role-badge');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe('mod');
+    expect(badge!.getAttribute('data-role')).toBe('moderator');
+    // Sender name stays name-only — badge is a sibling, not a child of .oxp-bubble-sender.
+    expect(container.querySelector('.oxp-bubble-sender')!.textContent).toBe('Mod Writer');
+    ml.destroy();
+  });
+
+  it('renders an "owner" badge for an owner (other writer)', async () => {
+    const writerEpid = 'ep_writer_owner';
+    const roster = new Map<string, RosterEntry>([
+      [writerEpid, { displayName: 'Owner Writer', avatarUrl: null, role: 'owner' }],
+    ]);
+    const rows = [makeRow({ senderUid: writerEpid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const badge = container.querySelector('.oxp-role-badge');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe('owner');
+    expect(badge!.getAttribute('data-role')).toBe('owner');
+    ml.destroy();
+  });
+
+  it('no badge for a plain member (role absent from the sparse roster map)', async () => {
+    const writerEpid = 'ep_writer_plain';
+    const roster = new Map<string, RosterEntry>([
+      [writerEpid, { displayName: 'Plain Writer', avatarUrl: null }],
+    ]);
+    const rows = [makeRow({ senderUid: writerEpid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(container.querySelector('.oxp-role-badge')).toBeNull();
+    ml.destroy();
+  });
+
+  it('old-engine backward-compat: roster with no role field at all → no badge, no crash', async () => {
+    // Simulates the pre-P5 wire shape (RosterEntry from a server that predates
+    // role support) — role is simply absent from the object, not `undefined` set explicitly.
+    const writerEpid = 'ep_writer_old_engine';
+    const roster = new Map<string, RosterEntry>([
+      [writerEpid, { displayName: 'Old Engine Writer', avatarUrl: null } as RosterEntry],
+    ]);
+    const rows = [makeRow({ senderUid: writerEpid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(container.querySelector('.oxp-role-badge')).toBeNull();
+    expect(container.querySelector('.oxp-bubble-sender')!.textContent).toBe('Old Engine Writer');
+    ml.destroy();
+  });
+
+  it('no badge for own messages even when self has a privileged role in the roster', async () => {
+    const selfUid = 'ep_self_mod';
+    const roster = new Map<string, RosterEntry>([
+      [selfUid, { displayName: 'Myself', avatarUrl: null, role: 'owner' }],
+    ]);
+    const rows = [makeRow({ senderUid: selfUid, text: 'my msg', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Mirrors the avatar convention: own messages read "You" and carry no
+    // roster-derived decoration (name or avatar or badge).
+    expect(container.querySelector('.oxp-role-badge')).toBeNull();
+    expect(container.querySelector('.oxp-bubble-sender')!.textContent).toBe('You');
+    ml.destroy();
+  });
+
+  it('roleLabels config override renders the partner-supplied label', async () => {
+    const writerEpid = 'ep_writer_labeled';
+    const roster = new Map<string, RosterEntry>([
+      [writerEpid, { displayName: 'Seller Writer', avatarUrl: null, role: 'moderator' }],
+    ]);
+    const rows = [makeRow({ senderUid: writerEpid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({
+      client,
+      roomId: 'room1',
+      container,
+      lang: 'en',
+      selfUid: 'self-uid',
+      roleLabels: { moderator: 'Seller' },
+    });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const badge = container.querySelector('.oxp-role-badge');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe('Seller');
+    ml.destroy();
+  });
+});
+
 // ── Element-level integration: onRosterSignal forwarded through real adapter ──
 
 /**

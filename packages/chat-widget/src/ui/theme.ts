@@ -301,6 +301,14 @@ export const THEME_CSS = `
   outline-offset: 2px;
 }
 
+/* P5: sender label + optional role badge (senderEl is prepended into this row). */
+.oxp-bubble-sender-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  margin-bottom: 2px;
+}
+
 .oxp-bubble-sender {
   font-size: 0.75rem;
   font-weight: 600;
@@ -309,11 +317,29 @@ export const THEME_CSS = `
    * (#f1f0f0 light / #2c2c2e dark) backgrounds. */
   color: var(--oxp-fg);
   opacity: 0.7;
-  margin-bottom: 2px;
 }
 
-.oxp-bubble[data-chained='true'] .oxp-bubble-sender {
+.oxp-bubble[data-chained='true'] .oxp-bubble-sender-row {
   display: none;
+}
+
+/* P5: privileged-role badge (moderator/owner) next to the sender name.
+ * background/color pairing mirrors .oxp-composer-send (F1: --oxp-on-accent on
+ * --oxp-accent verified 5.39:1 light / 5.82:1 dark — WCAG AA for normal text). */
+.oxp-role-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--oxp-accent);
+  color: var(--oxp-on-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 
 .oxp-bubble-body {

@@ -639,6 +639,8 @@ export class OxpulseChatElement extends HTMLElement {
         signal: signal,
         // MAJOR-5: pass shadow root so ReactionPicker mounts outside overflow:hidden widgetRoot.
         shadowHost: this.#shadow ?? undefined,
+        // P5: role-badge label overrides, presentation only.
+        roleLabels: config.roleLabels,
       });
 
       await this.#messageList.mount();
