@@ -1,0 +1,35 @@
+name: preflight
+# PR test gate on the krolik self-hosted runner (fleet rule: tests run in CI,
+# never skip-to-green). Runner: ~/actions-runner-oxpulse-chat-sdk on krolik,
+# systemd user unit actions-runner-oxpulse-chat-sdk.service.
+#
+# Private repo on the free plan → no branch-protection enforcement; the gate
+# is procedural: never merge a red preflight.
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: [self-hosted, krolik]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
