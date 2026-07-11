@@ -43,8 +43,13 @@ jobs:
           corepack enable
           pnpm install --frozen-lockfile
 
+      # build:cdn is NOT part of the root build script, but
+      # chat-widget/src/__tests__/cdn-bundle.test.ts asserts against the
+      # dist-cdn/index.js artifact — provision it (never skip the test).
       - name: Build
-        run: pnpm build
+        run: |
+          pnpm build
+          pnpm --filter @oxpulse/chat-widget build:cdn
 
       - name: Typecheck
         run: pnpm typecheck
