@@ -25,7 +25,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { fetchRoster, rosterDisplayName } from '../roster.js';
+import { fetchRoster, rosterDisplayName, rosterAvatar, type RosterEntry } from '../roster.js';
 import { SDKChatError } from '../errors.js';
 import { mintNamedWriteToken, NamedWriteMintError } from '../named-write.js';
 
@@ -56,8 +56,10 @@ describe('fetchRoster', () => {
 
     const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
 
-    expect(map.get('ep_abc123')).toBe('Alice');
-    expect(map.get('ep_def456')).toBe('Bob');
+    expect(map.get('ep_abc123')?.displayName).toBe('Alice');
+    expect(map.get('ep_def456')?.displayName).toBe('Bob');
+    // No `avatars` in the response → avatarUrl null (backward-compat).
+    expect(map.get('ep_abc123')?.avatarUrl).toBeNull();
     expect(map.size).toBe(2);
   });
 
@@ -129,23 +131,23 @@ describe('fetchRoster', () => {
 
 describe('rosterDisplayName', () => {
   it('hit: returns name from roster map', () => {
-    const roster = new Map([['ep_abc123def456', 'Alice']]);
+    const roster = new Map<string, RosterEntry>([['ep_abc123def456', { displayName: 'Alice', avatarUrl: null }]]);
     expect(rosterDisplayName(roster, 'ep_abc123def456')).toBe('Alice');
   });
 
   it('miss: returns first 8 chars of epid', () => {
-    const roster = new Map<string, string>();
+    const roster = new Map<string, RosterEntry>();
     // epid longer than 8 chars → truncated
     expect(rosterDisplayName(roster, 'ep_abcdefghij')).toBe('ep_abcde');
   });
 
   it('miss: short epid returned as-is when <= 8 chars', () => {
-    const roster = new Map<string, string>();
+    const roster = new Map<string, RosterEntry>();
     expect(rosterDisplayName(roster, 'ep_abc')).toBe('ep_abc');
   });
 
   it('miss: never returns empty string', () => {
-    const roster = new Map<string, string>();
+    const roster = new Map<string, RosterEntry>();
     const result = rosterDisplayName(roster, 'ep_xyz999');
     expect(result.length).toBeGreaterThan(0);
   });
@@ -232,5 +234,55 @@ describe('FF6 alg-pin: mintNamedWriteToken rejects alg:none and alg:HS256 from m
     });
     // Returns the raw token string — no error thrown.
     expect(result).toBe(EDDSA_TOKEN);
+  });
+});
+
+// ── fetchRoster avatars + rosterAvatar (T18-avatar) ──────────────────────────
+
+describe('fetchRoster — avatars (T18-avatar)', () => {
+  it('parses avatar_url from the avatars map', async () => {
+    const fetchImpl = makeFetch(200, {
+      roster: { ep_a: 'Alice', ep_b: 'Bob' },
+      avatars: { ep_a: 'https://cdn.example.com/a.png' },
+    });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.get('ep_a')?.avatarUrl).toBe('https://cdn.example.com/a.png');
+    // ep_b is named but has no avatar → null.
+    expect(map.get('ep_b')?.avatarUrl).toBeNull();
+    expect(map.get('ep_a')?.displayName).toBe('Alice');
+  });
+
+  it('backward-compat: a response with no avatars key parses with null avatars', async () => {
+    const fetchImpl = makeFetch(200, { roster: { ep_a: 'Alice' } });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.get('ep_a')?.displayName).toBe('Alice');
+    expect(map.get('ep_a')?.avatarUrl).toBeNull();
+  });
+
+  it('ignores an avatar for an epid absent from the roster', async () => {
+    const fetchImpl = makeFetch(200, {
+      roster: { ep_a: 'Alice' },
+      avatars: { ep_ghost: 'https://cdn.example.com/ghost.png' },
+    });
+    const map = await fetchRoster({ baseUrl: BASE_URL, appId: APP_ID, roomId: ROOM_ID, jwt: JWT, fetchImpl });
+    expect(map.has('ep_ghost')).toBe(false);
+    expect(map.get('ep_a')?.avatarUrl).toBeNull();
+  });
+});
+
+describe('rosterAvatar (T18-avatar)', () => {
+  it('hit: returns the avatar URL', () => {
+    const roster = new Map<string, RosterEntry>([
+      ['ep_a', { displayName: 'Alice', avatarUrl: 'https://cdn.example.com/a.png' }],
+    ]);
+    expect(rosterAvatar(roster, 'ep_a')).toBe('https://cdn.example.com/a.png');
+  });
+  it('member without an avatar: returns null', () => {
+    const roster = new Map<string, RosterEntry>([['ep_a', { displayName: 'Alice', avatarUrl: null }]]);
+    expect(rosterAvatar(roster, 'ep_a')).toBeNull();
+  });
+  it('miss: absent epid returns null', () => {
+    const roster = new Map<string, RosterEntry>();
+    expect(rosterAvatar(roster, 'ep_missing')).toBeNull();
   });
 });

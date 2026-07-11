@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageList } from '../ui/message-list.js';
-import type { MessageListClient, MessageRow } from '../ui/message-list.js';
+import type { MessageListClient, MessageRow, RosterEntry } from '../ui/message-list.js';
 import { OxpulseChatElement, defineElement } from '../element.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ let capturedSubscribeArgs: CapturedSubscribeArgs | null = null;
 
 function makeMockClient(opts: {
   rows?: MessageRow[];
-  roster?: Map<string, string>;
+  roster?: Map<string, RosterEntry>;
   getRosterFn?: ReturnType<typeof vi.fn>;
 }): MessageListClient {
   capturedSubscribeArgs = null;
@@ -81,7 +81,7 @@ describe('MessageList — roster (T18)', () => {
   // ── 1: roster fetched on mount ──────────────────────────────────────────────
 
   it('getRoster called on mount after initial list()', async () => {
-    const getRosterFn = vi.fn().mockResolvedValue(new Map([['ep_writer1', 'Alice']]));
+    const getRosterFn = vi.fn().mockResolvedValue(new Map<string, RosterEntry>([['ep_writer1', { displayName: 'Alice', avatarUrl: null }]]));
     const client = makeMockClient({ getRosterFn });
 
     const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
@@ -99,7 +99,7 @@ describe('MessageList — roster (T18)', () => {
 
   it('renders roster display name for messages from other writers', async () => {
     const writerEpid = 'ep_writer_abc123def456';
-    const roster = new Map([[writerEpid, 'Bob Sender']]);
+    const roster = new Map<string, RosterEntry>([[writerEpid, { displayName: 'Bob Sender', avatarUrl: null }]]);
     const rows = [makeRow({ senderUid: writerEpid, text: 'hello', seq: 1 })];
     const client = makeMockClient({ rows, roster });
 
@@ -139,7 +139,7 @@ describe('MessageList — roster (T18)', () => {
   it('XSS: roster name with <script> is inert — not executed, not injected as HTML', async () => {
     const epid = 'ep_attacker';
     const xssName = '<script>window.__xssHit=1</script>';
-    const roster = new Map([[epid, xssName]]);
+    const roster = new Map<string, RosterEntry>([[epid, { displayName: xssName, avatarUrl: null }]]);
     const rows = [makeRow({ senderUid: epid, text: 'msg', seq: 1 })];
     const client = makeMockClient({ rows, roster });
 
@@ -170,7 +170,7 @@ describe('MessageList — roster (T18)', () => {
   it('onRosterSignal triggers debounced re-fetch of getRoster', async () => {
     const getRosterFn = vi.fn()
       .mockResolvedValueOnce(new Map())       // initial fetch
-      .mockResolvedValueOnce(new Map([['ep_writer1', 'Alice']])); // re-fetch on signal
+      .mockResolvedValueOnce(new Map<string, RosterEntry>([['ep_writer1', { displayName: 'Alice', avatarUrl: null }]])); // re-fetch on signal
 
     const client = makeMockClient({ getRosterFn });
 
@@ -198,7 +198,7 @@ describe('MessageList — roster (T18)', () => {
   it('own messages show "You" — roster name not used for self', async () => {
     const selfUid = 'ep_self_uid_123';
     // Even if roster has a name for selfUid, "You" must be shown.
-    const roster = new Map([[selfUid, 'Myself from roster']]);
+    const roster = new Map<string, RosterEntry>([[selfUid, { displayName: 'Myself from roster', avatarUrl: null }]]);
     const rows = [makeRow({ senderUid: selfUid, text: 'my msg', seq: 1 })];
     const client = makeMockClient({ rows, roster });
 
@@ -217,8 +217,8 @@ describe('MessageList — roster (T18)', () => {
 
   it('names update in DOM after roster re-fetch via signal', async () => {
     const epid = 'ep_writer_refresh';
-    const initialRoster = new Map<string, string>(); // miss initially
-    const updatedRoster = new Map([[epid, 'Alice Updated']]);
+    const initialRoster = new Map<string, RosterEntry>(); // miss initially
+    const updatedRoster = new Map<string, RosterEntry>([[epid, { displayName: 'Alice Updated', avatarUrl: null }]]);
 
     const getRosterFn = vi.fn()
       .mockResolvedValueOnce(initialRoster)
@@ -364,5 +364,115 @@ describe('OxpulseChatElement — roster signal forwarded through element adapter
 
     el.destroy();
     globalThis.fetch = originalFetch;
+  });
+});
+
+
+// ── T18-avatar: message-row avatar rendering (integration through MessageList) ─
+
+describe('MessageList — avatar (T18-avatar)', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    container.style.height = '400px';
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    capturedSubscribeArgs = null;
+  });
+
+  it('renders an <img> avatar with alt=display name when avatar_url present', async () => {
+    const epid = 'ep_avatar_writer';
+    const url = 'https://cdn.example.com/a.png';
+    const roster = new Map<string, RosterEntry>([[epid, { displayName: 'Alice', avatarUrl: url }]]);
+    const rows = [makeRow({ senderUid: epid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const img = container.querySelector('.oxp-bubble-avatar img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    // Red-on-revert: remove the createAvatarElement wiring in #createBubble → no <img>.
+    // src set via property (XSS-safe); alt = display name (accessible).
+    expect(img!.getAttribute('src')).toBe(url);
+    expect(img!.alt).toBe('Alice');
+    ml.destroy();
+  });
+
+  it('renders an initials-circle fallback when avatar_url absent', async () => {
+    const epid = 'ep_noavatar';
+    const roster = new Map<string, RosterEntry>([[epid, { displayName: 'Bob Smith', avatarUrl: null }]]);
+    const rows = [makeRow({ senderUid: epid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const avatar = container.querySelector('.oxp-bubble-avatar') as HTMLElement | null;
+    expect(avatar).not.toBeNull();
+    expect(avatar!.querySelector('img')).toBeNull();
+    // Initials from "Bob Smith" → "BS". Red-on-revert: drop the initials fallback.
+    expect(avatar!.textContent).toBe('BS');
+    ml.destroy();
+  });
+
+  it('falls back to initials when the avatar image errors (onerror)', async () => {
+    const epid = 'ep_broken';
+    const url = 'https://cdn.example.com/broken.png';
+    const roster = new Map<string, RosterEntry>([[epid, { displayName: 'Carol', avatarUrl: url }]]);
+    const rows = [makeRow({ senderUid: epid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const img = container.querySelector('.oxp-bubble-avatar img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    // Simulate a load failure — onerror swaps to initials.
+    img!.dispatchEvent(new Event('error'));
+    const avatar = container.querySelector('.oxp-bubble-avatar') as HTMLElement;
+    expect(avatar.querySelector('img')).toBeNull();
+    expect(avatar.textContent).toBe('C'); // "Carol" → "C"
+    ml.destroy();
+  });
+
+  it('does not render an avatar for own messages (WhatsApp-style)', async () => {
+    const selfUid = 'ep_self';
+    const roster = new Map<string, RosterEntry>([[selfUid, { displayName: 'Me', avatarUrl: 'https://cdn.example.com/me.png' }]]);
+    const rows = [makeRow({ senderUid: selfUid, text: 'mine', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Red-on-revert: drop the `if (!isSelf)` guard and a self-avatar appears.
+    expect(container.querySelector('.oxp-bubble-avatar')).toBeNull();
+    ml.destroy();
+  });
+
+  it('XSS: a javascript: avatar_url is not used as <img src> — initials shown', async () => {
+    const epid = 'ep_xss';
+    const roster = new Map<string, RosterEntry>([[epid, { displayName: 'Mallory', avatarUrl: 'javascript:alert(1)' }]]);
+    const rows = [makeRow({ senderUid: epid, text: 'hi', seq: 1 })];
+    const client = makeMockClient({ rows, roster });
+
+    const ml = new MessageList({ client, roomId: 'room1', container, lang: 'en', selfUid: 'self-uid' });
+    await ml.mount();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const avatar = container.querySelector('.oxp-bubble-avatar') as HTMLElement;
+    expect(avatar).not.toBeNull();
+    // Defensive client-side gate: non-http(s) URL rejected → no <img>, initials instead.
+    expect(avatar.querySelector('img')).toBeNull();
+    expect(avatar.textContent).toBe('M');
+    ml.destroy();
   });
 });
