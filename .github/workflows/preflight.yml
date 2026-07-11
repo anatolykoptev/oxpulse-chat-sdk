@@ -20,6 +20,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The runner's systemd service has a bare PATH (/usr/bin first), where
+      # node is the system v22 — which lacks the Web Locks API that the
+      # SEC-CR-003 durable-replay tests (and corepack's pnpm shim) need.
+      # Select the box's nvm node 24 explicitly and fail LOUD if the runtime
+      # still lacks navigator.locks, so env drift breaks here — not as
+      # mysterious test failures.
+      - name: Select node 24 (nvm)
+        run: |
+          export NVM_DIR="$HOME/.nvm"
+          . "$NVM_DIR/nvm.sh"
+          nvm use 24
+          echo "$(dirname "$(command -v node)")" >> "$GITHUB_PATH"
+
+      - name: Assert Web Locks available
+        run: |
+          node --version
+          node -e "if (typeof navigator?.locks?.request !== 'function') { console.error('node lacks Web Locks (need node >= 24) — SEC-CR-003 tests would silently lose coverage'); process.exit(1) }"
+
       - name: Install
         run: |
           corepack enable
