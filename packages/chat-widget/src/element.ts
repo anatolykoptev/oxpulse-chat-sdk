@@ -7,7 +7,7 @@
  * Voice/video interface reserved for v3.0: see WidgetConfig for attribute stub.
  */
 
-import { checkOrigin } from './bootstrap.js';
+import { checkOrigin, decodeJwtPayload } from './bootstrap.js';
 import { sendRefreshTokenToIframe } from './postmessage.js';
 import {
   WidgetError,
@@ -30,6 +30,25 @@ const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERS
 const ELEMENT_TAG = 'oxpulse-chat';
 /** Default OxPulse API base URL when no `base-url` override is set. Single source for the postMessage target origin. */
 const DEFAULT_BASE_URL = 'https://oxpulse.chat';
+
+/**
+ * Derive the self uid from the JWT `sub` claim (display-side only — the
+ * server never trusts it; it drives self/other bubble alignment).
+ *
+ * Fail-soft by design: a malformed or expired token returns `undefined`
+ * here rather than throwing — bootstrap's own `decodeJwtPayload` call is
+ * where the real error surfaces to the embedder. Alignment sugar must
+ * never take the widget down.
+ */
+export function selfUidFromJwt(jwt: string | null): string | undefined {
+  if (!jwt) return undefined;
+  try {
+    const sub = decodeJwtPayload(jwt)['sub'];
+    return typeof sub === 'string' && sub !== '' ? sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // ── OxpulseChatElement ────────────────────────────────────────────────────────
 
@@ -816,7 +835,11 @@ export class OxpulseChatElement extends HTMLElement {
     const mode = this.getAttribute('mode');
     const theme = this.getAttribute('theme');
     const lang = this.getAttribute('lang');
-    const selfUid = this.getAttribute('self-uid');
+    // self/other bubble alignment: an explicit self-uid attribute wins;
+    // without it, fall back to the JWT `sub` claim so the visitor's own
+    // messages align right out of the box (previously the fallback was ''
+    // → every message, own included, rendered as "other" / left-aligned).
+    const selfUid = this.getAttribute('self-uid') ?? selfUidFromJwt(jwt);
     const baseUrl = this.getAttribute('base-url') ?? undefined;
 
     return {
