@@ -73,7 +73,10 @@ export type LocaleKey =
   | 'reconnect'
   | 'retryConnectionManuallyAria'
   // Element loading state
-  | 'chatLoading';
+  | 'chatLoading'
+  // Roster role badge (P5)
+  | 'roleBadgeModerator'
+  | 'roleBadgeOwner';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -131,6 +134,9 @@ const en: LocaleTable = {
   retryConnectionManuallyAria: 'Retry connection manually',
 
   chatLoading: 'Chat loading…',
+
+  roleBadgeModerator: 'mod',
+  roleBadgeOwner: 'owner',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -186,6 +192,9 @@ const ru: LocaleTable = {
   retryConnectionManuallyAria: 'Повторить подключение вручную',
 
   chatLoading: 'Загрузка чата…',
+
+  roleBadgeModerator: 'модератор',
+  roleBadgeOwner: 'владелец',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };

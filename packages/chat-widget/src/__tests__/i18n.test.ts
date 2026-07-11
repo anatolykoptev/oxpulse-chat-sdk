@@ -19,6 +19,7 @@ const ALL_LOCALE_KEYS: LocaleKey[] = [
   'sessionExpired', 'refresh', 'refreshSessionAria', 'connectionLostReconnecting',
   'connected', 'couldNotReconnect', 'reconnect', 'retryConnectionManuallyAria',
   'chatLoading',
+  'roleBadgeModerator', 'roleBadgeOwner',
 ];
 
 describe('lookupWithFallback', () => {

@@ -125,6 +125,19 @@ export interface WidgetConfig {
    * Never set in production code.
    */
   _mintNamedWriteToken?: (opts: { mintEndpoint: string; roomId: string }) => Promise<string>;
+
+  // ── Roster role badge (P5) ────────────────────────────────────────────────
+
+  /**
+   * Label overrides for the roster role badge shown next to a privileged
+   * member's name (e.g. `{ moderator: "Seller", owner: "Store owner" }`).
+   *
+   * Presentation only — a role with no override falls back to the built-in
+   * i18n label ("mod" / "owner", localized per `lang`). Roles are sourced
+   * from the server's roster response and are NOT client-side authorization:
+   * do not use them to gate a privileged operation.
+   */
+  roleLabels?: Record<string, string>;
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
