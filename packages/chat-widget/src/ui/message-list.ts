@@ -12,7 +12,7 @@
 import { renderMarkdown } from '../utils/markdown.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl } from '../utils/attachments.js';
-import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText } from '../utils/list-helpers.js';
+import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch } from '../utils/list-helpers.js';
 import { reactionButtonAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { ReactionPicker } from './reaction-picker.js';
@@ -604,7 +604,7 @@ export class MessageList {
     // Mutate or append chips
     for (const [emoji, count] of activeReactions) {
       const emojiUsers = state?.users[emoji] ?? [];
-      const isOwn = emojiUsers.includes(this.#selfUid);
+      const isOwn = emojiUsers.some((uid) => isSelfMatch(uid, this.#selfUid));
       const existing = existingChips.get(emoji);
       if (existing) {
         // Mutate in-place — preserves focus
@@ -752,7 +752,7 @@ export class MessageList {
 
   /** Build a bubble element for a row. */
   #createBubble(row: MessageRow, idx: number): HTMLElement {
-    const isSelf = row.senderUid === this.#selfUid;
+    const isSelf = isSelfMatch(row.senderUid, this.#selfUid);
 
     // Determine chaining
     const prevMsgId = idx > 0 ? this.#order[idx - 1] : undefined;
@@ -805,7 +805,7 @@ export class MessageList {
    * later flagged as tampered/replayed).
    */
   #ariaLabelFor(row: MessageRow): string {
-    const isSelf = row.senderUid === this.#selfUid;
+    const isSelf = isSelfMatch(row.senderUid, this.#selfUid);
     // T18: use roster name for other writers; "You" for self.
     // escapeHtml on roster name in case it contains special chars in the attribute context.
     const rosterName = isSelf ? t('senderYou', this.#lang) : (this.#roster.get(row.senderUid)?.displayName ?? row.senderUid.slice(0, 8));
@@ -829,7 +829,7 @@ export class MessageList {
 
   /** Populate or update the interior of a bubble element. */
   #populateBubble(el: HTMLElement, row: MessageRow, chained: boolean): void {
-    const isSelf = row.senderUid === this.#selfUid;
+    const isSelf = isSelfMatch(row.senderUid, this.#selfUid);
 
     // review-fix HIGH#1: recompute aria-label every call so it stays in sync
     // on live updates (#updateBubble), not just the initial #createBubble render.

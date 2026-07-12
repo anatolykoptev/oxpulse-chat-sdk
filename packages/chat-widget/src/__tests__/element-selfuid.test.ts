@@ -134,4 +134,74 @@ describe('OxpulseChatElement — selfUid wiring', () => {
     // The jwt sub must NOT be treated as self when the attribute is set.
     expect(jwtSub!.getAttribute('data-self')).toBe('false');
   });
+
+  // Bug 1 (independent audit, sibling gap to #39): #resolveConfig() computes
+  // config.selfUid BEFORE anon-read / named-write minting runs in #bootstrap, so
+  // it can never see a mint result. In anon-read mode there is no jwt attribute
+  // at all (selfUidFromJwt(null) → undefined), so selfUid stayed unresolved even
+  // though a real identity (anon mint userId, and/or the named-write JWT's sub)
+  // became available moments later — the visitor's own echoed messages then
+  // rendered as "other".
+  describe('selfUid backfill from minted anon/write identity (no self-uid attr, no jwt attr)', () => {
+    it('anon-read + named-write: a message from the write JWT sub renders data-self=true', async () => {
+      const WRITE_JWT = makeJwt({ aud_origins: ['http://localhost:*'], sub: 'named-writer', write: true });
+      const mintAnon = vi.fn().mockResolvedValue({
+        token: makeJwt({ aud_origins: ['http://localhost:*'], sub: 'anon-001', anon: true }),
+        userId: 'anon-uid-001',
+        expiresAt: Math.floor(Date.now() / 1000) + 300,
+      });
+      const mintWrite = vi.fn().mockResolvedValue(WRITE_JWT);
+
+      const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+      el.setAttribute('app-id', 'app1');
+      el.setAttribute('room-id', 'room1');
+      el.setAttribute('allow-anon-read', '');
+      el.setAttribute('allow-write', '');
+      el.setAttribute('write-mint-endpoint', '/api/write-token');
+      el._setCallbacks({
+        _mintAnonReadToken: mintAnon,
+        _mintNamedWriteToken: mintWrite,
+        _createClient: () => makeMockClient([makeRow('m-own', 'named-writer'), makeRow('m-other', 'u-other')]),
+      });
+      container.appendChild(el);
+      await new Promise((r) => setTimeout(r, 80));
+
+      const shadow = el.shadowRoot;
+      expect(shadow).not.toBeNull();
+      const own = shadow!.querySelector('.oxp-bubble[data-msg-id="m-own"]');
+      const other = shadow!.querySelector('.oxp-bubble[data-msg-id="m-other"]');
+      expect(own, 'own bubble rendered').not.toBeNull();
+      expect(other, 'other bubble rendered').not.toBeNull();
+      expect(own!.getAttribute('data-self')).toBe('true');
+      expect(other!.getAttribute('data-self')).toBe('false');
+    });
+
+    it('anon-read only (no named-write): a message from the anon mint userId renders data-self=true', async () => {
+      const mintAnon = vi.fn().mockResolvedValue({
+        token: makeJwt({ aud_origins: ['http://localhost:*'], sub: 'anon-002', anon: true }),
+        userId: 'anon-uid-X',
+        expiresAt: Math.floor(Date.now() / 1000) + 300,
+      });
+
+      const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+      el.setAttribute('app-id', 'app1');
+      el.setAttribute('room-id', 'room1');
+      el.setAttribute('allow-anon-read', '');
+      el._setCallbacks({
+        _mintAnonReadToken: mintAnon,
+        _createClient: () => makeMockClient([makeRow('m-own', 'anon-uid-X'), makeRow('m-other', 'u-other')]),
+      });
+      container.appendChild(el);
+      await new Promise((r) => setTimeout(r, 80));
+
+      const shadow = el.shadowRoot;
+      expect(shadow).not.toBeNull();
+      const own = shadow!.querySelector('.oxp-bubble[data-msg-id="m-own"]');
+      const other = shadow!.querySelector('.oxp-bubble[data-msg-id="m-other"]');
+      expect(own, 'own bubble rendered').not.toBeNull();
+      expect(other, 'other bubble rendered').not.toBeNull();
+      expect(own!.getAttribute('data-self')).toBe('true');
+      expect(other!.getAttribute('data-self')).toBe('false');
+    });
+  });
 });

@@ -101,6 +101,21 @@ export function unsealErrorAriaText(lang: Locale = 'en'): string {
   return t('unsealErrorAria', lang);
 }
 
+/**
+ * Guarded self/other identity compare — the single source of truth for every
+ * self-identity check in message-list.ts (bubble alignment, aria-label,
+ * reaction "own" state). Returns false whenever selfUid is unresolved (empty
+ * string), so a row can never false-positive as "self" merely because both
+ * senderUid and selfUid happen to be empty — mirrors hasOwnHeart's non-empty
+ * guard below. Extracted after an independent audit found 4 separate inline
+ * `===`/`includes` compares in message-list.ts that could drift (sibling gap
+ * to PR #39's selfUidFromJwt fix).
+ */
+export function isSelf(senderUid: string, selfUid: string): boolean {
+  if (selfUid === "") return false;
+  return senderUid === selfUid;
+}
+
 /** Does the current user have a ❤️ reaction on the given message?
  *  Pure helper so the heart-fill state is unit-testable without
  *  mounting Svelte. Tuple shape mirrors the hook view. */

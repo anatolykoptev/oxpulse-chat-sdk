@@ -122,6 +122,25 @@ describe('MessageList — reactions', () => {
     ml.destroy();
   });
 
+  it('empty selfUid never false-positives a reaction chip as own, even if the users list carries a stray empty entry (Bug 2 — see list-helpers.isSelf)', async () => {
+    // Wiring-proof: fails if #updateReactionCluster ever reverts to the bare
+    // `emojiUsers.includes(this.#selfUid)` compare instead of routing through
+    // the guarded isSelf() helper — [''].includes('') would otherwise read as own.
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-empty', seq: 1 });
+    const reactions: Record<string, ReactionsResponse> = {
+      'msg-empty': { counts: { '👍': 1 }, users: { '👍': [''] }, truncated: false },
+    };
+    const client = makeMockClient([row], reactions);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: '' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const chip = container.querySelector('.oxp-reaction-chip') as HTMLButtonElement | null;
+    expect(chip).not.toBeNull();
+    expect(chip!.getAttribute('data-own')).toBe('false');
+    ml.destroy();
+  });
+
   it('clicking_own_chip_calls_removeReaction', async () => {
     const row = makeRow({ senderUid: 'u1', msgId: 'msg-3', seq: 1 });
     const reactions: Record<string, ReactionsResponse> = {
