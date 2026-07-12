@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { MessageList, MAX_LIVE_MESSAGES } from '../ui/message-list.js';
+import { MessageList, MAX_LIVE_MESSAGES, MAX_LIVE_MESSAGES_HARD_CEILING } from '../ui/message-list.js';
 import type { MessageListClient, MessageRow, ReactionEvent } from '../ui/message-list.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -171,6 +171,42 @@ describe('MessageList — live-message eviction', () => {
 
     ml.destroy();
   });
+
+  it('walk_away_case_still_evicts_once_the_hard_ceiling_is_crossed_while_unpinned', async () => {
+    // Reviewer-flagged MAJOR (PR #41): a visitor who scrolls up once and
+    // never returns to bottom saw #order/#rows/DOM grow WITHOUT LIMIT — the
+    // soft MAX_LIVE_MESSAGES cap only ever trims on a pinned append, so it
+    // never fired for that session. This proves the walk-away case is now
+    // bounded at MAX_LIVE_MESSAGES_HARD_CEILING even while permanently
+    // unpinned, while a normal-sized scrolled-up reading session (the
+    // sibling test above, well under the ceiling) still isn't yanked.
+    container = makeContainer();
+    const client = makeMockClient([]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const listEl = container.querySelector('.oxp-message-list') as HTMLElement;
+    Object.defineProperty(listEl, 'scrollHeight', { value: 10_000, configurable: true });
+    Object.defineProperty(listEl, 'clientHeight', { value: 400, configurable: true });
+    listEl.scrollTop = 0; // scrolled to the top, stays there for the whole test — never pinned
+
+    const overflowBy = 7;
+    pushMessages('w', MAX_LIVE_MESSAGES_HARD_CEILING + overflowBy);
+    await drainMicrotasks();
+
+    // Bounded at the hard ceiling — NOT unbounded (would be
+    // MAX_LIVE_MESSAGES_HARD_CEILING + overflowBy if the walk-away gap were
+    // still open), and NOT yanked all the way down to the tight
+    // MAX_LIVE_MESSAGES soft cap either (that would over-punish a merely-large
+    // reading session).
+    const bubbles = container.querySelectorAll('[role="article"]');
+    expect(bubbles.length).toBe(MAX_LIVE_MESSAGES_HARD_CEILING);
+    expect(container.querySelector('[data-msg-id="w-0"]')).toBeNull(); // oldest evicted
+    const lastIdx = MAX_LIVE_MESSAGES_HARD_CEILING + overflowBy - 1;
+    expect(container.querySelector(`[data-msg-id="w-${lastIdx}"]`)).not.toBeNull(); // newest survives
+
+    ml.destroy();
+  }, 30_000); // HARD_CEILING-scale filler messages — same O(n)-per-call timeout headroom as the reaction-fetch test below.
 
   it('evicted_rows_late_reaction_fetch_does_not_resurrect_stale_state', async () => {
     container = makeContainer();

@@ -298,6 +298,19 @@ function rowTime(row: MessageRow): number {
 export const MAX_LIVE_MESSAGES = 300;
 
 /**
+ * Hard ceiling that evicts even while the user is scrolled up reading
+ * history (unpinned). Without this, a visitor who scrolls up once in a busy
+ * central room and never returns to bottom accumulates #order/#rows/DOM
+ * without limit for as long as the tab stays open — the soft
+ * MAX_LIVE_MESSAGES cap above only trims on a PINNED append, so it never
+ * fires for that session. Set well above MAX_LIVE_MESSAGES so an actively
+ * reading user gets a large buffer before anything is yanked out from under
+ * them; only a visitor who has let 600+ messages pile up while scrolled away
+ * pays the cost of a jump, which is strictly better than unbounded growth.
+ */
+export const MAX_LIVE_MESSAGES_HARD_CEILING = MAX_LIVE_MESSAGES * 2;
+
+/**
  * MessageList renders a chat message history inside a given container element.
  * It fetches initial history via client.list() and subscribes to live updates.
  *
@@ -496,9 +509,15 @@ export class MessageList {
 
     // Safety cap: bound live-streamed DOM/memory growth (production-blocking
     // audit gap — a busy central room + a long-open tab accumulated unbounded
-    // nodes with no eviction). Only trims while the user is pinned to the
-    // bottom — see #evictOldMessages doc comment for the UX reasoning.
-    if (wasPinned) this.#evictOldMessages();
+    // nodes with no eviction). Pinned appends trim to the soft cap every
+    // time; unpinned (scrolled-up) appends only trim once the walk-away hard
+    // ceiling is crossed, and only down to that ceiling — see
+    // #evictOldMessages doc comment for the UX reasoning behind both caps.
+    if (wasPinned) {
+      this.#evictOldMessages(MAX_LIVE_MESSAGES);
+    } else if (this.#order.length > MAX_LIVE_MESSAGES_HARD_CEILING) {
+      this.#evictOldMessages(MAX_LIVE_MESSAGES_HARD_CEILING);
+    }
 
     // Fetch reactions for the new message if supported
     if (this.#client.getReactions) {
@@ -520,23 +539,29 @@ export class MessageList {
    * Bound live-streamed message growth (production-blocking audit gap): a
    * long-open tab in a busy central room accumulated #order/#rows entries and
    * DOM bubbles without limit, since #handleNewMessage only ever appended.
-   * Once a live append pushes #order past MAX_LIVE_MESSAGES, drop the oldest
-   * entries — from #order/#rows/#reactions bookkeeping and the corresponding
-   * DOM row — down to the cap.
+   * Drops the oldest entries — from #order/#rows/#reactions bookkeeping and
+   * the corresponding DOM row — down to `cap`.
    *
-   * Caller gates this on `wasPinned` (the pre-append #isPinnedToBottom()
-   * snapshot): skipping eviction while the user has scrolled up avoids
-   * yanking history out from under someone actively reading it. Eviction
-   * always targets the oldest (top) end, which is exactly where a
-   * scrolled-up reader is looking — there is no "far end away from the
-   * viewport" to evict from instead. Growth resumes being bounded on the
-   * next live append once the user is back at the bottom.
+   * Called with two different caps depending on `wasPinned` (the pre-append
+   * #isPinnedToBottom() snapshot):
+   * - Pinned: `cap = MAX_LIVE_MESSAGES`, trims on every append. Eviction
+   *   always targets the oldest (top) end, which is exactly where a
+   *   scrolled-up reader would be looking if they were scrolled up — but
+   *   they're not (they're pinned to bottom), so trimming the top is
+   *   invisible to them.
+   * - Unpinned (scrolled up reading history): `cap =
+   *   MAX_LIVE_MESSAGES_HARD_CEILING`, only called once #order has grown
+   *   past that much higher ceiling. This bounds the walk-away case (a
+   *   visitor who scrolls up and never returns to bottom) without yanking
+   *   content out from under someone actively reading a normal-sized
+   *   backlog — only a session that accumulates 600+ messages while
+   *   scrolled away pays the cost of losing its oldest unread history.
    *
    * Fail-soft throughout: an unexpected DOM/state desync logs and skips
    * rather than throws (this runs on every live message in production).
    */
-  #evictOldMessages(): void {
-    const overflow = this.#order.length - MAX_LIVE_MESSAGES;
+  #evictOldMessages(cap: number): void {
+    const overflow = this.#order.length - cap;
     for (let i = 0; i < overflow; i++) {
       const evictedId = this.#order.shift();
       if (!evictedId) continue;
