@@ -367,6 +367,22 @@ describe('MessageList', () => {
     ml.destroy();
   });
 
+  it('empty selfUid never false-positives as self, even against a row with an empty senderUid (Bug 2 — see list-helpers.isSelf)', async () => {
+    // Wiring-proof: fails if #createBubble/#populateBubble/#ariaLabelFor ever
+    // revert to the bare `row.senderUid === this.#selfUid` compare instead of
+    // routing through the guarded isSelf() helper — '' === '' would otherwise
+    // read as self.
+    const row = makeRow({ senderUid: '', seq: 1, text: 'unresolved sender' });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: '' });
+    await ml.mount();
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.getAttribute('data-self')).toBe('false');
+    expect(bubble!.getAttribute('aria-label')).not.toContain('You');
+    ml.destroy();
+  });
+
   it('auto_scrolls_to_bottom_uses_listEl_not_container', async () => {
     // C3: scrollTop set on #listEl, not container
     const rows = [

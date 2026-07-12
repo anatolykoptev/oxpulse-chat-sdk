@@ -414,6 +414,9 @@ export class OxpulseChatElement extends HTMLElement {
       const resolvedBaseUrl = this.#resolveBaseUrl(config);
       let resolvedJwt = config.jwt;
       let isAnonMode = false;
+      // Bug fix (independent audit, sibling gap to #39): captures the anon mint's
+      // own identity so it can backfill selfUid below when no jwt sub is available.
+      let anonUserId: string | undefined;
 
       if (config.allowAnonRead && !config.jwt) {
         isAnonMode = true;
@@ -443,6 +446,7 @@ export class OxpulseChatElement extends HTMLElement {
         if (signal.aborted) return;
 
         resolvedJwt = mintResult.token;
+        anonUserId = mintResult.userId;
 
         // Schedule re-mint 30 s before expiry. expiresAt is a Unix timestamp in seconds.
         // Floor at 5 s so a near-expired / clock-skewed token cannot spin a tight re-mint
@@ -494,6 +498,25 @@ export class OxpulseChatElement extends HTMLElement {
         if (signal.aborted) return;
       }
 
+      // Bug fix (independent audit, sibling gap to #39): config.selfUid is resolved
+      // in #resolveConfig() BEFORE the anon-read / named-write mints above run, so it
+      // can never see a mint result. Anon-read (no jwt attribute) combined with
+      // named-write is an explicitly supported combo (see the decision matrix below)
+      // where the ONLY real identity comes from a mint, not the jwt attribute —
+      // backfill here now that both mints (if any) have settled.
+      // Precedence: an explicit self-uid attribute already won inside config.selfUid
+      // (#resolveConfig, unchanged since #39). Otherwise, the write JWT's sub wins
+      // over the anon mint's userId: when a write token exists it becomes
+      // effectiveSendClient below, and the server stamps the ECHOED sender identity
+      // from THAT JWT's sub (see the senderUid comment on the composerClient below) —
+      // so it is the identity that will actually come back on the visitor's own
+      // messages. The anon mint's userId is the best fallback when there is no
+      // write token at all.
+      let resolvedSelfUid = config.selfUid;
+      if (!resolvedSelfUid) {
+        resolvedSelfUid = selfUidFromJwt(resolvedWriteJwt) ?? anonUserId;
+      }
+
       const clientOpts = {
         baseUrl: resolvedBaseUrl,
         jwt: resolvedJwt,
@@ -529,7 +552,8 @@ export class OxpulseChatElement extends HTMLElement {
       //   2. SDK ReactionEvent has { reaction, userId, op: 'reaction_add'|'reaction_remove' } —
       //      widget ReactionEvent has { emoji, userUid, op: 'add'|'remove', totalCount }.
       //   3. SDK sendText() requires { senderUid, text } — ComposerClient.sendText() passes
-      //      (roomId, text, args?) with senderUid derived from config.selfUid.
+      //      (roomId, text, args?) with senderUid derived from resolvedSelfUid (self-uid
+      //      attribute > write JWT sub > anon mint userId — see the backfill below).
       //   4. SDK sendText() returns { seq, msgId } — ComposerClient expects { msgId }.
 
       // onError handler shared between the real subscribe() callback and #subscribeOnError
@@ -653,8 +677,9 @@ export class OxpulseChatElement extends HTMLElement {
         roomId: config.roomId,
         container: listContainer,
         lang,
-        // selfUid from element attribute (JWT sub claim wiring is a future slice).
-        selfUid: config.selfUid ?? '',
+        // resolvedSelfUid: self-uid attribute > write JWT sub > anon mint userId
+        // (see the backfill comment above where it is computed).
+        selfUid: resolvedSelfUid ?? '',
         signal: signal,
         // MAJOR-5: pass shadow root so ReactionPicker mounts outside overflow:hidden widgetRoot.
         shadowHost: this.#shadow ?? undefined,
@@ -704,7 +729,11 @@ export class OxpulseChatElement extends HTMLElement {
       if (effectiveSendClient !== null) {
         // ComposerClient adapter — bridges (roomId, text) → SDK { senderUid, text }.
         // Write path only wired when there is a capable JWT (named-write or standard authed).
-        // senderUid: config.selfUid if present; the server authorizes by the JWT sub, not sender_uid.
+        // senderUid: resolvedSelfUid if present; the server authorizes by the JWT sub, not
+        // sender_uid — this field is best-effort/informational, but MUST stay in sync with
+        // the same resolvedSelfUid the MessageList renders against (see the backfill comment
+        // above), not the pre-mint config.selfUid, or the two would drift on the very same
+        // anon-read + named-write combo this fix targets.
         const capturedSendClient = effectiveSendClient;
         // isNamedWritePath: true when effectiveSendClient is the dedicated writeClient.
         // Used to dispatch the specific oxpulse-chat:write-error event on send failure
@@ -713,7 +742,7 @@ export class OxpulseChatElement extends HTMLElement {
         const self = this;
         const composerClient = {
           sendText: (roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }> =>
-            capturedSendClient.sendText(roomId, { senderUid: config.selfUid ?? '', text }).then((res) => {
+            capturedSendClient.sendText(roomId, { senderUid: resolvedSelfUid ?? '', text }).then((res) => {
               // Dispatch message-sent event on success
               self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                 bubbles: true,

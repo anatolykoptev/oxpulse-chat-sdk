@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { tombstoneText, unsealErrorText, unsealErrorAriaText } from '../utils/list-helpers.js';
+import { tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf } from '../utils/list-helpers.js';
 
 // i18n wire-in (U2 follow-up): before this change, `tombstoneText` /
 // `unsealErrorText` / `unsealErrorAriaText` took no `lang` argument at all —
@@ -56,5 +56,27 @@ describe('unsealErrorAriaText (screen-reader variant, no glyph)', () => {
   it('never includes the lock glyph in either locale (screen readers already announce "locked")', () => {
     expect(unsealErrorAriaText('en')).not.toContain('\u{1F512}');
     expect(unsealErrorAriaText('ru')).not.toContain('\u{1F512}');
+  });
+});
+
+// isSelf: the single guarded self-identity compare for message-list.ts (independent
+// audit, sibling gap to PR #39). Mirrors hasOwnHeart's non-empty guard above — a row
+// must never read as "self" merely because both senderUid and selfUid are unresolved
+// empty strings.
+describe('isSelf', () => {
+  it('returns false when both senderUid and selfUid are empty (never false-positive on unresolved identity)', () => {
+    expect(isSelf('', '')).toBe(false);
+  });
+
+  it('returns false when selfUid is empty, even if senderUid is non-empty', () => {
+    expect(isSelf('x', '')).toBe(false);
+  });
+
+  it('returns true when senderUid matches a non-empty selfUid', () => {
+    expect(isSelf('x', 'x')).toBe(true);
+  });
+
+  it('returns false when senderUid and selfUid are both non-empty but differ', () => {
+    expect(isSelf('x', 'y')).toBe(false);
   });
 });
