@@ -137,7 +137,9 @@ describe('MessageList — live-message eviction', () => {
     expect(bubbles[bubbles.length - 1]!.getAttribute('data-msg-id')).toBe(`m-${lastIdx}`);
 
     ml.destroy();
-  });
+  }, 30_000); // MAX_LIVE_MESSAGES filler messages each pay #updateReactionCluster's
+  // pre-existing O(n) per-call scan — default 5s timeout is too tight under
+  // CI load (passed locally, timed out on the shared self-hosted runner).
 
   it('skips_eviction_while_user_has_scrolled_up_reading_history', async () => {
     container = makeContainer();
@@ -170,7 +172,8 @@ describe('MessageList — live-message eviction', () => {
     expect(container.querySelector('[data-msg-id="u-0"]')).not.toBeNull();
 
     ml.destroy();
-  });
+  }, 30_000); // Same O(n)-per-call reaction-cluster cost as the test above, at
+  // MAX_LIVE_MESSAGES scale — default 5s timeout too tight under CI load.
 
   it('walk_away_case_still_evicts_once_the_hard_ceiling_is_crossed_while_unpinned', async () => {
     // Reviewer-flagged MAJOR (PR #41): a visitor who scrolls up once and
@@ -206,7 +209,10 @@ describe('MessageList — live-message eviction', () => {
     expect(container.querySelector(`[data-msg-id="w-${lastIdx}"]`)).not.toBeNull(); // newest survives
 
     ml.destroy();
-  }, 30_000); // HARD_CEILING-scale filler messages — same O(n)-per-call timeout headroom as the reaction-fetch test below.
+  }, 60_000); // HARD_CEILING (600) is 2x the other tests' MAX_LIVE_MESSAGES
+  // (300) scale, and #updateReactionCluster's per-message scan cost is O(n)
+  // — double the headroom, not just matching, given CI already timed out
+  // once at 30s for the smaller-scale siblings under load.
 
   it('evicted_rows_late_reaction_fetch_does_not_resurrect_stale_state', async () => {
     container = makeContainer();
