@@ -287,6 +287,17 @@ function rowTime(row: MessageRow): number {
 }
 
 /**
+ * Safety cap on the live-streamed message window (production-blocking audit
+ * gap): #order/#rows/DOM bubbles grew unboundedly as live messages streamed
+ * in, with no eviction anywhere. A busy central room (thousands of msgs/day)
+ * plus a long-open tab accumulates unbounded memory. This bounds the LIVE
+ * window only — full scroll-back virtualization is a separate future feature
+ * once "load older" pagination UI exists (list()'s hasNext is already
+ * returned but unused today).
+ */
+export const MAX_LIVE_MESSAGES = 300;
+
+/**
  * MessageList renders a chat message history inside a given container element.
  * It fetches initial history via client.list() and subscribes to live updates.
  *
@@ -483,16 +494,61 @@ export class MessageList {
     this.#order.push(row.msgId);
     this.#appendBubble(row, this.#order.length - 1);
 
+    // Safety cap: bound live-streamed DOM/memory growth (production-blocking
+    // audit gap — a busy central room + a long-open tab accumulated unbounded
+    // nodes with no eviction). Only trims while the user is pinned to the
+    // bottom — see #evictOldMessages doc comment for the UX reasoning.
+    if (wasPinned) this.#evictOldMessages();
+
     // Fetch reactions for the new message if supported
     if (this.#client.getReactions) {
       void this.#client.getReactions(this.#roomId, row.msgId).then((data) => {
         if (this.#signal.aborted) return;
+        // Fail-soft: the row may have been evicted (see #evictOldMessages) while
+        // this fetch was in flight — writing back here would resurrect a
+        // #reactions entry for a row no longer in #order/#rows.
+        if (!this.#rows.has(row.msgId)) return;
         this.#reactions.set(row.msgId, { counts: data.counts, users: data.users });
         this.#updateReactionCluster(row.msgId);
       }).catch(() => {});
     }
 
     if (wasPinned) this.#scrollToBottom();
+  }
+
+  /**
+   * Bound live-streamed message growth (production-blocking audit gap): a
+   * long-open tab in a busy central room accumulated #order/#rows entries and
+   * DOM bubbles without limit, since #handleNewMessage only ever appended.
+   * Once a live append pushes #order past MAX_LIVE_MESSAGES, drop the oldest
+   * entries — from #order/#rows/#reactions bookkeeping and the corresponding
+   * DOM row — down to the cap.
+   *
+   * Caller gates this on `wasPinned` (the pre-append #isPinnedToBottom()
+   * snapshot): skipping eviction while the user has scrolled up avoids
+   * yanking history out from under someone actively reading it. Eviction
+   * always targets the oldest (top) end, which is exactly where a
+   * scrolled-up reader is looking — there is no "far end away from the
+   * viewport" to evict from instead. Growth resumes being bounded on the
+   * next live append once the user is back at the bottom.
+   *
+   * Fail-soft throughout: an unexpected DOM/state desync logs and skips
+   * rather than throws (this runs on every live message in production).
+   */
+  #evictOldMessages(): void {
+    const overflow = this.#order.length - MAX_LIVE_MESSAGES;
+    for (let i = 0; i < overflow; i++) {
+      const evictedId = this.#order.shift();
+      if (!evictedId) continue;
+      this.#rows.delete(evictedId);
+      this.#reactions.delete(evictedId);
+      const child = this.#listEl?.firstElementChild;
+      if (child) {
+        child.remove();
+      } else if (this.#listEl) {
+        console.warn('[MessageList] evictOldMessages: expected a DOM row to remove but found none');
+      }
+    }
   }
 
   #handleMutation(event: MutationEvent): void {
