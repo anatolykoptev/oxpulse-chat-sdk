@@ -446,6 +446,42 @@ describe('theme foundation', () => {
     expect(mediaBlock).toContain('.oxp-reaction-quick-bar-button');
   });
 
+  it('reaction_touch_targets_44px_also_trigger_on_pointer_coarse_not_hover_none_alone', async () => {
+    // P2 design-review fix (starthey demo, widget 0.8.0, 2026-07-14): the
+    // heart button measured 26x22px live despite the existing
+    // @media (hover: none) 44px rule — some touch/hybrid devices report
+    // hover:hover while still being pointer:coarse, so hover:none alone is
+    // not a reliable touch-target gate. Fix widens the SAME existing block
+    // (not a duplicate) to also match pointer:coarse.
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
+
+    expect(css).toMatch(/@media\s*\(hover:\s*none\),\s*\(pointer:\s*coarse\)/);
+
+    const hoverNoneIdx = css.indexOf('@media (hover: none)');
+    expect(hoverNoneIdx).toBeGreaterThanOrEqual(0);
+    const blockStart = css.indexOf('{', hoverNoneIdx);
+    let depth = 0;
+    let blockEnd = blockStart;
+    for (let i = blockStart; i < css.length; i++) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}') {
+        depth--;
+        if (depth === 0) { blockEnd = i; break; }
+      }
+    }
+    const mediaBlock = css.slice(blockStart, blockEnd + 1);
+    expect(mediaBlock).toContain('.oxp-reaction-heart-btn');
+    expect(mediaBlock).toContain('.oxp-reaction-quick-bar-button');
+    expect(mediaBlock).toMatch(/min-width:\s*44px/);
+    expect(mediaBlock).toMatch(/min-height:\s*44px/);
+  });
+
   // ── DB1: Link token contrast ──────────────────────────────────────────────────
 
   it('link_token_defined_in_theme', async () => {

@@ -826,7 +826,14 @@ export const THEME_CSS = `
   padding: 2px;
 }
 
-@media (hover: none) {
+@media (hover: none), (pointer: coarse) {
+  /* P2 design-review fix (starthey demo, widget 0.8.0, 2026-07-14): the
+   * heart button measured 26x22px live despite the min-width/min-height:44px
+   * rules below — hover:none alone is not a reliable touch signal on every
+   * device (some touch/hybrid hardware and embedded webviews report
+   * hover:hover while still being pointer:coarse). Widened this SAME
+   * condition instead of adding a second block, so the 44px rules below
+   * apply whenever EITHER signals a non-precise pointer. */
   .oxp-reaction-quick-bar-button {
     min-width: 44px;
     min-height: 44px;

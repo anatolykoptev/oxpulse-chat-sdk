@@ -160,6 +160,14 @@ export class ReactionQuickBar {
     this.#keydownHandler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        // P2 design-review fix (starthey demo, 2026-07-14): stop the event
+        // from reaching window — a host page's own global Escape listener
+        // (e.g. the starthey demo unmounts the whole chat on window keydown
+        // Escape) must not act on an Escape the user meant only to close
+        // this bar with. This listener is document-level and only lives
+        // while the bar is open (added in show(), removed in #removeBar()),
+        // so a closed bar never swallows Escape for the host.
+        e.stopPropagation();
         // Capture before hide() — #removeBar() clears #restoreFocusEl.
         const restoreFocusEl = this.#restoreFocusEl;
         this.hide();

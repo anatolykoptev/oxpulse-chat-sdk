@@ -162,6 +162,50 @@ describe('ReactionQuickBar', () => {
     expect(document.activeElement).toBe(anchor);
   });
 
+  it('escape_does_not_leak_to_a_window_level_listener_when_the_bar_handles_it', () => {
+    // P2 design-review fix (starthey demo, widget 0.8.0, 2026-07-14): the bar's
+    // Escape handler did preventDefault() but the event still propagated to
+    // window — a host page's own global Escape listener (e.g. the starthey
+    // demo unmounts the whole chat on window keydown Escape) would fire even
+    // though the user only meant to close the bar. Dispatch a real bubbling
+    // keydown ON the focused bar button (not directly on document) so it
+    // travels the actual DOM path: button -> barEl -> container -> body ->
+    // document -> window, exercising the bar's document-level listener the
+    // same way a real composed event from inside a shadow tree would.
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    picker.show(anchor);
+
+    const firstButton = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement;
+    expect(firstButton).not.toBeNull();
+
+    const hostWindowHandler = vi.fn();
+    window.addEventListener('keydown', hostWindowHandler);
+
+    firstButton.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true }));
+
+    // Bar closed...
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+    // ...but the host's window-level listener must NOT have seen it.
+    expect(hostWindowHandler).not.toHaveBeenCalled();
+
+    window.removeEventListener('keydown', hostWindowHandler);
+  });
+
+  it('escape_still_propagates_to_window_normally_when_the_bar_is_closed', () => {
+    // Counterpart to the leak fix above: the bar must not swallow Escape
+    // globally — only while it owns an open dialog with a live keydown
+    // listener. With no bar open, a window-level Escape listener must fire.
+    const hostWindowHandler = vi.fn();
+    window.addEventListener('keydown', hostWindowHandler);
+
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+    expect(hostWindowHandler).toHaveBeenCalledOnce();
+
+    window.removeEventListener('keydown', hostWindowHandler);
+  });
+
   it('escape_defers_focus_restore_to_a_microtask', () => {
     // Reuse-update (2026-07-14): ported queueMicrotask focus restore
     // (web's MessageActions.svelte pattern) — focus must NOT have moved
