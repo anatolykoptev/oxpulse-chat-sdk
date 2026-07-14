@@ -355,7 +355,12 @@ export const THEME_CSS = `
 
 .oxp-bubble-time {
   font-size: 0.7rem;
-  color: var(--oxp-muted);
+  /* design-empirical review of starthey.com/demo 2026-07-14 (WCAG 1.4.3):
+   * --oxp-muted measured 3.99:1 light / 4.27:1 dark at this size — below the
+   * 4.5:1 AA floor on every message, both themes. --oxp-fg-secondary is this
+   * file's own designated on-bubble text token (see :40-44 / :95-98) and
+   * passes ≥4.5:1 on all four self/other × light/dark bubble backgrounds. */
+  color: var(--oxp-fg-secondary);
   align-self: flex-end;
   margin-top: 2px;
 }
@@ -1144,7 +1149,12 @@ export const THEME_CSS = `
 
 .oxp-product-price {
   font-size: 0.9rem;
-  color: var(--oxp-muted);
+  /* design-empirical review of starthey.com/demo 2026-07-14: same latent
+   * --oxp-muted-on-tinted-bg contrast issue as .oxp-bubble-time above — the
+   * product card renders inside a message bubble (:1116). --oxp-fg-secondary
+   * is this file's designated on-bubble text token; see its doc comment at
+   * :40-44 / :95-98. */
+  color: var(--oxp-fg-secondary);
 }
 
 .oxp-product-link {
