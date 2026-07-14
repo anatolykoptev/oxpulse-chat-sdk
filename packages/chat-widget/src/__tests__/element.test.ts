@@ -1387,6 +1387,52 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     });
   });
 
+  it('logs an orphaned-attachment warning when send() fails AFTER a successful presign+PUT (review fix)', async () => {
+    // Mirrors chat-sdk's own sendFile() convention (attachments.ts:162): if
+    // send() fails after the blob is already uploaded, the attachment is
+    // orphaned on disk with no message pointing at it — warn with enough
+    // detail (attachmentId) for an operator to find it later.
+    const client = makeCapableClient();
+    (client.send as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('network blip'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const presignResp = { attachment_id: 'att-orphan-1', upload_url: '/api/sdk/attachments/att-orphan-1?t=tok' };
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr === 'https://chat.example.com/api/sdk/attachments/presign') {
+        return { ok: true, status: 200, json: async () => presignResp } as Response;
+      }
+      if (urlStr === 'https://chat.example.com/api/sdk/attachments/att-orphan-1?t=tok') {
+        return { ok: true, status: 204, json: async () => null } as Response;
+      }
+      return { ok: false, status: 404, json: async () => null, text: async () => '' } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const textarea = el.shadowRoot!.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+    const pngFile = new File([new Uint8Array(16)], 'photo.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pngFile] } });
+    textarea.dispatchEvent(pasteEvent);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const orphanWarning = warnSpy.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('orphan'),
+    );
+    expect(orphanWarning).toBeDefined();
+    expect(orphanWarning![0]).toContain('att-orphan-1');
+
+    warnSpy.mockRestore();
+  });
+
   it('a row carrying an attachment envelope in plaintext renders <img> with width/height set (read side, no server changes needed)', async () => {
     let capturedOnMessage: ((row: MessageRow) => void) | null = null;
     const client = makeMockClient();

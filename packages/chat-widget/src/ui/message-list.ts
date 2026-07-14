@@ -533,12 +533,11 @@ export class MessageList {
    *  failure (not just auth), classified by op + reason. */
   #onWriteFailure?: (op: WriteFailureOp, reason: WriteFailureReason, message: string) => void;
   /** issue #67: blob: object URLs created by hydrateMediaSrc() (authenticated
-   *  attachment fetch) — revoked in destroy() so a torn-down MessageList
-   *  doesn't leak them. Not revoked per-row-eviction yet (a live infinite-scroll
-   *  eviction leak is a narrower, lower-severity follow-up than the 401 this
-   *  closes — the full teardown here already bounds the leak to one page's
-   *  worth of open images per MessageList lifetime). */
-  #attachmentObjectUrls: Set<string> = new Set();
+   *  attachment fetch), keyed by msgId — revoked in #evictOldMessages() (same
+   *  lifecycle as #teardownReactionTrigger/#pulseTimers for an evicted row) so
+   *  a long-lived busy room doesn't accumulate decoded-image memory past the
+   *  eviction cap, and swept wholesale in destroy() as the final backstop. */
+  #attachmentObjectUrls: Map<string, string[]> = new Map();
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -660,17 +659,23 @@ export class MessageList {
       this.#listEl.parentNode.removeChild(this.#listEl);
     }
     this.#listEl = null;
-    // issue #67: revoke every blob: URL created by the authenticated
-    // attachment-hydration path — a torn-down MessageList must not leak them.
-    for (const url of this.#attachmentObjectUrls) URL.revokeObjectURL(url);
+    // issue #67: final backstop — revoke every blob: URL still tracked (any
+    // row that survived to destroy() without being evicted first). Per-row
+    // revocation on eviction happens in #evictOldMessages().
+    for (const urls of this.#attachmentObjectUrls.values()) {
+      for (const url of urls) URL.revokeObjectURL(url);
+    }
     this.#attachmentObjectUrls.clear();
   }
 
-  /** issue #67: records a blob: URL created for an attachment image/audio src
-   *  so destroy() can revoke it. Bound method (not inline in #populateBubble)
-   *  so renderAttachment() — a free function — gets a stable callback reference. */
-  readonly #trackAttachmentObjectUrl = (url: string): void => {
-    this.#attachmentObjectUrls.add(url);
+  /** issue #67: records a blob: URL created for an attachment image/audio src,
+   *  keyed by msgId, so #evictOldMessages()/destroy() can revoke it. Bound
+   *  method (not inline in #populateBubble) so renderAttachment() — a free
+   *  function — gets a stable callback reference. */
+  readonly #trackAttachmentObjectUrl = (msgId: string, url: string): void => {
+    const existing = this.#attachmentObjectUrls.get(msgId);
+    if (existing) existing.push(url);
+    else this.#attachmentObjectUrls.set(msgId, [url]);
   };
 
   // ── Private ────────────────────────────────────────────────────────────────
@@ -865,6 +870,16 @@ export class MessageList {
       if (pulseTimer !== undefined) {
         clearTimeout(pulseTimer);
         this.#pulseTimers.delete(evictedId);
+      }
+      // issue #67 review fix (MAJOR): an evicted row's hydrated attachment
+      // blob: URL(s) were never revoked here — only in destroy() — so a
+      // long-lived busy room leaked one decoded image per evicted attachment
+      // message, unbounded, exactly the class the surrounding eviction caps
+      // exist to bound. Same lifecycle as #teardownReactionTrigger above.
+      const objectUrls = this.#attachmentObjectUrls.get(evictedId);
+      if (objectUrls) {
+        for (const url of objectUrls) URL.revokeObjectURL(url);
+        this.#attachmentObjectUrls.delete(evictedId);
       }
       const child = this.#listEl?.firstElementChild;
       if (child) {
@@ -1576,7 +1591,13 @@ export class MessageList {
       attachmentsEl.className = 'oxp-bubble-attachments';
       for (const att of row.attachments) {
         attachmentsEl.appendChild(
-          renderAttachment(att, this.#lang, this.#client.fetchAttachmentBlob, this.#trackAttachmentObjectUrl, this.#signal),
+          renderAttachment(
+            att,
+            this.#lang,
+            this.#client.fetchAttachmentBlob,
+            (url) => this.#trackAttachmentObjectUrl(row.msgId, url),
+            this.#signal,
+          ),
         );
       }
       el.appendChild(attachmentsEl);

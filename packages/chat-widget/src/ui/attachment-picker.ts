@@ -225,10 +225,14 @@ export class AttachmentPicker {
       // closes the aspect-reservation gap message-list.ts:214-216 already consumes
       // (att.width/att.height). Non-images pass through unchanged — compress() only
       // understands raster images and would reject a PDF/audio blob outright.
+      // Review fix: image/gif is EXCLUDED from compression too — compress() decodes
+      // one frame via createImageBitmap and re-encodes to a static canvas snapshot,
+      // which would silently flatten an animated GIF's other frames. The size cap
+      // (validate(), already enforced before #upload runs at all) still applies.
       let uploadBlob: Blob = item.file;
       let width: number | undefined;
       let height: number | undefined;
-      if (item.file.type.startsWith('image/')) {
+      if (item.file.type.startsWith('image/') && item.file.type !== 'image/gif') {
         const compressed = await compress(item.file);
         uploadBlob = compressed.blob;
         width = compressed.width;

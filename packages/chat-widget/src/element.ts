@@ -916,10 +916,24 @@ export class OxpulseChatElement extends HTMLElement {
                     width: args.width,
                     height: args.height,
                   }]);
-                  const result = await attachmentClient.send(roomId, {
-                    senderUid: args.senderUid ?? resolvedSelfUid ?? '',
-                    sealed,
-                  });
+                  // Same orphaned-attachment convention as chat-sdk's own sendFile()
+                  // (attachments.ts:161-167): if send() fails AFTER a successful PUT,
+                  // the blob is already stored with no message pointing at it — warn
+                  // with the attachmentId so an operator can find/sweep it later.
+                  let result: { seq: number; msgId: string };
+                  try {
+                    result = await attachmentClient.send(roomId, {
+                      senderUid: args.senderUid ?? resolvedSelfUid ?? '',
+                      sealed,
+                    });
+                  } catch (sendErr) {
+                    console.warn(
+                      `[oxpulse/chat-widget] composerClient.sendFile: attachment ${attachmentId} ` +
+                        'uploaded but client.send failed (orphaned attachment may exist).',
+                      sendErr,
+                    );
+                    throw sendErr;
+                  }
                   self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                     bubbles: true,
                     composed: true,

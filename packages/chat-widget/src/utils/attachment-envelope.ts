@@ -11,16 +11,41 @@
  *
  * Fix (widget-owned, zero chat-sdk changes): since this widget always runs
  * cryptoMode:'plaintext', the `sealed` bytes are UTF-8 text fully controlled
- * by the widget. The web app's own attachment path (buildAttachmentFromBlob)
- * already uses this same convention — splat attachment metadata into the
- * application-level chat payload rather than the wire envelope — and the
- * server's product_ref/product_meta precedent (send()/rowToMessageRow)
- * confirms the wire deliberately leaves app-level metadata to clients.
+ * by the widget. Note this does NOT match the web app's own attachment path
+ * (`web/src/lib/chat/attachments/attachments.ts`'s `buildAttachmentFromBlob`)
+ * — that carries attachments as a SCHEMA'D first-class message field
+ * (`web/domain/schema.ts:185`, `{kind, url: dataUrl, size, ...}`), which is
+ * structurally incompatible with this envelope. This widget has no
+ * equivalent schema'd field to reuse (and no ability to add one — that would
+ * be a server change, out of reach from this package), so it falls back to
+ * riding the one channel it fully controls end-to-end: the plaintext body.
+ * The server's product_ref/product_meta precedent (send()/rowToMessageRow)
+ * at least confirms the wire deliberately leaves SOME app-level metadata to
+ * clients, so this is not unprecedented in kind — just a different shape
+ * than the web app's.
  *
  * The {v,t} discriminator distinguishes an attachment envelope from an
  * ordinary plain-text message so decodeAttachmentEnvelope() never misfires
  * on a user typing JSON-shaped text, and stays extensible for a future
  * envelope version without breaking older widgets mid-room.
+ *
+ * Old-client-renders-JSON compat (accepted, documented — no behavior change
+ * needed): a client running an OLDER widget build that predates this
+ * envelope would render the raw `{"v":1,"t":"att",...}` JSON as literal chat
+ * text instead of an attachment bubble, for any message an upgraded peer
+ * sends after this ships. Accepted, given the CDN distribution model
+ * (docs/RUNBOOK-widget-cdn.md, docs/embedding.md:60-63): a pinned version URL
+ * (`/widget/<semver>/index.js`) is served `Cache-Control: immutable,
+ * max-age=31536000` and NEVER auto-upgrades — an embedder pinned to an old
+ * version stays on it until they edit their own `<script src>` — while
+ * `/widget/latest/index.js` (served without `immutable`) rolls forward on
+ * the next publish. Either way this is an existing, accepted embedder-driven
+ * upgrade cadence this feature doesn't change or need to solve — it's the
+ * SAME exposure any other widget-version-skew already has (e.g. a new
+ * reaction emoji an old client can't render), not a new failure mode this
+ * envelope introduces. A first-class wire field (server-side) would remove
+ * the skew entirely for THIS feature specifically; tracked as a separate
+ * follow-up, not solved here.
  */
 
 /** Envelope wire version. Bump on a breaking shape change. */
@@ -30,6 +55,15 @@ const ENVELOPE_TYPE = 'att';
 
 /** Sanity clamp for width/height — a room peer's plaintext body is untrusted input. */
 const MAX_DIMENSION = 20000;
+
+/**
+ * Max attachments rendered from one envelope — a room peer's plaintext body
+ * is untrusted input; without a cap a hostile message claiming hundreds of
+ * attachment entries would force MessageList to render that many bubbles
+ * (each triggering an authenticated fetchAttachmentBlob call) per message.
+ * Exported so tests can assert against it without hardcoding the number.
+ */
+export const MAX_ATTACHMENTS = 10;
 
 export interface EnvelopeAttachment {
   id: string;
@@ -100,6 +134,7 @@ export function decodeAttachmentEnvelope(plaintext: string): AttachmentEnvelope 
 
   const attachments: EnvelopeAttachment[] = [];
   for (const raw of p.attachments) {
+    if (attachments.length >= MAX_ATTACHMENTS) break;
     const att = parseAttachment(raw);
     if (att) attachments.push(att);
   }

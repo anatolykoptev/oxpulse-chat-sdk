@@ -305,6 +305,37 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
+  it('bypasses compress() for image/gif — canvas re-encode would flatten the animation to one frame', async () => {
+    // Review fix: compress() draws a single decoded frame to <canvas> and
+    // re-encodes — correct for a static image, but silently destroys an
+    // animated GIF's other frames. Size cap (validate(), before #upload runs
+    // at all) still applies; only the re-encode step is skipped.
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    const gifFile = new File([new Uint8Array(32)], 'dance.gif', { type: 'image/gif' });
+    picker.handleFiles([gifFile]);
+    await drain(15);
+
+    expect(client.sendFile).toHaveBeenCalledTimes(1);
+    const [, blobArg, argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Blob,
+      Record<string, unknown>,
+    ];
+    expect(blobArg).toBe(gifFile); // original bytes untouched — not re-encoded
+    expect(argsArg.width).toBeUndefined();
+    expect(argsArg.height).toBeUndefined();
+    // createImageBitmap is stubbed globally in beforeEach for the OTHER image
+    // tests in this file — asserting it was never called here proves compress()
+    // (which always calls createImageBitmap first) was genuinely skipped, not
+    // just coincidentally reused-original due to compress()'s own size check.
+    expect(createImageBitmap).not.toHaveBeenCalled();
+
+    picker.destroy();
+  });
+
   it('threads the sanitized filename into sendFile args for both image and non-image files', async () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });

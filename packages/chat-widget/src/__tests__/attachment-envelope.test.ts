@@ -3,6 +3,7 @@ import {
   encodeAttachmentEnvelope,
   decodeAttachmentEnvelope,
   attachmentUrl,
+  MAX_ATTACHMENTS,
 } from '../utils/attachment-envelope.js';
 
 // attachment-envelope.ts carries attachment metadata (attachmentId, mime,
@@ -75,6 +76,16 @@ describe('encodeAttachmentEnvelope / decodeAttachmentEnvelope', () => {
     }));
     expect(decoded?.attachments[0]?.width).toBe(20000);
     expect(decoded?.attachments[0]?.height).toBeUndefined();
+  });
+
+  it('clamps a hostile envelope carrying far more than MAX_ATTACHMENTS entries — a malicious room peer must not force N rendered bubbles', () => {
+    const attachments = Array.from({ length: MAX_ATTACHMENTS + 50 }, (_, i) => ({
+      id: `a${i}`, mime: 'image/png', filename: `f${i}.png`, sizeBytes: 1,
+    }));
+    const decoded = decodeAttachmentEnvelope(JSON.stringify({ v: 1, t: 'att', body: '', attachments }));
+    expect(decoded?.attachments).toHaveLength(MAX_ATTACHMENTS);
+    expect(decoded?.attachments[0]?.id).toBe('a0');
+    expect(decoded?.attachments[MAX_ATTACHMENTS - 1]?.id).toBe(`a${MAX_ATTACHMENTS - 1}`);
   });
 });
 

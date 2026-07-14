@@ -16,7 +16,7 @@
  * under-cap behaviour is unchanged.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { MessageList, MAX_LIVE_MESSAGES, MAX_LIVE_MESSAGES_HARD_CEILING } from '../ui/message-list.js';
 import type { MessageListClient, MessageRow, ReactionEvent } from '../ui/message-list.js';
 
@@ -316,4 +316,65 @@ describe('MessageList — live-message eviction', () => {
 
     ml.destroy();
   });
+
+  // ── issue #67 review fix (MAJOR): attachment blob: URL revoked on eviction ──
+
+  it('revokes an evicted row\'s hydrated attachment blob: URL, but not a retained row\'s', async () => {
+    // Review finding: #attachmentObjectUrls was a flat Set revoked only in
+    // destroy() — #evictOldMessages tears down reaction triggers/pulse timers/
+    // DOM for an evicted row but never revoked ITS blob: URL, so a long-lived
+    // busy room leaked one decoded image per evicted attachment message
+    // (unbounded — exactly the class the surrounding eviction caps exist to
+    // bound). Fix: track blob: URLs per msgId, revoke in #evictOldMessages.
+    container = makeContainer();
+
+    let urlCounter = 0;
+    const createdUrls: string[] = [];
+    const revokedUrls: string[] = [];
+    const createSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
+      const url = `blob:mock-${urlCounter++}`;
+      createdUrls.push(url);
+      return url;
+    });
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation((url: string) => {
+      revokedUrls.push(url);
+    });
+
+    const client = makeMockClient([]);
+    client.fetchAttachmentBlob = async () => new Blob(['x'], { type: 'image/png' });
+
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const attachment = {
+      id: 'a1', url: 'https://x.example/api/sdk/attachments/a1',
+      mime: 'image/png', filename: 'f.png', sizeBytes: 10,
+    };
+
+    // Oldest message — carries an attachment, will be evicted below.
+    capturedOnMessage!(makeRow({ senderUid: 'u1', msgId: 'evictee-att', seq: 1, attachments: [attachment] }));
+    await drainMicrotasks();
+    expect(createdUrls.length).toBe(1); // hydration created exactly one blob: URL so far
+
+    // Push past the cap — evicts 'evictee-att' (the oldest).
+    pushMessages('filler', MAX_LIVE_MESSAGES, 2);
+    await drainMicrotasks();
+    expect(container.querySelector('[data-msg-id="evictee-att"]')).toBeNull(); // confirmed evicted
+
+    // A retained (newest) row also carries a hydrated attachment.
+    capturedOnMessage!(makeRow({
+      senderUid: 'u1', msgId: 'retained-att', seq: MAX_LIVE_MESSAGES + 2, attachments: [attachment],
+    }));
+    await drainMicrotasks();
+    expect(createdUrls.length).toBe(2);
+
+    expect(revokedUrls).toContain(createdUrls[0]); // evicted row's URL: revoked
+    expect(revokedUrls).not.toContain(createdUrls[1]); // retained row's URL: still alive
+
+    ml.destroy();
+    expect(revokedUrls).toContain(createdUrls[1]); // destroy() sweeps whatever's left
+
+    createSpy.mockRestore();
+    revokeSpy.mockRestore();
+  }, 30_000); // MAX_LIVE_MESSAGES filler messages, same headroom as the sibling tests above.
 });
