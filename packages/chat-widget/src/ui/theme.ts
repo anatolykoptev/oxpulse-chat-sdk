@@ -66,6 +66,13 @@ export const THEME_CSS = `
   color: var(--oxp-fg);
 }
 
+/* W7: [hidden] attribute must win over any component display style.
+ * Without this, classes like .oxp-composer-reply { display: flex; } keep the
+ * element visible even when hidden="" is set. */
+[hidden] {
+  display: none !important;
+}
+
 :host([data-theme='dark']) {
   --oxp-bg: #1c1c1e;
   --oxp-fg: #ebebf5;

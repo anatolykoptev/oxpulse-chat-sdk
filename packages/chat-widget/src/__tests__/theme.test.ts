@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement } from '../element.js';
+import { THEME_CSS } from '../ui/theme.js';
 
 // Helper: make a valid JWT with aud_origins matching localhost
 function makeJwt(payload: Record<string, unknown>): string {
@@ -1134,5 +1135,10 @@ describe('theme foundation', () => {
     expect(hostBlock).toMatch(/--oxp-success-text:\s*#0f7a35/);
     // Dark value must be #4ade80
     expect(darkBlock).toMatch(/--oxp-success-text:\s*#4ade80/);
+  });
+
+  // W7: [hidden] attribute must override any component display style.
+  it('hidden_attribute_overrides_display_styles', () => {
+    expect(THEME_CSS).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/);
   });
 });
