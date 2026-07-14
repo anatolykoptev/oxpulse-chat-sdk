@@ -1,9 +1,10 @@
 /**
  * @oxpulse/chat-widget — ReactionQuickBar (reactions quick-bar redesign,
- * spec 2026-07-14). Renamed from ReactionPicker (W2.2 slice 3) — same
- * floating-popover mechanics, now reached via hover/long-press/keyboard-focus
- * instead of a click-triggered two-step flow (see ui/reaction-trigger.ts and
- * MessageList's wiring).
+ * heart-first amendment 2026-07-14). Renamed from ReactionPicker (W2.2
+ * slice 3) — same floating-popover mechanics, now reached by holding the
+ * per-bubble heart button (≥500ms, mouse or touch) or pressing ArrowUp on
+ * it, instead of a click-triggered two-step flow (see ui/reaction-trigger.ts
+ * and MessageList's wiring).
  *
  * Plain TS class, no framework. Renders emoji buttons inside the container,
  * handles keyboard navigation, outside click, and AbortSignal.
@@ -11,6 +12,7 @@
 
 import { REACTION_EMOJIS, reactionAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
+import { computeQuickBarPosition } from '../utils/reaction-quick-bar-position.js';
 
 // ── Constructor options ───────────────────────────────────────────────────────
 
@@ -23,7 +25,24 @@ export interface ReactionQuickBarOptions {
   signal?: AbortSignal;
   /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
   lang?: string;
+  /** The caller's current own reaction on this message, if any (spec 2026-07-14).
+   *  Marks the matching button aria-pressed=true + an accent ring so the bar
+   *  reflects existing state, not just a blank picker. */
+  ownEmoji?: string;
+  /** Whether the message this bar is attached to is the caller's own
+   *  (reuse-update 2026-07-14) — drives right-edge vs left-edge anchoring
+   *  via computeQuickBarPosition, ported from oxpulse-chat web's
+   *  computePopoverPosition. Default false. */
+  isOwnMessage?: boolean;
 }
+
+/** MOTION (spec 2026-07-14): select fires a burst/scale-pop on the chosen
+ *  button before the bar dismisses — this is the visual budget for that pop
+ *  to play before DOM removal. Reduced-motion is handled entirely in CSS
+ *  (the keyframe is zeroed under `prefers-reduced-motion: reduce`); this
+ *  fixed short delay is imperceptible either way and keeps onSelect's
+ *  business-logic side effect synchronous regardless of motion preference. */
+export const SELECT_DISMISS_DELAY_MS = 160;
 
 // ── ReactionQuickBar ──────────────────────────────────────────────────────────
 
@@ -36,15 +55,27 @@ export interface ReactionQuickBarOptions {
  *
  * A11y:
  *   role="dialog", first emoji focused on open, Arrow keys navigate,
- *   Escape hides + restores focus to anchor, outside mousedown hides.
+ *   Escape hides + restores focus to anchor (deferred to a microtask),
+ *   outside capture-phase pointerdown hides.
  */
 export class ReactionQuickBar {
   #container: HTMLElement;
   #onSelect: (emoji: string) => void;
   #signal: AbortSignal | undefined;
   #lang: Locale;
+  #ownEmoji: string | undefined;
+  #isOwnMessage: boolean;
+  /** Pending select-burst dismiss timer — cleared on hide() so a select
+   *  followed immediately by an unrelated hide (e.g. outside click racing
+   *  the burst window) never double-fires the removal. */
+  #dismissTimer: ReturnType<typeof setTimeout> | null = null;
   #barEl: HTMLElement | null = null;
   #anchorEl: HTMLElement | null = null;
+  /** Element Escape restores focus to — defaults to anchorEl when omitted.
+   *  Kept distinct from anchorEl because the positioning anchor (the bubble)
+   *  is not always the right focus-restore target (e.g. a visually-hidden
+   *  keyboard trigger button anchored to the same bubble). */
+  #restoreFocusEl: HTMLElement | null = null;
   #outsideClickHandler: ((e: MouseEvent) => void) | null = null;
   #keydownHandler: ((e: KeyboardEvent) => void) | null = null;
   /** Code MAJOR-2: abort listener to hide bar when signal fires mid-open. */
@@ -59,6 +90,8 @@ export class ReactionQuickBar {
     this.#onSelect = opts.onSelect;
     this.#signal = opts.signal;
     this.#lang = resolveLocale(opts.lang);
+    this.#ownEmoji = opts.ownEmoji;
+    this.#isOwnMessage = opts.isOwnMessage ?? false;
   }
 
   /**
@@ -68,13 +101,17 @@ export class ReactionQuickBar {
    * @param mountTo   — element to append the bar to (default: constructor container).
    *                    Pass the ShadowRoot host element to escape overflow:hidden clip contexts.
    *                    F3 (design MAJOR-5): container has overflow:hidden which clips absolute children.
+   * @param restoreFocusEl — element Escape restores focus to. Defaults to anchorEl.
+   *                    Pass the heart button (anchorEl is the bubble, which is
+   *                    not itself focusable).
    */
-  show(anchorEl: HTMLElement, mountTo?: HTMLElement): void {
+  show(anchorEl: HTMLElement, mountTo?: HTMLElement, restoreFocusEl?: HTMLElement): void {
     if (this.#signal?.aborted) return;
     // If already visible, hide first
     if (this.#barEl) this.#removeBar();
 
     this.#anchorEl = anchorEl;
+    this.#restoreFocusEl = restoreFocusEl ?? anchorEl;
     this.#mountTo = mountTo;
     this.#barEl = this.#buildBar();
     const appendTarget = mountTo ?? this.#container;
@@ -88,22 +125,34 @@ export class ReactionQuickBar {
       this.#barButtons[0]!.focus();
     }
 
-    // Outside click handler
+    // Outside dismissal handler — reuse-update (2026-07-14): capture-phase
+    // pointerdown (ported pattern from web's MessageActions.svelte), not
+    // bubble-phase mousedown. Capture-phase listeners run on the way DOWN
+    // the tree, before any bubble-phase handler between the click target
+    // and document gets a chance to stopPropagation() and swallow the
+    // event — the prior bubble-phase mousedown listener could be defeated
+    // by exactly that.
     this.#outsideClickHandler = (e: MouseEvent) => {
       if (this.#barEl && !this.#barEl.contains(e.target as Node) &&
           e.target !== anchorEl && !anchorEl.contains(e.target as Node)) {
         this.hide();
       }
     };
-    // Use mousedown so click doesn't fire on the anchor after hide
-    document.addEventListener('mousedown', this.#outsideClickHandler);
+    document.addEventListener('pointerdown', this.#outsideClickHandler, true);
 
     // Escape key handler + Tab focus trap (M2)
     this.#keydownHandler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        // Capture before hide() — #removeBar() clears #restoreFocusEl.
+        const restoreFocusEl = this.#restoreFocusEl;
         this.hide();
-        this.#anchorEl?.focus();
+        // Reuse-update (2026-07-14): defer focus restore to a microtask
+        // (ported from web's MessageActions.svelte) — hide() has just
+        // removed the focused button from the DOM; queueMicrotask lets
+        // that removal (and any synchronous focus reset the UA performs)
+        // settle before we claim the restore target.
+        queueMicrotask(() => restoreFocusEl?.focus());
       } else if (e.key === 'Tab') {
         // M2: Tab focus trap — keep focus inside the bar
         const buttons = this.#barButtons;
@@ -140,8 +189,12 @@ export class ReactionQuickBar {
   // ── Private ────────────────────────────────────────────────────────────────
 
   #removeBar(): void {
+    if (this.#dismissTimer !== null) {
+      clearTimeout(this.#dismissTimer);
+      this.#dismissTimer = null;
+    }
     if (this.#outsideClickHandler) {
-      document.removeEventListener('mousedown', this.#outsideClickHandler);
+      document.removeEventListener('pointerdown', this.#outsideClickHandler, true);
       this.#outsideClickHandler = null;
     }
     if (this.#keydownHandler) {
@@ -159,6 +212,8 @@ export class ReactionQuickBar {
     this.#barEl = null;
     this.#barButtons = [];
     this.#mountTo = undefined;
+    this.#anchorEl = null;
+    this.#restoreFocusEl = null;
   }
 
   #buildBar(): HTMLElement {
@@ -173,14 +228,25 @@ export class ReactionQuickBar {
 
     for (const emoji of REACTION_EMOJIS) {
       const btn = document.createElement('button');
-      btn.className = 'oxp-reaction-quick-bar-button';
+      const isOwn = emoji === this.#ownEmoji;
+      btn.className = isOwn
+        ? 'oxp-reaction-quick-bar-button oxp-reaction-quick-bar-button--own'
+        : 'oxp-reaction-quick-bar-button';
       btn.textContent = emoji;
       btn.setAttribute('aria-label', reactionAriaLabel(emoji, this.#lang));
+      btn.setAttribute('aria-pressed', String(isOwn));
       btn.type = 'button';
 
       btn.addEventListener('click', () => {
+        // MOTION: burst/scale-pop on the chosen button, then dismiss.
+        // onSelect fires synchronously — the visual delay never blocks the
+        // business-logic side effect (add/remove/replace).
+        btn.classList.add('oxp-reaction-quick-bar-button--burst');
         this.#onSelect(emoji);
-        this.hide();
+        this.#dismissTimer = setTimeout(() => {
+          this.#dismissTimer = null;
+          this.hide();
+        }, SELECT_DISMISS_DELAY_MS);
       });
 
       // Arrow key navigation
@@ -206,14 +272,24 @@ export class ReactionQuickBar {
     return el;
   }
 
+  /**
+   * Placement (above/below flip) and left-vs-right anchor SIDE are decided by
+   * computeQuickBarPosition (reuse-update 2026-07-14, ported from
+   * oxpulse-chat web's computePopoverPosition). The actual pixel math —
+   * fixed-vs-absolute coordinate frame switch and the left/right-edge
+   * viewport-width clamp — stays this file's own pre-existing logic (F2/4C/
+   * DM3); web has no shadow-DOM coordinate-frame split or narrow-viewport
+   * clamp equivalent to port.
+   */
   #position(anchorEl: HTMLElement): void {
     if (!this.#barEl) return;
-    const anchorRect = anchorEl.getBoundingClientRect();
+    const rect = anchorEl.getBoundingClientRect();
     const isMountedOutside = this.#mountTo !== undefined && this.#mountTo !== this.#container;
     // DM3 (design MAJOR): CSS sets explicit width: 256px on .oxp-reaction-quick-bar so offsetWidth
     // returns a stable non-zero value pre-paint. Fallback 256 guards jsdom (no layout engine)
     // and any edge case where CSS width isn't applied.
     const barWidth = this.#barEl.offsetWidth || 256;
+    const barHeight = this.#barEl.offsetHeight;
     const viewportWidth = window.innerWidth;
 
     if (isMountedOutside) {
@@ -222,26 +298,51 @@ export class ReactionQuickBar {
       // fixed positioning. This avoids the coordinate mismatch when container has
       // overflow:hidden and the bar is appended to a different ancestor (F2/M5).
       this.#barEl.style.position = 'fixed';
-      this.#barEl.style.top = `${Math.max(8, anchorRect.top - this.#barEl.offsetHeight - 8)}px`;
-      // 4C: clamp right edge — prevent overflow on narrow viewports (320px)
-      const clampedLeft = Math.min(
-        Math.max(8, anchorRect.left),
-        viewportWidth - barWidth - 8,
-      );
-      this.#barEl.style.left = `${clampedLeft}px`;
+      const pos = computeQuickBarPosition({
+        anchorRect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+        barHeight,
+        viewportTop: 0,
+        isOwn: this.#isOwnMessage,
+      });
+      this.#barEl.style.top = `${Math.max(8, pos.top)}px`;
+      if (pos.right !== undefined) {
+        // Own message — anchor by right edge (CSS `right` is measured from
+        // the containing block's right edge, so convert).
+        const cssRight = viewportWidth - pos.right;
+        const clampedRight = Math.min(Math.max(8, cssRight), viewportWidth - barWidth - 8);
+        this.#barEl.style.right = `${clampedRight}px`;
+      } else {
+        // 4C: clamp right edge — prevent overflow on narrow viewports (320px)
+        const clampedLeft = Math.min(Math.max(8, pos.left ?? rect.left), viewportWidth - barWidth - 8);
+        this.#barEl.style.left = `${clampedLeft}px`;
+      }
     } else {
       // Inside container — offset-parent-relative coords via position:absolute.
       const containerRect = this.#container.getBoundingClientRect();
       this.#barEl.style.position = 'absolute';
-      this.#barEl.style.top = `${Math.max(0, anchorRect.top - containerRect.top - this.#barEl.offsetHeight - 8)}px`;
-      // 4C: clamp right edge relative to container
-      const rawLeft = anchorRect.left - containerRect.left;
+      const anchorRect = {
+        top: rect.top - containerRect.top,
+        bottom: rect.bottom - containerRect.top,
+        left: rect.left - containerRect.left,
+        right: rect.right - containerRect.left,
+      };
+      const pos = computeQuickBarPosition({
+        anchorRect,
+        barHeight,
+        viewportTop: 0,
+        isOwn: this.#isOwnMessage,
+      });
+      this.#barEl.style.top = `${Math.max(0, pos.top)}px`;
       const containerWidth = this.#container.offsetWidth || viewportWidth;
-      const clampedLeft = Math.min(
-        Math.max(0, rawLeft),
-        containerWidth - barWidth - 8,
-      );
-      this.#barEl.style.left = `${clampedLeft}px`;
+      if (pos.right !== undefined) {
+        const cssRight = containerWidth - pos.right;
+        const clampedRight = Math.min(Math.max(0, cssRight), containerWidth - barWidth - 8);
+        this.#barEl.style.right = `${clampedRight}px`;
+      } else {
+        // 4C: clamp right edge relative to container
+        const clampedLeft = Math.min(Math.max(0, pos.left ?? anchorRect.left), containerWidth - barWidth - 8);
+        this.#barEl.style.left = `${clampedLeft}px`;
+      }
     }
     this.#barEl.style.zIndex = '10';
   }

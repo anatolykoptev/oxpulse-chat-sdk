@@ -235,9 +235,10 @@ describe('theme foundation', () => {
     expect(css).not.toMatch(/oxp-composer-input:focus-visible[^}]*outline/s);
   });
 
-  it('reaction_add_btn_uses_fg_secondary_not_muted', async () => {
-    // B2: .oxp-reaction-add-btn used var(--oxp-muted) at 0.8rem — fails WCAG 4.5:1
-    // on all bubble backgrounds. Fix: use --oxp-fg-secondary token.
+  it('reaction_heart_btn_uses_fg_secondary_not_muted', async () => {
+    // B2 (carried into the heart-first redesign): the reaction trigger button
+    // must use --oxp-fg-secondary (WCAG 4.5:1 on all bubble backgrounds), not
+    // --oxp-muted. Was .oxp-reaction-add-btn, now .oxp-reaction-heart-btn.
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
@@ -247,8 +248,39 @@ describe('theme foundation', () => {
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
     // --oxp-fg-secondary must be defined in :host light block
     expect(css).toMatch(/--oxp-fg-secondary/);
-    // .oxp-reaction-add-btn must use --oxp-fg-secondary (not --oxp-muted)
-    expect(css).toMatch(/\.oxp-reaction-add-btn[^}]*var\(--oxp-fg-secondary\)/s);
+    // .oxp-reaction-heart-btn must use --oxp-fg-secondary (not --oxp-muted)
+    expect(css).toMatch(/\.oxp-reaction-heart-btn[^}]*var\(--oxp-fg-secondary\)/s);
+  });
+
+  it('reaction_heart_btn_reveal_pattern_hover_and_focus_visible', async () => {
+    // Heart-first amendment (spec 2026-07-14): "hover-revealed on desktop
+    // (opacity pattern like today, but also :focus-visible)" — same
+    // opacity-on-bubble-hover pattern the deleted .oxp-reaction-add-btn used,
+    // PLUS an explicit :focus-visible reveal (not just :focus-within).
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
+    expect(css).toMatch(/\.oxp-bubble:hover \.oxp-reaction-heart-btn[^{]*\{[^}]*opacity:\s*1/s);
+    expect(css).toMatch(/\.oxp-reaction-heart-btn:focus-visible[^{]*\{[^}]*opacity:\s*1/s);
+  });
+
+  it('reaction_heart_btn_own_state_uses_accent_and_filled_svg', async () => {
+    // Own-❤️ state: aria-pressed="true" drives the filled heart (fill:
+    // currentColor) + accent-tinted color, mirroring .oxp-reaction-chip's
+    // own-highlight token choice.
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
+    expect(css).toMatch(/\.oxp-reaction-heart-btn\[aria-pressed='true'\][^{]*\{[^}]*var\(--oxp-accent\)/s);
+    expect(css).toMatch(/\.oxp-reaction-heart-btn\[aria-pressed='true'\] svg[^{]*\{[^}]*fill:\s*currentColor/s);
   });
 
   it('reaction_picker_has_box_shadow_for_elevation', async () => {
@@ -325,9 +357,10 @@ describe('theme foundation', () => {
     expect(css).toMatch(/:host\(\[data-theme='auto'\]\)\s*\.oxp-reaction-quick-bar[^}]*rgba\(255/s);
   });
 
-  it('mobile_reaction_add_btn_always_visible', async () => {
-    // M1: .oxp-reaction-add-btn opacity:0 only shows on hover — invisible on touch.
-    // Fix: @media (hover: none) must contain .oxp-reaction-add-btn { opacity: 1; }
+  it('mobile_reaction_heart_btn_always_visible', async () => {
+    // M1 (carried into the heart-first redesign): "always subtly visible on
+    // touch" — @media (hover: none) must contain
+    // .oxp-reaction-heart-btn { opacity: 1; }. Was .oxp-reaction-add-btn.
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
@@ -337,7 +370,7 @@ describe('theme foundation', () => {
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
     // Media query must be present
     expect(css).toMatch(/@media\s*\(hover:\s*none\)/);
-    // Extract the hover:none block(s) and verify reaction-add-btn opacity:1 is inside
+    // Extract the hover:none block(s) and verify heart-btn opacity:1 is inside
     const hoverNoneIdx = css.indexOf('@media (hover: none)');
     expect(hoverNoneIdx).toBeGreaterThanOrEqual(0);
     const blockStart = css.indexOf('{', hoverNoneIdx);
@@ -352,13 +385,15 @@ describe('theme foundation', () => {
       }
     }
     const mediaBlock = css.slice(blockStart, blockEnd + 1);
-    expect(mediaBlock).toContain('.oxp-reaction-add-btn');
+    expect(mediaBlock).toContain('.oxp-reaction-heart-btn');
     expect(mediaBlock).toMatch(/opacity:\s*1/);
   });
 
   it('mobile_touch_targets_44px_min', async () => {
     // M3/M4: chip ≈24px, ❤️ ≈22px on mobile — fail Apple HIG 44px.
     // Fix: @media (hover: none) must contain .oxp-reaction-chip { min-height: 44px; }
+    // and .oxp-reaction-heart-btn (was .oxp-reaction-add-btn) + the quick-bar's
+    // own emoji buttons (spec 2026-07-14: "Touch targets ≥44px in the bar").
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
@@ -379,10 +414,11 @@ describe('theme foundation', () => {
       }
     }
     const mediaBlock = css.slice(blockStart, blockEnd + 1);
-    // Both chip and add-btn must get 44px min-height
+    // chip, heart-btn, and the bar's own emoji buttons must get 44px min-height
     expect(mediaBlock).toContain('.oxp-reaction-chip');
     expect(mediaBlock).toMatch(/min-height:\s*44px/);
-    expect(mediaBlock).toContain('.oxp-reaction-add-btn');
+    expect(mediaBlock).toContain('.oxp-reaction-heart-btn');
+    expect(mediaBlock).toContain('.oxp-reaction-quick-bar-button');
   });
 
   // ── DB1: Link token contrast ──────────────────────────────────────────────────
@@ -1170,5 +1206,91 @@ describe('theme foundation', () => {
     expect(THEME_CSS).not.toMatch(/\.oxp-bubble-time[^}]*var\(--oxp-muted\)/s);
     expect(THEME_CSS).toMatch(/\.oxp-product-price[^}]*var\(--oxp-fg-secondary\)/s);
     expect(THEME_CSS).not.toMatch(/\.oxp-product-price[^}]*var\(--oxp-muted\)/s);
+  });
+
+  // ── Reactions quick-bar MOTION (spec 2026-07-14) ──────────────────────────
+
+  it('quick_bar_has_a_scale_fade_entrance_animation_with_per_emoji_stagger', () => {
+    expect(THEME_CSS).toMatch(/\.oxp-reaction-quick-bar\s*\{[^}]*animation:/s);
+    // Per-emoji stagger via nth-child animation-delay (6 fixed emoji slots —
+    // no JS needed to compute a delay per button).
+    expect(THEME_CSS).toMatch(/\.oxp-reaction-quick-bar-button:nth-child\(\d\)\s*\{[^}]*animation-delay/s);
+  });
+
+  it('quick_bar_button_select_burst_has_a_scale_pop_animation', () => {
+    expect(THEME_CSS).toMatch(/\.oxp-reaction-quick-bar-button--burst\s*\{[^}]*animation:/s);
+  });
+
+  it('quick_bar_motion_is_zeroed_under_prefers_reduced_motion', () => {
+    // Repo's accepted THEME_CSS string-assert pattern (see oxp-spin/1C above).
+    // theme.ts has an earlier prefers-reduced-motion block for the spinner —
+    // walk every such block and require the reactions-motion rules be zeroed
+    // in whichever one contains them.
+    let searchFrom = 0;
+    let found = false;
+    for (;;) {
+      const idx = THEME_CSS.indexOf('prefers-reduced-motion', searchFrom);
+      if (idx === -1) break;
+      const blockStart = THEME_CSS.indexOf('{', idx);
+      let depth = 0;
+      let blockEnd = blockStart;
+      for (let i = blockStart; i < THEME_CSS.length; i++) {
+        if (THEME_CSS[i] === '{') depth++;
+        else if (THEME_CSS[i] === '}') {
+          depth--;
+          if (depth === 0) { blockEnd = i; break; }
+        }
+      }
+      const block = THEME_CSS.slice(blockStart, blockEnd + 1);
+      if (block.includes('.oxp-reaction-quick-bar')) {
+        expect(block).toMatch(/\.oxp-reaction-quick-bar[^}]*\{[^}]*animation:\s*none/s);
+        expect(block).toMatch(/\.oxp-reaction-quick-bar-button[^}]*\{[^}]*animation:\s*none/s);
+        found = true;
+        break;
+      }
+      searchFrom = blockEnd + 1;
+    }
+    expect(found).toBe(true);
+  });
+
+  // ── Heart-add pulse (reuse-update 2026-07-14, ported from web's
+  // Bubble.svelte .qa-heart.on.pulse keyframe) ──────────────────────────
+
+  it('heart_btn_pulse_has_a_240ms_scale_pop_animation', () => {
+    // Extract the keyframe NAME the pulse rule references — don't
+    // pattern-sniff by 0%/scale(1) shape, since oxp-quickbar-burst's
+    // keyframe starts with the same shape and would false-match first.
+    const ruleMatch = THEME_CSS.match(/\.oxp-reaction-heart-btn--pulse\s*\{[^}]*animation:\s*([\w-]+)\s+240ms/s);
+    expect(ruleMatch).not.toBeNull();
+    const kfName = ruleMatch![1];
+    const kfBlock = THEME_CSS.match(new RegExp(`@keyframes\\s+${kfName}\\s*\\{[\\s\\S]*?50%[\\s\\S]*?scale\\(1\\.18\\)`));
+    expect(kfBlock).not.toBeNull();
+  });
+
+  it('heart_btn_pulse_is_zeroed_under_prefers_reduced_motion', () => {
+    let searchFrom = 0;
+    let found = false;
+    for (;;) {
+      const idx = THEME_CSS.indexOf('prefers-reduced-motion', searchFrom);
+      if (idx === -1) break;
+      const blockStart = THEME_CSS.indexOf('{', idx);
+      let depth = 0;
+      let blockEnd = blockStart;
+      for (let i = blockStart; i < THEME_CSS.length; i++) {
+        if (THEME_CSS[i] === '{') depth++;
+        else if (THEME_CSS[i] === '}') {
+          depth--;
+          if (depth === 0) { blockEnd = i; break; }
+        }
+      }
+      const block = THEME_CSS.slice(blockStart, blockEnd + 1);
+      if (block.includes('.oxp-reaction-heart-btn--pulse')) {
+        expect(block).toMatch(/\.oxp-reaction-heart-btn--pulse[^}]*\{[^}]*animation:\s*none/s);
+        found = true;
+        break;
+      }
+      searchFrom = blockEnd + 1;
+    }
+    expect(found).toBe(true);
   });
 });

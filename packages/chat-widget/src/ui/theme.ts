@@ -641,30 +641,71 @@ export const THEME_CSS = `
   margin-top: 2px;
 }
 
-.oxp-reaction-add-btn {
+/* Heart-first reactions (spec amendment 2026-07-14): a single heart button
+ * replaces the old '+😀' text trigger — outline heart by default, tap
+ * instantly toggles ❤️, hold/ArrowUp opens the full ReactionQuickBar. */
+.oxp-reaction-heart-btn {
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 0.8rem;
-  /* B2: Use --oxp-fg-secondary instead of --oxp-muted.
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* B2 (carried from .oxp-reaction-add-btn): --oxp-fg-secondary, not --oxp-muted.
    * Light #5a5a5a ≥4.5:1 on all bubble bgs; dark #cccccc ≥4.5:1 on dark bubble bgs. */
   color: var(--oxp-fg-secondary);
   padding: 2px 4px;
   border-radius: 4px;
   line-height: 1;
   opacity: 0;
-  transition: opacity 0.1s;
+  transition: opacity 0.1s, color 0.15s;
 }
 
-.oxp-bubble:hover .oxp-reaction-add-btn,
-.oxp-bubble:focus-within .oxp-reaction-add-btn {
+.oxp-reaction-heart-btn svg {
+  fill: none;
+  stroke: currentColor;
+}
+
+/* Own-❤️ state: aria-pressed reflects #ownReactionFor(msgId) === HEART_EMOJI
+ * (kept live by MessageList#syncHeartButton). Accent-tinted, filled heart —
+ * mirrors .oxp-reaction-chip[data-own='true']'s own-highlight token choice. */
+.oxp-reaction-heart-btn[aria-pressed='true'] {
+  color: var(--oxp-accent);
+}
+
+.oxp-reaction-heart-btn[aria-pressed='true'] svg {
+  fill: currentColor;
+}
+
+.oxp-bubble:hover .oxp-reaction-heart-btn,
+.oxp-bubble:focus-within .oxp-reaction-heart-btn {
   opacity: 1;
 }
 
-.oxp-reaction-add-btn:focus-visible {
+.oxp-reaction-heart-btn:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
   opacity: 1;
+}
+
+/* Heart-add pulse (reuse-update 2026-07-14) — ported verbatim from
+ * oxpulse-chat web's Bubble.svelte '.qa-heart.on.pulse' keyframe
+ * (0%/50%/100% scale(1)/scale(1.18)/scale(1), 240ms — see HEART_PULSE_MS
+ * in message-list.ts, MessageList#pulseHeart). */
+.oxp-reaction-heart-btn--pulse {
+  animation: oxp-heart-pulse 240ms ease both;
+}
+
+@keyframes oxp-heart-pulse {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oxp-reaction-heart-btn--pulse {
+    animation: none;
+  }
 }
 
 /* W7: reply button on each bubble */
@@ -790,10 +831,11 @@ export const THEME_CSS = `
     min-width: 44px;
     min-height: 44px;
   }
-  /* M1: +😀 button is hidden by opacity:0 with only :hover reveal — invisible on touch.
-   * M3/M4: add-btn and chips fail Apple HIG 44px on mobile.
+  /* M1 (carried into the heart-first redesign): the heart button is hidden
+   * by opacity:0 with only :hover reveal — invisible on touch without this.
+   * M3/M4: heart-btn and chips fail Apple HIG 44px on mobile.
    * Merged into one declaration to avoid duplicate selector (prior had split opacity + size). */
-  .oxp-reaction-add-btn { opacity: 1; min-height: 44px; min-width: 44px; }
+  .oxp-reaction-heart-btn { opacity: 1; min-height: 44px; min-width: 44px; }
   .oxp-reaction-chip { min-height: 44px; }
   /* W7: reply button visible + 44px touch target on mobile. */
   .oxp-reply-btn { opacity: 1; min-height: 44px; min-width: 44px; }
@@ -810,6 +852,59 @@ export const THEME_CSS = `
 .oxp-reaction-quick-bar-button:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
+}
+
+/* ── Reactions quick-bar MOTION (spec 2026-07-14) ──
+ * Bar scale/fade in; each emoji button staggers in on top of that (6 fixed
+ * REACTION_EMOJIS slots — nth-child delays need no JS). Stagger span (last
+ * delay 75ms + each button's own 100ms) ≈ 175ms, within the ~120-180ms
+ * budget. Select fires a burst/scale-pop on the chosen button before
+ * ReactionQuickBar's own SELECT_DISMISS_DELAY_MS-timed removal. */
+@keyframes oxp-quickbar-in {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.oxp-reaction-quick-bar {
+  animation: oxp-quickbar-in 140ms ease-out;
+}
+
+@keyframes oxp-quickbar-button-in {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.oxp-reaction-quick-bar-button {
+  animation: oxp-quickbar-button-in 100ms ease-out backwards;
+}
+
+.oxp-reaction-quick-bar-button:nth-child(1) { animation-delay: 0ms; }
+.oxp-reaction-quick-bar-button:nth-child(2) { animation-delay: 15ms; }
+.oxp-reaction-quick-bar-button:nth-child(3) { animation-delay: 30ms; }
+.oxp-reaction-quick-bar-button:nth-child(4) { animation-delay: 45ms; }
+.oxp-reaction-quick-bar-button:nth-child(5) { animation-delay: 60ms; }
+.oxp-reaction-quick-bar-button:nth-child(6) { animation-delay: 75ms; }
+
+@keyframes oxp-quickbar-burst {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+
+.oxp-reaction-quick-bar-button--burst {
+  animation: oxp-quickbar-burst 160ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oxp-reaction-quick-bar {
+    animation: none;
+  }
+  .oxp-reaction-quick-bar-button {
+    animation: none;
+  }
+  .oxp-reaction-quick-bar-button--burst {
+    animation: none;
+  }
 }
 
 /* B2: Inline error chip */

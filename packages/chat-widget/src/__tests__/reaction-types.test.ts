@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   REACTION_EMOJIS,
+  HEART_EMOJI,
   isOwnReaction,
   reactionAriaLabel,
   reactionButtonAriaLabel,
@@ -29,6 +30,11 @@ describe('REACTION_EMOJIS', () => {
 
   it('includes heart', () => {
     expect(REACTION_EMOJIS).toContain('❤️');
+  });
+
+  it('HEART_EMOJI is the same heart the set contains — the heart-first tap target never drifts from the shared set', () => {
+    expect(HEART_EMOJI).toBe('❤️');
+    expect(REACTION_EMOJIS).toContain(HEART_EMOJI);
   });
 
   it('includes fire', () => {

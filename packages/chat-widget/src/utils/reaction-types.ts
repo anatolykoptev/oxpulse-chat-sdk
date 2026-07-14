@@ -16,6 +16,11 @@ export const REACTION_EMOJIS = [
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
 export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
 
+/** Heart-first affordance (spec amendment 2026-07-14): the per-bubble heart
+ *  button always targets this one emoji — single source of truth so its
+ *  string literal never drifts from REACTION_EMOJIS[1]. */
+export const HEART_EMOJI: ReactionEmoji = REACTION_EMOJIS[1];
+
 /** Stable, localized `aria-label` per emoji — keeps screen-reader output
  *  predictable and out of the visual noise. Keyed by emoji (not a `t()`
  *  LocaleKey) — this is domain data (which word names which emoji), a

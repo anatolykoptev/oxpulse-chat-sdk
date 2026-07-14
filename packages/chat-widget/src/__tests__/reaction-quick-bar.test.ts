@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ReactionQuickBar } from '../ui/reaction-quick-bar.js';
+import { ReactionQuickBar, SELECT_DISMISS_DELAY_MS } from '../ui/reaction-quick-bar.js';
 import { REACTION_EMOJIS } from '../utils/reaction-types.js';
 
 function drainMicrotasks(n = 10): Promise<void> {
@@ -30,6 +30,10 @@ describe('ReactionQuickBar', () => {
   });
 
   afterEach(() => {
+    // A test that fails an assertion before its own vi.useRealTimers() call
+    // would otherwise leak fake timers into the next test — restore
+    // unconditionally regardless of pass/fail.
+    vi.useRealTimers();
     if (container.parentNode) container.parentNode.removeChild(container);
     if (anchor.parentNode) anchor.parentNode.removeChild(anchor);
   });
@@ -61,7 +65,12 @@ describe('ReactionQuickBar', () => {
     expect(onSelect).toHaveBeenCalledWith(expect.any(String));
   });
 
-  it('hides_picker_after_selecting_emoji', () => {
+  it('hides_bar_after_selecting_emoji_once_the_select_burst_delay_elapses', () => {
+    // MOTION (spec 2026-07-14): select fires a burst/scale-pop on the chosen
+    // button, THEN dismisses — onSelect fires synchronously (business logic
+    // proceeds immediately) but the bar's own DOM removal is delayed by
+    // SELECT_DISMISS_DELAY_MS so the pop is visible before it disappears.
+    vi.useFakeTimers();
     const onSelect = vi.fn();
     const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
@@ -71,10 +80,33 @@ describe('ReactionQuickBar', () => {
     const firstButton = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement;
     firstButton.click();
 
+    expect(onSelect).toHaveBeenCalledOnce();
+    // Still present immediately after click — burst plays before removal.
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+
+    vi.advanceTimersByTime(SELECT_DISMISS_DELAY_MS);
     expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+    vi.useRealTimers();
   });
 
-  it('hides_on_outside_click', async () => {
+  it('select_adds_the_burst_class_to_the_chosen_button', () => {
+    vi.useFakeTimers();
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    picker.show(anchor);
+
+    const firstButton = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement;
+    firstButton.click();
+
+    expect(firstButton.classList.contains('oxp-reaction-quick-bar-button--burst')).toBe(true);
+    vi.advanceTimersByTime(SELECT_DISMISS_DELAY_MS);
+    vi.useRealTimers();
+  });
+
+  it('hides_on_outside_pointerdown', async () => {
+    // Reuse-update (2026-07-14): upgraded from bubble-phase mousedown to
+    // capture-phase pointerdown (see MessageActions.svelte's dismissal
+    // pattern) — dispatch the new event type here.
     const onSelect = vi.fn();
     const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
@@ -82,10 +114,35 @@ describe('ReactionQuickBar', () => {
     expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
 
     // Click outside
-    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
     await drainMicrotasks();
 
     expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+  });
+
+  it('outside_pointerdown_dismissal_survives_a_bubble_phase_stopPropagation', async () => {
+    // The whole point of capture-phase (reuse-update 2026-07-14, ported
+    // pattern from web's MessageActions.svelte): a bubble-phase listener
+    // between the target and document that swallows the event via
+    // stopPropagation() must NOT prevent the bar from dismissing, because
+    // the capture-phase listener already ran on the way DOWN before any
+    // bubble-phase handler gets a chance to swallow it.
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    picker.show(anchor);
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+
+    const swallower = document.createElement('button');
+    document.body.appendChild(swallower);
+    const bubblePhaseHandler = (e: Event) => e.stopPropagation();
+    swallower.addEventListener('pointerdown', bubblePhaseHandler); // bubble phase (default)
+
+    swallower.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    await drainMicrotasks();
+
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+    swallower.removeEventListener('pointerdown', bubblePhaseHandler);
+    swallower.remove();
   });
 
   it('hides_on_escape_and_restores_focus_to_anchor', async () => {
@@ -103,6 +160,27 @@ describe('ReactionQuickBar', () => {
     expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
     // Focus restored to anchor
     expect(document.activeElement).toBe(anchor);
+  });
+
+  it('escape_defers_focus_restore_to_a_microtask', () => {
+    // Reuse-update (2026-07-14): ported queueMicrotask focus restore
+    // (web's MessageActions.svelte pattern) — focus must NOT have moved
+    // synchronously right after hide(), only after the microtask queue
+    // drains.
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    anchor.focus();
+    picker.show(anchor);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    // Bar is already gone synchronously...
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+    // ...but focus restore is deferred — not yet on anchor.
+    expect(document.activeElement).not.toBe(anchor);
+
+    return drainMicrotasks().then(() => {
+      expect(document.activeElement).toBe(anchor);
+    });
   });
 
   it('arrow_keys_navigate_emoji_buttons', () => {
@@ -379,5 +457,143 @@ describe('ReactionQuickBar', () => {
 
     picker.hide();
     Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
+  });
+
+  // ── Placement flip + own-message right-anchor (reuse-update 2026-07-14) ──
+  // Ported decision algorithm: computeQuickBarPosition (adapted from web's
+  // computePopoverPosition) — above-preferred, flip below on insufficient
+  // room, own messages anchor by right edge.
+
+  it('flips_below_when_the_anchor_is_near_the_top_of_the_viewport', () => {
+    // jsdom never lays out real content, so the bar's own offsetHeight
+    // (barHeight in the wantAbove test) defaults to 0 — the "is there room
+    // above" check degenerates to `anchorRect.top >= gap(8)`. An anchor
+    // top below that (here 2px) reliably forces the below-flip regardless
+    // of jsdom's lack of layout, matching the existing clamp tests'
+    // established workaround for the same limitation.
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+
+    Object.defineProperty(anchor, 'getBoundingClientRect', {
+      value: () => ({
+        left: 50, right: 150, top: 2, bottom: 20,
+        width: 100, height: 18, x: 50, y: 2, toJSON: () => ({}),
+      }),
+      configurable: true,
+    });
+
+    picker.show(anchor);
+    const barEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
+    expect(barEl).not.toBeNull();
+    // Below placement: top = anchorRect.bottom + gap(8) = 28 — at/above the
+    // anchor's own bottom edge, unlike the above-placement case which would
+    // sit well ABOVE anchorRect.top (2).
+    expect(parseFloat(barEl!.style.top)).toBeGreaterThanOrEqual(20);
+
+    picker.hide();
+  });
+
+  it('places_above_when_there_is_room', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+
+    Object.defineProperty(anchor, 'getBoundingClientRect', {
+      value: () => ({
+        left: 50, right: 150, top: 500, bottom: 530,
+        width: 100, height: 30, x: 50, y: 500, toJSON: () => ({}),
+      }),
+      configurable: true,
+    });
+
+    picker.show(anchor);
+    const barEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
+    expect(barEl).not.toBeNull();
+    // Above placement: top < anchorRect.top (500).
+    expect(parseFloat(barEl!.style.top)).toBeLessThan(500);
+
+    picker.hide();
+  });
+
+  it('own_message_anchors_by_the_right_edge_not_the_left', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, isOwnMessage: true });
+
+    Object.defineProperty(anchor, 'getBoundingClientRect', {
+      value: () => ({
+        left: 50, right: 150, top: 500, bottom: 530,
+        width: 100, height: 30, x: 50, y: 500, toJSON: () => ({}),
+      }),
+      configurable: true,
+    });
+
+    picker.show(anchor);
+    const barEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
+    expect(barEl).not.toBeNull();
+    expect(barEl!.style.right).not.toBe('');
+    expect(barEl!.style.left).toBe('');
+
+    picker.hide();
+  });
+
+  it('non_own_message_anchors_by_the_left_edge_not_the_right', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, isOwnMessage: false });
+
+    picker.show(anchor);
+    const barEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
+    expect(barEl).not.toBeNull();
+    expect(barEl!.style.left).not.toBe('');
+    expect(barEl!.style.right).toBe('');
+
+    picker.hide();
+  });
+
+  // ── Own-emoji marking (spec 2026-07-14) ───────────────────────────────────
+
+  it('marks_the_own_emoji_button_aria_pressed_true', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, ownEmoji: REACTION_EMOJIS[2] });
+    picker.show(anchor);
+
+    const buttons = Array.from(
+      container.querySelectorAll('.oxp-reaction-quick-bar-button'),
+    ) as HTMLButtonElement[];
+    const ownButton = buttons.find((b) => b.textContent?.trim() === REACTION_EMOJIS[2]);
+    expect(ownButton).toBeDefined();
+    expect(ownButton!.getAttribute('aria-pressed')).toBe('true');
+    expect(ownButton!.classList.contains('oxp-reaction-quick-bar-button--own')).toBe(true);
+
+    picker.hide();
+  });
+
+  it('non_own_emoji_buttons_are_aria_pressed_false', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, ownEmoji: REACTION_EMOJIS[0] });
+    picker.show(anchor);
+
+    const buttons = Array.from(
+      container.querySelectorAll('.oxp-reaction-quick-bar-button'),
+    ) as HTMLButtonElement[];
+    const others = buttons.filter((b) => b.textContent?.trim() !== REACTION_EMOJIS[0]);
+    expect(others.length).toBeGreaterThan(0);
+    for (const b of others) {
+      expect(b.getAttribute('aria-pressed')).toBe('false');
+      expect(b.classList.contains('oxp-reaction-quick-bar-button--own')).toBe(false);
+    }
+
+    picker.hide();
+  });
+
+  it('no_own_emoji_leaves_all_buttons_aria_pressed_false', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    picker.show(anchor);
+
+    const buttons = container.querySelectorAll('.oxp-reaction-quick-bar-button');
+    for (const b of buttons) {
+      expect(b.getAttribute('aria-pressed')).toBe('false');
+    }
+
+    picker.hide();
   });
 });

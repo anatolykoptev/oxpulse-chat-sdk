@@ -243,40 +243,44 @@ describe('MessageList — reactions', () => {
     ml.destroy();
   });
 
-  it('reaction_button_opens_picker_anchored_to_bubble', async () => {
+  it('arrowup_on_the_heart_button_opens_the_bar_anchored_to_the_bubble', async () => {
+    // Heart-first amendment (spec 2026-07-14): the visible '+😀' click-to-open
+    // button is gone — ArrowUp on the heart button is the deterministic
+    // (no-fake-timers-needed) path to the full bar, same destination as a
+    // ≥500ms hold (covered with fake timers in message-list-reaction-triggers.test.ts).
     const row = makeRow({ senderUid: 'u1', msgId: 'msg-7', seq: 1 });
     const client = makeMockClient([row]);
     const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
     await ml.mount();
     await drainMicrotasks(10);
 
-    // Reaction button exists on bubble
-    const reactionBtn = container.querySelector('.oxp-reaction-add-btn') as HTMLButtonElement | null;
-    expect(reactionBtn).not.toBeNull();
+    // Heart button exists on bubble
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
+    expect(heartBtn).not.toBeNull();
 
-    reactionBtn!.click();
+    heartBtn!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
     await drainMicrotasks(5);
 
-    // Picker should be visible
-    const picker = container.querySelector('.oxp-reaction-quick-bar');
-    expect(picker).not.toBeNull();
+    // Bar should be visible
+    const bar = container.querySelector('.oxp-reaction-quick-bar');
+    expect(bar).not.toBeNull();
     ml.destroy();
   });
 
-  it('selecting_emoji_in_picker_calls_sendReaction', async () => {
+  it('selecting_emoji_in_the_bar_calls_sendReaction', async () => {
     const row = makeRow({ senderUid: 'u1', msgId: 'msg-8', seq: 1 });
     const client = makeMockClient([row]);
     const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
     await ml.mount();
     await drainMicrotasks(10);
 
-    // Open picker
-    const reactionBtn = container.querySelector('.oxp-reaction-add-btn') as HTMLButtonElement | null;
-    expect(reactionBtn).not.toBeNull();
-    reactionBtn!.click();
+    // Open the bar via ArrowUp on the heart button.
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
+    expect(heartBtn).not.toBeNull();
+    heartBtn!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
     await drainMicrotasks(5);
 
-    // Select first emoji in picker
+    // Select first emoji in the bar
     const emojiBtn = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement | null;
     expect(emojiBtn).not.toBeNull();
     emojiBtn!.click();
@@ -443,10 +447,10 @@ describe('MessageList — reactions', () => {
     ml.destroy();
   });
 
-  it('picker_mounts_to_shadow_host_not_widget_root', async () => {
-    // MAJOR-5: When shadowHost is passed to MessageList, ReactionPicker.show()
+  it('bar_mounts_to_shadow_host_not_widget_root', async () => {
+    // MAJOR-5: When shadowHost is passed to MessageList, ReactionQuickBar.show()
     // must mount into that ShadowRoot element (not the container which has overflow:hidden).
-    // Without this wire, picker appends to container → clipped by overflow:hidden.
+    // Without this wire, the bar appends to container → clipped by overflow:hidden.
     const row = makeRow({ senderUid: 'u1', msgId: 'msg-14', seq: 1 });
     const client = makeMockClient([row]);
 
@@ -466,17 +470,17 @@ describe('MessageList — reactions', () => {
     await ml.mount();
     await drainMicrotasks(10);
 
-    // Click reaction-add button to open picker
-    const reactionBtn = container.querySelector('.oxp-reaction-add-btn') as HTMLButtonElement | null;
-    expect(reactionBtn).not.toBeNull();
-    reactionBtn!.click();
+    // ArrowUp on the heart button opens the bar (heart-first amendment 2026-07-14).
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
+    expect(heartBtn).not.toBeNull();
+    heartBtn!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
     await drainMicrotasks(5);
 
-    // Picker must be appended to shadowHost, NOT container
-    const pickerInShadowHost = shadowHost.querySelector('.oxp-reaction-quick-bar');
-    const pickerInContainer = container.querySelector('.oxp-reaction-quick-bar');
-    expect(pickerInShadowHost).not.toBeNull(); // mounted to shadow host
-    expect(pickerInContainer).toBeNull();       // NOT in overflow:hidden container
+    // Bar must be appended to shadowHost, NOT container
+    const barInShadowHost = shadowHost.querySelector('.oxp-reaction-quick-bar');
+    const barInContainer = container.querySelector('.oxp-reaction-quick-bar');
+    expect(barInShadowHost).not.toBeNull(); // mounted to shadow host
+    expect(barInContainer).toBeNull();       // NOT in overflow:hidden container
 
     shadowHost.remove();
     ml.destroy();
