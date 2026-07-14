@@ -689,55 +689,10 @@ export class OxpulseChatElement extends HTMLElement {
       // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
       const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
 
-      this.#messageList = new MessageList({
-        client: widgetClient,
-        roomId: config.roomId,
-        container: listContainer,
-        lang,
-        // resolvedSelfUid: self-uid attribute > write JWT sub > anon mint userId
-        // (see the backfill comment above where it is computed).
-        selfUid: resolvedSelfUid ?? '',
-        signal: signal,
-        // MAJOR-5: pass shadow root so ReactionPicker mounts outside overflow:hidden widgetRoot.
-        shadowHost: this.#shadow ?? undefined,
-        // P5: role-badge label overrides, presentation only.
-        roleLabels: config.roleLabels,
-        // W7: only show reply buttons when there is a composer wired to receive them.
-        onSetReply: effectiveSendClient
-          ? (snapshot) => { this.#composer?.setReplyTarget(snapshot); }
-          : undefined,
-      });
-
-      await this.#messageList.mount();
-
-      if (signal.aborted) return;
-
-      // CB1: Wire Reconnector — drives banner + retry loop for subscribe errors.
-      // Mounted into widgetRoot so banner sits above message list (z-index 5 per theme.ts).
-      // AbortSignal from bootstrap wires cleanup (CM2).
-      this.#reconnector?.destroy();
-      this.#reconnector = new Reconnector({
-        container: widgetRoot,
-        host: this,
-        signal: signal,
-        lang,
-      });
-      reconnectorRef = this.#reconnector;
-
-      // CB1/CM1: SubscribeFn for the Reconnector's retry loop.
-      // When the SDK's internal reconnect exhausts and fires onError, the Reconnector
-      // calls this fn to re-establish the stream. We route new messages to the existing
-      // MessageList via its public handleMessage() method.
-      const subscribeFn: SubscribeFn = (roomId, onError) => {
-        return sdkClient.subscribe(roomId, {
-          onMessage: (row) => { this.#messageList?.handleMessage(row); },
-          onError,
-          onMutation: undefined,
-          onReaction: undefined,
-        });
-      };
-      subscribeFnRef = subscribeFn;
-
+      // Mount the Composer BEFORE MessageList so the message-list scroll container
+      // has its final height when MessageList scrolls to the bottom after render.
+      // Without this, MessageList scrolls against the composer-less flex height,
+      // leaving the list stuck partway up once the composer shrinks the available space.
       if (effectiveSendClient !== null) {
         // ComposerClient adapter — bridges (roomId, text) → SDK { senderUid, text }.
         // Write path only wired when there is a capable JWT (named-write or standard authed).
@@ -789,6 +744,55 @@ export class OxpulseChatElement extends HTMLElement {
         });
         this.#composer.mount();
       }
+
+      this.#messageList = new MessageList({
+        client: widgetClient,
+        roomId: config.roomId,
+        container: listContainer,
+        lang,
+        // resolvedSelfUid: self-uid attribute > write JWT sub > anon mint userId
+        // (see the backfill comment above where it is computed).
+        selfUid: resolvedSelfUid ?? '',
+        signal: signal,
+        // MAJOR-5: pass shadow root so ReactionPicker mounts outside overflow:hidden widgetRoot.
+        shadowHost: this.#shadow ?? undefined,
+        // P5: role-badge label overrides, presentation only.
+        roleLabels: config.roleLabels,
+        // W7: only show reply buttons when there is a composer wired to receive them.
+        onSetReply: effectiveSendClient
+          ? (snapshot) => { this.#composer?.setReplyTarget(snapshot); }
+          : undefined,
+      });
+
+      await this.#messageList.mount();
+
+      if (signal.aborted) return;
+
+      // CB1: Wire Reconnector — drives banner + retry loop for subscribe errors.
+      // Mounted into widgetRoot so banner sits above message list (z-index 5 per theme.ts).
+      // AbortSignal from bootstrap wires cleanup (CM2).
+      this.#reconnector?.destroy();
+      this.#reconnector = new Reconnector({
+        container: widgetRoot,
+        host: this,
+        signal: signal,
+        lang,
+      });
+      reconnectorRef = this.#reconnector;
+
+      // CB1/CM1: SubscribeFn for the Reconnector's retry loop.
+      // When the SDK's internal reconnect exhausts and fires onError, the Reconnector
+      // calls this fn to re-establish the stream. We route new messages to the existing
+      // MessageList via its public handleMessage() method.
+      const subscribeFn: SubscribeFn = (roomId, onError) => {
+        return sdkClient.subscribe(roomId, {
+          onMessage: (row) => { this.#messageList?.handleMessage(row); },
+          onError,
+          onMutation: undefined,
+          onReaction: undefined,
+        });
+      };
+      subscribeFnRef = subscribeFn;
     }
 
     if (signal.aborted) return;
