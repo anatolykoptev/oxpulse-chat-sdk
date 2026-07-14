@@ -723,7 +723,7 @@ describe('OxpulseChatElement — B1 selfUid attribute', () => {
     expect(widgetRoot).not.toBeNull();
 
     // Picker must NOT be pre-rendered (only shows on demand)
-    expect(shadow!.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(shadow!.querySelector('.oxp-reaction-quick-bar')).toBeNull();
 
     el.destroy();
   });

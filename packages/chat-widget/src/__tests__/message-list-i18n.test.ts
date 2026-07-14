@@ -87,7 +87,7 @@ describe('MessageList i18n', () => {
   it('renders the Russian "Add reaction" / "You" sender label for lang="ru"', async () => {
     const bubble = await mountWith([makeRow({ senderUid: 'u1', seq: 1 })], 'ru');
     expect(bubble.querySelector('.oxp-bubble-sender')?.textContent).toBe('Вы');
-    expect(bubble.querySelector('.oxp-reaction-add-btn')?.getAttribute('aria-label')).toBe('Добавить реакцию');
+    expect(bubble.querySelector('.oxp-reaction-heart-btn')?.getAttribute('aria-label')).toBe('Добавить реакцию');
   });
 
   it('falls back to English for an unsupported lang tag', async () => {
