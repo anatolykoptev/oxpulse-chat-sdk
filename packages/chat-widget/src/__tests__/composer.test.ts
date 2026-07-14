@@ -858,5 +858,66 @@ describe('Composer', () => {
 
     composer.destroy();
   });
+
+  it('setReplyTarget_renders_preview_and_send_includes_threadRootMsgId', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    composer.setReplyTarget({ msgId: 'root-1', sender: 'Alice', body: 'original message' });
+
+    const replyEl = container.querySelector('.oxp-composer-reply') as HTMLElement;
+    expect(replyEl).not.toBeNull();
+    expect(replyEl.hidden).toBe(false);
+    expect(replyEl.textContent).toContain('Alice');
+    expect(replyEl.textContent).toContain('original message');
+
+    setInputValue(getInput(container), 'reply text');
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).toHaveBeenCalledWith('r1', 'reply text', { threadRootMsgId: 'root-1' });
+
+    // After send the reply preview is cleared.
+    expect(replyEl.hidden).toBe(true);
+
+    composer.destroy();
+  });
+
+  it('cancel_reply_button_clears_target', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    composer.setReplyTarget({ msgId: 'root-1', sender: 'Alice', body: 'original message' });
+    const replyEl = container.querySelector('.oxp-composer-reply') as HTMLElement;
+    expect(replyEl.hidden).toBe(false);
+
+    const cancelBtn = container.querySelector('.oxp-composer-reply-cancel') as HTMLButtonElement;
+    cancelBtn.click();
+    await drain();
+
+    expect(replyEl.hidden).toBe(true);
+
+    composer.destroy();
+  });
+
+  it('escape_key_clears_reply_target', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    composer.setReplyTarget({ msgId: 'root-1', sender: 'Alice', body: 'original message' });
+    const replyEl = container.querySelector('.oxp-composer-reply') as HTMLElement;
+    expect(replyEl.hidden).toBe(false);
+
+    const textarea = getInput(container);
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await drain();
+
+    expect(replyEl.hidden).toBe(true);
+
+    composer.destroy();
+  });
 });
 

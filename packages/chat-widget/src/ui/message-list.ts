@@ -11,10 +11,11 @@
 
 import { renderMarkdown } from '../utils/markdown.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
-import { isSafeAttachmentUrl } from '../utils/attachments.js';
-import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch } from '../utils/list-helpers.js';
+import { isSafeAttachmentUrl, replyBodySnapshotForMessage } from '../utils/attachments.js';
+import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch, cssEscape } from '../utils/list-helpers.js';
 import { reactionButtonAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
+import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { ReactionPicker } from './reaction-picker.js';
 import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
@@ -134,6 +135,11 @@ export interface MessageListOptions {
    * i18n label ("mod" / "owner") for a role with no override.
    */
   roleLabels?: Record<string, string>;
+  /**
+   * W7: Fires when the user clicks the reply button on a bubble.
+   * Provides a snapshot the consumer can feed to Composer.setReplyTarget().
+   */
+  onSetReply?: (snapshot: ReplySnapshot) => void;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -393,6 +399,8 @@ export class MessageList {
   #rosterDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** P5: role-badge label overrides from widget config `roleLabels`. */
   #roleLabels: Record<string, string> | undefined;
+  /** W7: callback to the consumer (Composer) when a reply is requested on a bubble. */
+  #onSetReply?: (snapshot: ReplySnapshot) => void;
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -402,6 +410,7 @@ export class MessageList {
     this.#lang = resolveLocale(opts.lang);
     this.#shadowHost = opts.shadowHost;
     this.#roleLabels = opts.roleLabels;
+    this.#onSetReply = opts.onSetReply;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
     const internal = new AbortController();
@@ -471,6 +480,71 @@ export class MessageList {
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * T18: Resolve a display name for a sender UID.
+   * "You" for self-uid; otherwise roster displayName or uid short-form.
+   * Single source of truth for all name rendering in this class.
+   */
+  #resolveDisplayName(senderUid: string): string {
+    if (isSelfMatch(senderUid, this.#selfUid)) return t('senderYou', this.#lang);
+    return this.#roster.get(senderUid)?.displayName ?? senderUid.slice(0, 8);
+  }
+
+  /**
+   * W7: Build a ReplySnapshot for a message row.
+   * Respects deletedAt/unsealError and falls back to image/voice attachment text.
+   */
+  #buildReplySnapshot(row: MessageRow): ReplySnapshot {
+    let body = '';
+    if (row.deletedAt) {
+      body = tombstoneText('everyone', this.#lang);
+    } else if (row.unsealError) {
+      body = unsealErrorText(this.#lang);
+    } else {
+      body = decodeText(row);
+    }
+    body = replyBodySnapshotForMessage({ body, attachments: row.attachments });
+    return {
+      msgId: row.msgId,
+      sender: this.#resolveDisplayName(row.senderUid),
+      body,
+    };
+  }
+
+  /**
+   * W7: Render a compact quote preview inside a bubble for a thread reply.
+   * Looks up the root row in #rows; if unavailable, shows a fallback placeholder.
+   */
+  #renderReplyQuote(el: HTMLElement, row: MessageRow): void {
+    const rootRow = row.threadRootMsgId ? this.#rows.get(row.threadRootMsgId) : undefined;
+    const quote = document.createElement('button');
+    quote.type = 'button';
+    quote.className = 'oxp-bubble-reply';
+    if (rootRow) {
+      quote.setAttribute('aria-label', t('replyToLabel', this.#lang, { sender: this.#resolveDisplayName(rootRow.senderUid) }));
+      const sender = document.createElement('span');
+      sender.className = 'oxp-bubble-reply-sender';
+      sender.textContent = this.#resolveDisplayName(rootRow.senderUid);
+      const body = document.createElement('span');
+      body.className = 'oxp-bubble-reply-body';
+      body.textContent = formatBodyPreview(this.#buildReplySnapshot(rootRow).body);
+      quote.appendChild(sender);
+      quote.appendChild(body);
+      quote.addEventListener('click', () => {
+        const rootEl = this.#listEl?.querySelector(`[data-msg-id="${cssEscape(rootRow.msgId)}"]`);
+        rootEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    } else {
+      quote.disabled = true;
+      quote.setAttribute('aria-label', t('replyOriginalUnavailable', this.#lang));
+      const body = document.createElement('span');
+      body.className = 'oxp-bubble-reply-body';
+      body.textContent = t('replyOriginalUnavailable', this.#lang);
+      quote.appendChild(body);
+    }
+    el.appendChild(quote);
+  }
 
   /**
    * T18: Fetch (or re-fetch) the roster and store in #roster.
@@ -927,11 +1001,9 @@ export class MessageList {
    * later flagged as tampered/replayed).
    */
   #ariaLabelFor(row: MessageRow): string {
-    const isSelf = isSelfMatch(row.senderUid, this.#selfUid);
     // T18: use roster name for other writers; "You" for self.
     // escapeHtml on roster name in case it contains special chars in the attribute context.
-    const rosterName = isSelf ? t('senderYou', this.#lang) : (this.#roster.get(row.senderUid)?.displayName ?? row.senderUid.slice(0, 8));
-    const senderLabel = escapeHtml(rosterName);
+    const senderLabel = escapeHtml(this.#resolveDisplayName(row.senderUid));
     const timeText = formatTime(rowTime(row));
     // U2: announce the tombstone / failed-decrypt placeholder text instead of
     // an empty body (plaintext is undefined in both cases, so decodeText()
@@ -973,18 +1045,14 @@ export class MessageList {
     // appended as a *child* of senderEl would leak into that string).
     const senderRow = document.createElement('div');
     senderRow.className = 'oxp-bubble-sender-row';
-    if (isSelf) {
-      // Own messages: show "You" or selfUid short-form — not from attacker-controlled roster.
-      senderEl.textContent = t('senderYou', this.#lang);
-    } else {
-      // Other writers: resolve from roster map; miss → epid short-form (first 8 chars).
-      const entry = this.#roster.get(row.senderUid);
-      // SEC-CR-003: textContent assignment is XSS-safe — no innerHTML or attribute sink.
-      senderEl.textContent = entry?.displayName ?? row.senderUid.slice(0, 8);
+    // SEC-CR-003: textContent assignment is XSS-safe — no innerHTML or attribute sink.
+    senderEl.textContent = this.#resolveDisplayName(row.senderUid);
+    if (!isSelf) {
       // P5: role badge — mirrors the avatar's "OTHER writers only" convention
       // (own messages read "You" and carry no roster-derived decoration).
       // entry?.role is undefined for a plain member or an unrecognised wire
       // value (chat-sdk fails closed at parse time) — no badge in either case.
+      const entry = this.#roster.get(row.senderUid);
       if (entry?.role === 'moderator' || entry?.role === 'owner') {
         senderRow.appendChild(
           createRoleBadgeElement({ role: entry.role, lang: this.#lang, roleLabels: this.#roleLabels }),
@@ -1015,6 +1083,10 @@ export class MessageList {
     } else {
       const text = decodeText(row);
       bodyEl.innerHTML = renderMarkdown(text);
+    }
+    // W7: If this message is a reply, render a compact quote of the root above the body.
+    if (row.threadRootMsgId) {
+      this.#renderReplyQuote(el, row);
     }
     el.appendChild(bodyEl);
 
@@ -1059,6 +1131,20 @@ export class MessageList {
       this.#showPicker(row.msgId, reactionBtn);
     });
     footerEl.appendChild(reactionBtn);
+
+    // W7: reply button — only when the consumer has wired a composer to receive it.
+    if (this.#onSetReply) {
+      const replyBtn = document.createElement('button');
+      replyBtn.className = 'oxp-reply-btn';
+      replyBtn.type = 'button';
+      replyBtn.setAttribute('aria-label', t('replyToMessageAria', this.#lang));
+      replyBtn.textContent = '↩';
+      replyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.#onSetReply?.(this.#buildReplySnapshot(row));
+      });
+      footerEl.appendChild(replyBtn);
+    }
 
     // Timestamp
     const timeEl = document.createElement('div');

@@ -10,11 +10,14 @@ import { shouldShowCounter, isCmdEnter, MAX_BODY_CHARS, autogrowHeightPx } from 
 import { AttachmentPicker } from './attachment-picker.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import type { ProductMeta } from '../types.js';
+import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 /** Optional args forwarded to the SDK sendText call. */
 export interface SendTextArgs {
+  /** W7: thread reply — UUID of the message being replied to. */
+  threadRootMsgId?: string;
   productRef?: string;
   productMeta?: ProductMeta;
 }
@@ -74,6 +77,10 @@ export class Composer {
   /** W9: optional product card to attach to the next outgoing text message. */
   #productRef: string | null = null;
   #productMeta: ProductMeta | null = null;
+  /** W7: snapshot of the message being replied to, or null when not replying. */
+  #replyTarget: ReplySnapshot | null = null;
+  /** W7: reply preview bar container — created in mount(), populated by setReplyTarget(). */
+  #replyEl: HTMLDivElement | null = null;
 
   constructor(opts: ComposerOptions) {
     this.#container = opts.container;
@@ -111,6 +118,15 @@ export class Composer {
     this.#productMeta = null;
   }
 
+  /**
+   * W7: Set the message to reply to. The composer renders a preview bar and
+   * sends the next message with `threadRootMsgId` populated. Pass `null` to clear.
+   */
+  setReplyTarget(target: ReplySnapshot | null): void {
+    this.#replyTarget = target;
+    this.#renderReplyTarget();
+  }
+
   mount(): void {
     // M3: early abort check — if signal already fired, skip mounting entirely
     if (this.#signal?.aborted) return;
@@ -133,6 +149,37 @@ export class Composer {
     sendHint.id = 'oxp-send-hint';
     sendHint.className = 'oxp-sr-only';
     sendHint.textContent = t('messageEmpty', this.#lang);
+
+    // W7: reply preview bar — hidden until setReplyTarget() is called.
+    const replyEl = document.createElement('div');
+    replyEl.className = 'oxp-composer-reply';
+    replyEl.setAttribute('role', 'region');
+    replyEl.setAttribute('aria-live', 'polite');
+    replyEl.setAttribute('aria-label', t('replyingToMessageAria', this.#lang));
+    replyEl.hidden = true;
+
+    const replyContent = document.createElement('div');
+    replyContent.className = 'oxp-composer-reply-content';
+
+    const replyLabel = document.createElement('span');
+    replyLabel.className = 'oxp-composer-reply-label';
+
+    const replyBody = document.createElement('span');
+    replyBody.className = 'oxp-composer-reply-body';
+
+    replyContent.appendChild(replyLabel);
+    replyContent.appendChild(replyBody);
+    replyEl.appendChild(replyContent);
+
+    const replyCancel = document.createElement('button');
+    replyCancel.type = 'button';
+    replyCancel.className = 'oxp-composer-reply-cancel';
+    replyCancel.setAttribute('aria-label', t('cancelReply', this.#lang));
+    replyCancel.textContent = '×';
+    replyCancel.addEventListener('click', () => this.#clearReplyTarget());
+    replyEl.appendChild(replyCancel);
+
+    this.#replyEl = replyEl;
 
     const sendBtn = document.createElement('button');
     sendBtn.className = 'oxp-composer-send';
@@ -168,6 +215,7 @@ export class Composer {
     footer.appendChild(sendBtn);
 
     root.appendChild(sendHint);
+    root.appendChild(replyEl);
     root.appendChild(textarea);
     root.appendChild(footer);
     this.#container.appendChild(root);
@@ -220,6 +268,8 @@ export class Composer {
     }
     // 1F: initialize state on mount so counter + send-hint reflect initial value
     this.#updateState();
+    // W7: render any reply target set before mount() was called.
+    this.#renderReplyTarget();
   }
 
   destroy(): void {
@@ -252,6 +302,7 @@ export class Composer {
     this.#sendBtn = null;
     this.#counter = null;
     this.#errorChip = null;
+    this.#replyEl = null;
   }
 
   // ── Private handlers ────────────────────────────────────────────────────────
@@ -310,6 +361,11 @@ export class Composer {
     if (isCmdEnter(ev)) {
       ev.preventDefault();
       void this.#send();
+    }
+    // W7: Escape cancels the active reply target.
+    if (ev.key === 'Escape' && this.#replyTarget) {
+      ev.preventDefault();
+      this.#clearReplyTarget();
     }
     // Plain Enter: default textarea behavior (newline) — no action needed
   };
@@ -385,6 +441,9 @@ export class Composer {
         Boolean(this.#client.e2ee);
 
       const sendArgs: SendTextArgs = {};
+      if (this.#replyTarget) {
+        sendArgs.threadRootMsgId = this.#replyTarget.msgId;
+      }
       if (this.#productRef && this.#productMeta) {
         sendArgs.productRef = this.#productRef;
         sendArgs.productMeta = this.#productMeta;
@@ -405,6 +464,7 @@ export class Composer {
         this.#lastText = '';
         this.#productRef = null;
         this.#productMeta = null;
+        this.#clearReplyTarget();
         this.#updateState();
       }
     } catch (err) {
@@ -470,5 +530,32 @@ export class Composer {
       this.#errorChip.parentNode.removeChild(this.#errorChip);
     }
     this.#errorChip = null;
+  }
+
+  // ── Reply target preview ────────────────────────────────────────────────────
+
+  /** Render or clear the reply preview bar based on #replyTarget. */
+  #renderReplyTarget(): void {
+    if (!this.#replyEl) return;
+    if (!this.#replyTarget) {
+      this.#replyEl.hidden = true;
+      return;
+    }
+
+    const label = this.#replyEl.querySelector('.oxp-composer-reply-label');
+    const body = this.#replyEl.querySelector('.oxp-composer-reply-body');
+    if (label) {
+      label.textContent = t('replyToLabel', this.#lang, { sender: this.#replyTarget.sender });
+    }
+    if (body) {
+      body.textContent = formatBodyPreview(this.#replyTarget.body);
+    }
+    this.#replyEl.hidden = false;
+  }
+
+  /** Clear the active reply target and update the preview bar. */
+  #clearReplyTarget(): void {
+    this.#replyTarget = null;
+    this.#renderReplyTarget();
   }
 }

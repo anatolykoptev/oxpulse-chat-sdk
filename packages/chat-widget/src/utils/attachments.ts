@@ -291,14 +291,17 @@ export async function thumbnail(
 
 // ── Reply snapshot ─────────────────────────────────────────────────────────────
 
-/** Attachment shape for replyBodySnapshotForMessage (duck-typed). */
+/** Attachment shape for replyBodySnapshotForMessage (duck-typed).
+ *  Supports both the legacy `kind` discriminator and widget AttachmentMeta's `mime`. */
 interface AttachmentRef {
-  readonly kind: string;
+  readonly kind?: string;
+  readonly mime?: string;
 }
 
 /**
  * Compute the body excerpt to use for a reply-snapshot.
  * Ported from web/src/lib/chat/attachments/attachments.ts.
+ * Widget extension: also inspects `mime` for AttachmentMeta rows that lack `kind`.
  */
 export function replyBodySnapshotForMessage(
   msg: {
@@ -307,9 +310,13 @@ export function replyBodySnapshotForMessage(
   },
 ): string {
   if (msg.body.length > 0) return msg.body;
-  const imageAttachment = msg.attachments?.find((a) => a.kind === 'image');
+  const imageAttachment = msg.attachments?.find(
+    (a) => a.kind === 'image' || a.mime?.startsWith('image/'),
+  );
   if (imageAttachment !== undefined) return IMAGE_REPLY_SNAPSHOT;
-  const voiceAttachment = msg.attachments?.find((a) => a.kind === 'voice');
+  const voiceAttachment = msg.attachments?.find(
+    (a) => a.kind === 'voice' || a.mime?.startsWith('audio/'),
+  );
   if (voiceAttachment !== undefined) return VOICE_REPLY_SNAPSHOT;
   return msg.body;
 }

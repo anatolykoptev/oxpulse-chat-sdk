@@ -413,7 +413,7 @@ export class OxpulseChatElement extends HTMLElement {
           onMutation?: (event: SDKMutationEvent) => void;
           onReaction?: (event: SDKReactionEvent) => void;
         }): () => void;
-        sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
+        sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
@@ -681,6 +681,14 @@ export class OxpulseChatElement extends HTMLElement {
       listContainer.className = 'oxp-message-list-wrapper';
       widgetRoot.appendChild(listContainer);
 
+      // Decision matrix:
+      //   isAnonMode && !writeClient → read-only (composer hidden, capability-based block)
+      //   isAnonMode && writeClient  → named-write JWT available; wire composer to writeClient
+      //   !isAnonMode               → authed path; standard JWT handles sends via sdkClient
+      //                               UNLESS allowWrite + writeClient: use write client instead
+      // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
+      const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
+
       this.#messageList = new MessageList({
         client: widgetClient,
         roomId: config.roomId,
@@ -694,6 +702,10 @@ export class OxpulseChatElement extends HTMLElement {
         shadowHost: this.#shadow ?? undefined,
         // P5: role-badge label overrides, presentation only.
         roleLabels: config.roleLabels,
+        // W7: only show reply buttons when there is a composer wired to receive them.
+        onSetReply: effectiveSendClient
+          ? (snapshot) => { this.#composer?.setReplyTarget(snapshot); }
+          : undefined,
       });
 
       await this.#messageList.mount();
@@ -725,15 +737,6 @@ export class OxpulseChatElement extends HTMLElement {
         });
       };
       subscribeFnRef = subscribeFn;
-
-      // Composer sits at the bottom of widgetRoot.
-      // Decision matrix:
-      //   isAnonMode && !writeClient → read-only (composer hidden, capability-based block)
-      //   isAnonMode && writeClient  → named-write JWT available; wire composer to writeClient
-      //   !isAnonMode               → authed path; standard JWT handles sends via sdkClient
-      //                               UNLESS allowWrite + writeClient: use write client instead
-      // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
-      const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
 
       if (effectiveSendClient !== null) {
         // ComposerClient adapter — bridges (roomId, text) → SDK { senderUid, text }.
