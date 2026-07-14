@@ -138,6 +138,13 @@ export interface WidgetConfig {
    * do not use them to gate a privileged operation.
    */
   roleLabels?: Record<string, string>;
+
+  /**
+   * Enable/disable reaction UI. When false, the reaction add button and
+   * reaction clusters are hidden and the widget does not subscribe to live
+   * reaction events. Default: true.
+   */
+  reactionsEnabled?: boolean;
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
@@ -155,6 +162,7 @@ export const OBSERVED_ATTRIBUTES = [
   'allow-anon-read',
   'allow-write',
   'write-mint-endpoint',
+  'reactions-enabled',
 ] as const;
 
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
