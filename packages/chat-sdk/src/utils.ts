@@ -98,3 +98,36 @@ export function backoffMs(attempt: number): number {
   const base = Math.min(1000 * Math.pow(2, attempt), 30_000);
   return base * (0.8 + Math.random() * 0.4);
 }
+
+/**
+ * Generate a UUID v4, with a safe fallback for environments where `crypto.randomUUID`
+ * is unavailable (Node 18 without `--experimental-global-webcrypto`, non-secure HTTP,
+ * test environments, etc.).
+ */
+export function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  // RFC 4122 variant/version bits.
+  bytes.set([((bytes[6] ?? 0) & 0x0f) | 0x40], 6);
+  bytes.set([((bytes[8] ?? 0) & 0x3f) | 0x80], 8);
+
+  const parts = Array.from(bytes, (b) => b.toString(16).padStart(2, '0'));
+  return (
+    parts.slice(0, 4).join('') + '-' +
+    parts.slice(4, 6).join('') + '-' +
+    parts.slice(6, 8).join('') + '-' +
+    parts.slice(8, 10).join('') + '-' +
+    parts.slice(10).join('')
+  );
+}

@@ -14,6 +14,10 @@ export interface PendingMessage {
   /** Standard base64 encoding of the sealed ArrayBuffer. */
   sealedB64: string;
   threadRootMsgId?: string;
+  /** W9: marketplace product reference persisted with the outbox entry. */
+  productRef?: string;
+  /** W9: marketplace product metadata persisted with the outbox entry. */
+  productMeta?: unknown;
   attempts: number;
   enqueuedAt: number;
 }

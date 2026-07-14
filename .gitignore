@@ -3,3 +3,5 @@ dist/
 dist-cdn/
 *.tsbuildinfo
 .DS_Store
+
+.claude/

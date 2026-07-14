@@ -14,9 +14,11 @@ import {
   ensureWireCodecReady,
   encodeHttpBody,
   decodeHttpBody,
+  decode,
   setDictLoader,
   setDictBaseUrl,
   asHttpWireBytes,
+  asWireBytes,
 } from '@oxpulse/wire-codec';
 import type { DictName } from '@oxpulse/wire-codec';
 import type {
@@ -58,6 +60,7 @@ import {
   httpStatusToCode,
   backoffMs,
   dispatchTransient,
+  generateUUID,
 } from './utils.js';
 
 // ─── Wire DTOs (snake_case) ───────────────────────────────────────────────────
@@ -437,7 +440,7 @@ export class SDKChatClient {
   /** Encode payload bytes for POST /api/sdk/messages per the configured compression mode.
    *  Returns a string for plain JSON (Content-Type: application/json) or
    *  Uint8Array for compressed frames (Content-Type: application/octet-stream). */
-  async #encodeBody(payload: Record<string, unknown>): Promise<string | Uint8Array> {
+  async #encodeBody(payload: unknown): Promise<string | Uint8Array> {
     if (this.#compression === 'none') {
       return JSON.stringify(payload);
     }
@@ -466,7 +469,7 @@ export class SDKChatClient {
    * Mirrors the encoding _encodeBody applies to POST /api/sdk/messages.
    */
   async encodeEnvelope(payload: unknown): Promise<string | Uint8Array> {
-    return this.#encodeBody(payload as Record<string, unknown>);
+    return this.#encodeBody(payload);
   }
 
   /**
@@ -488,9 +491,9 @@ export class SDKChatClient {
       // Plain JSON bytes — no zstd needed.
       return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     }
-    // Compressed frame (0xC6/0xC7): ensure zstd is ready regardless of #compression setting.
+    // Compressed frame (0xC6/0xC7/0xC8): ensure zstd is ready regardless of #compression setting.
     // #compression controls outgoing encoding only; server may compress responses independently.
-    if (first === 0xc6 || first === 0xc7) {
+    if (first === 0xc6 || first === 0xc7 || first === 0xc8) {
       if (this.#ready !== null) {
         await this.#ready;
         this.#ready = null;
@@ -498,6 +501,10 @@ export class SDKChatClient {
         // #compression is 'none' — zstd not pre-initialized; initialize on demand.
         await ensureWireCodecReady();
       }
+    }
+    // 0xC8 is the peer envelope-v2 format (CBOR/zstd), not the HTTP JSON format; route to decode().
+    if (first === 0xc8) {
+      return decode(asWireBytes(bytes));
     }
     return decodeHttpBody(asHttpWireBytes(bytes));
   }
@@ -684,7 +691,7 @@ export class SDKChatClient {
   async send(roomId: string, args: SendArgs): Promise<{ seq: number; msgId: string }> {
     // SEC-CR-1695-02 + SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior mismatch.
     this.#assertRoomNotPoisoned(roomId);
-    const msgId = args.msgId ?? crypto.randomUUID();
+    const msgId = args.msgId ?? generateUUID();
     const payload: Record<string, unknown> = {
       room_id: roomId,
       msg_id: msgId,
@@ -1321,41 +1328,39 @@ export class SDKChatClient {
     // bypass identically.
     const replayMissed = async () => {
       try {
-        // TODO(#43): #fetchRows also returns { hasMore, nextCursor } but replayMissed
-        // replays only this FIRST page. If more than `limit` (50) messages were missed
-        // while the stream was down, rows beyond the first page are NOT replayed here.
-        // Whether that is benign depends on the server: the re-attach below re-opens the
-        // stream from lastSeq (after_seq), which MAY stream the remaining gap — needs
-        // oxpulse-chat server-team confirmation. If the server does NOT backfill past the
-        // reconnect cursor, >50 missed messages would be silently dropped and this must
-        // loop the pages here (advance afterSeq while hasMore). Flagged, not fixed blind.
-        const { rawItems } = await this.#fetchRows(roomId, { afterSeq: lastSeq });
-        // Teardown may have raced the replay fetch: a torn-down subscriber must
-        // deliver nothing AND must not append onto a co-subscriber's still-live
-        // chain (append gates on refCount, which a surviving co-subscriber keeps
-        // > 0). Mirrors the live-stream guard in the onmessage handler.
-        if (destroyed) return;
-        if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
-          for (const row of rawItems) {
-            lastSeq = row.seq;
-            args.onMessage(aliasSealedAsPlaintext(row));
+        let cursor = lastSeq;
+        while (true) {
+          // Teardown may have raced the replay fetch: a torn-down subscriber must
+          // deliver nothing AND must not append onto a co-subscriber's still-live
+          // chain (append gates on refCount, which a surviving co-subscriber keeps
+          // > 0). Mirrors the live-stream guard in the onmessage handler.
+          if (destroyed) return;
+          const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, { afterSeq: cursor });
+          if (destroyed) return;
+          if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
+            for (const row of rawItems) {
+              lastSeq = row.seq;
+              args.onMessage(aliasSealedAsPlaintext(row));
+            }
+          } else if (this.#cryptoProvider !== null) {
+            // Route each replay unseal through the room's serial chain: it queues
+            // behind any still-in-flight streamed unseal (never concurrent), and
+            // frames from the re-attached stream append AFTER these, preserving
+            // replay-before-live order. lastSeq advances synchronously from row.seq
+            // (independent of when the deferred unseal runs) so the follow-up ticket
+            // fetch + re-attach resume from the correct cursor with no gap/dup.
+            for (const row of rawItems) {
+              lastSeq = row.seq;
+              this.#appendDecryptTask(roomId, row, args.onMessage);
+            }
+          } else {
+            for (const row of rawItems) {
+              lastSeq = row.seq;
+              args.onMessage(row);
+            }
           }
-        } else if (this.#cryptoProvider !== null) {
-          // Route each replay unseal through the room's serial chain: it queues
-          // behind any still-in-flight streamed unseal (never concurrent), and
-          // frames from the re-attached stream append AFTER these, preserving
-          // replay-before-live order. lastSeq advances synchronously from row.seq
-          // (independent of when the deferred unseal runs) so the follow-up ticket
-          // fetch + re-attach resume from the correct cursor with no gap/dup.
-          for (const row of rawItems) {
-            lastSeq = row.seq;
-            this.#appendDecryptTask(roomId, row, args.onMessage);
-          }
-        } else {
-          for (const row of rawItems) {
-            lastSeq = row.seq;
-            args.onMessage(row);
-          }
+          if (!hasMore || nextCursor == null) break;
+          cursor = nextCursor;
         }
       } catch (err) {
         // Surface replay failures to the caller; the reconnect flow still re-attaches for
@@ -1922,7 +1927,49 @@ export class SDKChatClient {
       product_meta?: ProductMeta | null;
     }>;
 
-    return json.map(rowToMessageRow);
+    const rawItems = json.map(rowToMessageRow);
+    return this.#unsealFetchedRows(roomId, rawItems);
+  }
+
+  /**
+   * W7 + W9: unseal/decrypt a list of fetched rows, preserving the same
+   * plaintext / E2EE / poison semantics as list() and subscribe().
+   * Used by list(), getThread() and searchByProductRef().
+   */
+  async #unsealFetchedRows(roomId: string, rawItems: MessageRow[]): Promise<MessageRow[]> {
+    // Prefer the per-room discovered mode, then the configured expectation.
+    // This matches the fallback used by send() / sendText() (#effectiveMode).
+    const mode = this.#activeCryptoModeByRoom.get(roomId) ?? this.#cryptoMode;
+
+    if (mode === 'plaintext') {
+      // Plaintext mode: sealed is raw UTF-8 bytes — just expose as plaintext.
+      return rawItems.map(aliasSealedAsPlaintext);
+    }
+
+    if (this.#cryptoProvider !== null) {
+      // SEC-CR-14-02: if THIS room has a LIVE subscription, its per-room
+      // #decryptChain owns the SFrame ratchet — route through the SAME serial chain.
+      if (this.#decryptChain.refCountOf(roomId) > 0) {
+        return this.#unsealRowsOnChain(roomId, rawItems);
+      }
+
+      // No live subscription: unseal directly off-chain.
+      const provider = this.#cryptoProvider;
+      const decrypted: MessageRow[] = [];
+      for (const row of rawItems) {
+        const ctx: SealContext = { roomId, senderUid: row.senderUid };
+        try {
+          const plaintext = await provider.unseal(row.sealed, ctx);
+          decrypted.push({ ...row, plaintext });
+        } catch (err) {
+          console.warn('[chat-sdk] unseal failed for seq', row.seq, err);
+          decrypted.push({ ...row, unsealError: classifyUnsealError(err) });
+        }
+      }
+      return decrypted;
+    }
+
+    return rawItems;
   }
 
   // ── W2: Edit / delete / pin ────────────────────────────────────────────────
@@ -1937,9 +1984,10 @@ export class SDKChatClient {
     // SEC-CR-001: fail-CLOSED — updateMessage transmits new sealed_b64 CONTENT to the
     // room, so a room with a proven-tampered crypto_mode must refuse edits too.
     this.#assertRoomNotPoisoned(roomId);
-    const body = {
+    const payload = {
       sealed_b64: arrayBufferToBase64(args.sealed),
     };
+    const body = await this.#encodeBody(payload);
 
     let resp: Response;
     try {
@@ -1948,10 +1996,10 @@ export class SDKChatClient {
         {
           method: 'PATCH',
           headers: {
-            'Content-Type': 'application/json',
+            'Content-Type': typeof body === 'string' ? 'application/json' : 'application/octet-stream',
             Authorization: `Bearer ${this.#jwt}`,
           },
-          body: JSON.stringify(body),
+          body: body as BodyInit,
         },
       );
     } catch (err) {
@@ -2274,7 +2322,7 @@ export class SDKChatClient {
       );
     }
 
-    const msgId = args.msgId ?? crypto.randomUUID();
+    const msgId = args.msgId ?? generateUUID();
     const pendingCbs: Array<() => void> = [];
     const okCbs: Array<(result: { seq: number; msgId: string }) => void> = [];
     const failCbs: Array<(err: SDKChatError) => void> = [];
@@ -2294,6 +2342,8 @@ export class SDKChatClient {
         senderUid: args.senderUid,
         sealedB64: arrayBufferToBase64(args.sealed),
         threadRootMsgId: args.threadRootMsgId,
+        productRef: args.productRef,
+        productMeta: args.productMeta,
         attempts: 0,
         enqueuedAt: Date.now(),
       });
@@ -2368,6 +2418,8 @@ export class SDKChatClient {
           sealed: base64ToArrayBuffer(m.sealedB64),
           msgId: m.msgId,
           threadRootMsgId: m.threadRootMsgId,
+          productRef: m.productRef,
+          productMeta: m.productMeta,
         });
         await dequeue(roomId, m.msgId);
       } catch (e) {
@@ -2408,7 +2460,7 @@ export class SDKChatClient {
       // Suppress unhandled rejection until caller attaches .catch / onFailed.
       done.catch(() => {});
       const handle: OptimisticHandle = {
-        msgId: args.msgId ?? crypto.randomUUID(),
+        msgId: args.msgId ?? generateUUID(),
         done,
         onPending: (_cb) => handle,
         onSucceeded: (_cb) => handle,
@@ -2418,7 +2470,7 @@ export class SDKChatClient {
     }
 
     const provider = this.#cryptoProvider;
-    const msgId = args.msgId ?? crypto.randomUUID();
+    const msgId = args.msgId ?? generateUUID();
     const ctx: SealContext = { roomId, senderUid: args.senderUid };
 
     // Seal the text first, then delegate to sendOptimistic with pre-sealed bytes.
@@ -2456,6 +2508,8 @@ export class SDKChatClient {
         senderUid: args.senderUid,
         sealedB64: arrayBufferToBase64(sealed),
         threadRootMsgId: args.threadRootMsgId,
+        productRef: args.productRef,
+        productMeta: args.productMeta,
         attempts: 0,
         enqueuedAt: Date.now(),
       });
@@ -2530,6 +2584,7 @@ export class SDKChatClient {
       product_ref: item.productRef ?? null,
       product_meta: item.productMeta ?? null,
     }));
+    const body = await this.#encodeBody(payload);
 
     let resp: Response;
     try {
@@ -2537,9 +2592,9 @@ export class SDKChatClient {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${this.#jwt}`,
-          'Content-Type': 'application/json',
+          'Content-Type': typeof body === 'string' ? 'application/json' : 'application/octet-stream',
         },
-        body: JSON.stringify(payload),
+        body: body as BodyInit,
       });
     } catch (err) {
       throw new SDKChatError('network', `batchAppend() fetch failed: ${String(err)}`);
@@ -2578,26 +2633,27 @@ export class SDKChatClient {
     // SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior crypto_mode mismatch
     // (gate-consistency with the other send entrypoints).
     this.#assertRoomNotPoisoned(roomId);
-    const body: Record<string, unknown> = {
+    const payload: Record<string, unknown> = {
       room_id: roomId,
-      msg_id: opts.msgId ?? crypto.randomUUID(),
+      msg_id: opts.msgId ?? generateUUID(),
       sender_uid: opts.senderUid,
       product_ref: opts.productRef,
       product_meta: opts.productMeta,
     };
     if (opts.sealedBody !== undefined) {
-      body['sealed_b64'] = arrayBufferToBase64(opts.sealedBody);
+      payload['sealed_b64'] = arrayBufferToBase64(opts.sealedBody);
     }
+    const body = await this.#encodeBody(payload);
 
     let resp: Response;
     try {
       resp = await fetch(`${this.#baseUrl}/api/sdk/messages`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': typeof body === 'string' ? 'application/json' : 'application/octet-stream',
           Authorization: `Bearer ${this.#jwt}`,
         },
-        body: JSON.stringify(body),
+        body: body as BodyInit,
       });
     } catch (err) {
       throw new SDKChatError('network', `sendProductCard() fetch failed: ${String(err)}`);
@@ -2661,7 +2717,9 @@ export class SDKChatClient {
     }
 
     const rows = (await resp.json()) as Array<Parameters<typeof rowToMessageRow>[0]>;
-    return rows.map(rowToMessageRow);
+    const rawItems = rows.map(rowToMessageRow);
+    const roomId = opts?.roomId ?? '';
+    return this.#unsealFetchedRows(roomId, rawItems);
   }
 
   // ── W8: Mass-chat methods (v1.2.0) ────────────────────────────────────────
