@@ -252,7 +252,7 @@ describe('theme foundation', () => {
   });
 
   it('reaction_picker_has_box_shadow_for_elevation', async () => {
-    // B3: .oxp-reaction-picker border alone fails 1.4:1. Fix: add box-shadow elevation.
+    // B3: .oxp-reaction-quick-bar border alone fails 1.4:1. Fix: add box-shadow elevation.
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
@@ -260,8 +260,8 @@ describe('theme foundation', () => {
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 20));
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
-    // .oxp-reaction-picker must have box-shadow for elevation visibility
-    expect(css).toMatch(/\.oxp-reaction-picker[^}]*box-shadow/s);
+    // .oxp-reaction-quick-bar must have box-shadow for elevation visibility
+    expect(css).toMatch(/\.oxp-reaction-quick-bar[^}]*box-shadow/s);
   });
 
   it('reaction_chip_focus_visible_has_double_ring', async () => {
@@ -311,18 +311,18 @@ describe('theme foundation', () => {
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 20));
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
-    const pickerBlock = css.match(/\.oxp-reaction-picker\s*\{[^}]+\}/s)?.[0] ?? '';
+    const pickerBlock = css.match(/\.oxp-reaction-quick-bar\s*\{[^}]+\}/s)?.[0] ?? '';
     // Must use box-shadow with a 0 0 0 1px ring (discrete outer pixel, not outline)
     expect(pickerBlock).toMatch(/box-shadow/);
     expect(pickerBlock).toMatch(/0\s+0\s+0\s+1px/);
     // Must NOT use outline for the boundary (outline-offset:-1px was placing it inward)
     expect(pickerBlock).not.toMatch(/outline:\s*1px/);
     // Dark theme must flip to white ring
-    const darkPickerRule = css.match(/:host\(\[data-theme='dark'\]\)\s*\.oxp-reaction-picker\s*\{[^}]+\}/s)?.[0] ?? '';
+    const darkPickerRule = css.match(/:host\(\[data-theme='dark'\]\)\s*\.oxp-reaction-quick-bar\s*\{[^}]+\}/s)?.[0] ?? '';
     expect(darkPickerRule).toMatch(/box-shadow/);
     expect(darkPickerRule).toMatch(/rgba\(255,?\s*255,?\s*255/);
     // Auto dark theme also must have white ring
-    expect(css).toMatch(/:host\(\[data-theme='auto'\]\)\s*\.oxp-reaction-picker[^}]*rgba\(255/s);
+    expect(css).toMatch(/:host\(\[data-theme='auto'\]\)\s*\.oxp-reaction-quick-bar[^}]*rgba\(255/s);
   });
 
   it('mobile_reaction_add_btn_always_visible', async () => {

@@ -1,12 +1,13 @@
 /**
- * reaction-picker.test.ts — TDD RED phase (W2.2 slice 3)
+ * reaction-quick-bar.test.ts — renamed from reaction-picker.test.ts (reactions
+ * quick-bar redesign, spec 2026-07-14).
  *
- * Tests: ReactionPicker class — emoji rendering, selection, keyboard nav,
- * outside click, abort signal.
+ * Tests: ReactionQuickBar class — emoji rendering, selection, keyboard nav,
+ * outside click, abort signal, own-emoji marking, select-burst dismiss.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ReactionPicker } from '../ui/reaction-picker.js';
+import { ReactionQuickBar } from '../ui/reaction-quick-bar.js';
 import { REACTION_EMOJIS } from '../utils/reaction-types.js';
 
 function drainMicrotasks(n = 10): Promise<void> {
@@ -16,7 +17,7 @@ function drainMicrotasks(n = 10): Promise<void> {
   ) as Promise<void>;
 }
 
-describe('ReactionPicker', () => {
+describe('ReactionQuickBar', () => {
   let container: HTMLDivElement;
   let anchor: HTMLButtonElement;
 
@@ -35,10 +36,10 @@ describe('ReactionPicker', () => {
 
   it('renders_all_emojis_from_REACTION_EMOJIS', () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    const buttons = container.querySelectorAll('.oxp-reaction-picker-button');
+    const buttons = container.querySelectorAll('.oxp-reaction-quick-bar-button');
     expect(buttons.length).toBe(REACTION_EMOJIS.length);
 
     const renderedEmojis = Array.from(buttons).map((b) => b.textContent?.trim());
@@ -49,10 +50,10 @@ describe('ReactionPicker', () => {
 
   it('calls_onSelect_with_emoji_on_click', () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    const firstButton = container.querySelector('.oxp-reaction-picker-button') as HTMLButtonElement;
+    const firstButton = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement;
     expect(firstButton).not.toBeNull();
     firstButton.click();
 
@@ -62,55 +63,55 @@ describe('ReactionPicker', () => {
 
   it('hides_picker_after_selecting_emoji', () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    expect(container.querySelector('.oxp-reaction-picker')).not.toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
 
-    const firstButton = container.querySelector('.oxp-reaction-picker-button') as HTMLButtonElement;
+    const firstButton = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement;
     firstButton.click();
 
-    expect(container.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
   });
 
   it('hides_on_outside_click', async () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    expect(container.querySelector('.oxp-reaction-picker')).not.toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
 
     // Click outside
     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     await drainMicrotasks();
 
-    expect(container.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
   });
 
   it('hides_on_escape_and_restores_focus_to_anchor', async () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     anchor.focus();
     picker.show(anchor);
 
-    expect(container.querySelector('.oxp-reaction-picker')).not.toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
 
     // Press Escape
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await drainMicrotasks();
 
-    expect(container.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
     // Focus restored to anchor
     expect(document.activeElement).toBe(anchor);
   });
 
   it('arrow_keys_navigate_emoji_buttons', () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
     const buttons = Array.from(
-      container.querySelectorAll('.oxp-reaction-picker-button'),
+      container.querySelectorAll('.oxp-reaction-quick-bar-button'),
     ) as HTMLButtonElement[];
     expect(buttons.length).toBeGreaterThan(1);
 
@@ -128,19 +129,19 @@ describe('ReactionPicker', () => {
     const ctrl = new AbortController();
     ctrl.abort();
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect, signal: ctrl.signal });
+    const picker = new ReactionQuickBar({ container, onSelect, signal: ctrl.signal });
 
     // show() on an already-aborted picker must be a no-op
     picker.show(anchor);
-    expect(container.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
   });
 
   it('each_emoji_button_has_aria_label', () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    const buttons = container.querySelectorAll('.oxp-reaction-picker-button');
+    const buttons = container.querySelectorAll('.oxp-reaction-quick-bar-button');
     for (const btn of buttons) {
       expect(btn.getAttribute('aria-label')).toBeTruthy();
     }
@@ -149,11 +150,11 @@ describe('ReactionPicker', () => {
   it('tab_wraps_within_picker', async () => {
     // M2: Tab from last emoji must wrap to first (focus trap).
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
     const buttons = Array.from(
-      container.querySelectorAll('.oxp-reaction-picker-button'),
+      container.querySelectorAll('.oxp-reaction-quick-bar-button'),
     ) as HTMLButtonElement[];
     expect(buttons.length).toBeGreaterThan(0);
 
@@ -172,11 +173,11 @@ describe('ReactionPicker', () => {
   it('shift_tab_wraps_backward', async () => {
     // M2: Shift+Tab from first emoji must wrap to last.
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
     const buttons = Array.from(
-      container.querySelectorAll('.oxp-reaction-picker-button'),
+      container.querySelectorAll('.oxp-reaction-quick-bar-button'),
     ) as HTMLButtonElement[];
     expect(buttons.length).toBeGreaterThan(0);
 
@@ -195,10 +196,10 @@ describe('ReactionPicker', () => {
   it('picker_has_aria_modal_true', () => {
     // M2: aria-modal must be "true" to prevent Tab escaping dialog.
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    const pickerEl = container.querySelector('.oxp-reaction-picker');
+    const pickerEl = container.querySelector('.oxp-reaction-quick-bar');
     expect(pickerEl).not.toBeNull();
     expect(pickerEl!.getAttribute('aria-modal')).toBe('true');
 
@@ -210,25 +211,25 @@ describe('ReactionPicker', () => {
     // not added → picker leaks if signal fires mid-open.
     const ctrl = new AbortController();
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect, signal: ctrl.signal });
+    const picker = new ReactionQuickBar({ container, onSelect, signal: ctrl.signal });
 
     // Open picker (signal not yet aborted)
     picker.show(anchor);
-    expect(container.querySelector('.oxp-reaction-picker')).not.toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
 
     // Abort mid-open → picker must hide
     ctrl.abort();
     await drainMicrotasks();
 
-    expect(container.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
   });
 
   it('picker_has_role_dialog', () => {
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    const pickerEl = container.querySelector('.oxp-reaction-picker');
+    const pickerEl = container.querySelector('.oxp-reaction-quick-bar');
     expect(pickerEl).not.toBeNull();
     expect(pickerEl!.getAttribute('role')).toBe('dialog');
   });
@@ -241,13 +242,13 @@ describe('ReactionPicker', () => {
     const shadowHost = document.createElement('div');
     document.body.appendChild(shadowHost);
 
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor, shadowHost);
 
     // picker must NOT be in container
-    expect(container.querySelector('.oxp-reaction-picker')).toBeNull();
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
     // picker MUST be in shadowHost
-    expect(shadowHost.querySelector('.oxp-reaction-picker')).not.toBeNull();
+    expect(shadowHost.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
 
     picker.hide();
     shadowHost.remove();
@@ -262,10 +263,10 @@ describe('ReactionPicker', () => {
     const shadowHost = document.createElement('div');
     document.body.appendChild(shadowHost);
 
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor, shadowHost);
 
-    const pickerEl = shadowHost.querySelector('.oxp-reaction-picker') as HTMLElement | null;
+    const pickerEl = shadowHost.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
     expect(pickerEl).not.toBeNull();
     // Must use position:fixed when mounted outside the container
     expect(pickerEl!.style.position).toBe('fixed');
@@ -278,10 +279,10 @@ describe('ReactionPicker', () => {
     // Existing flow: no mountTo → picker appended to container, position:absolute
     // relative to container's offset parent.
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
     picker.show(anchor);
 
-    const pickerEl = container.querySelector('.oxp-reaction-picker') as HTMLElement | null;
+    const pickerEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
     expect(pickerEl).not.toBeNull();
     expect(pickerEl!.style.position).toBe('absolute');
 
@@ -296,7 +297,7 @@ describe('ReactionPicker', () => {
     // Fix: compute pickerWidth via offsetWidth after append, clamp
     //   left = Math.min(anchorRect.left, viewportWidth - pickerWidth - 8)
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
 
     // Simulate anchor near right edge of a 320px viewport
     // jsdom: window.innerWidth = 1024 by default; override
@@ -313,7 +314,7 @@ describe('ReactionPicker', () => {
 
     // Set picker offsetWidth via a mock — 80px wide picker starting at 300 would overflow 320px viewport
     picker.show(anchor);
-    const pickerEl = container.querySelector('.oxp-reaction-picker') as HTMLElement | null;
+    const pickerEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
     expect(pickerEl).not.toBeNull();
 
     // After clamping: left must be ≤ (320 - pickerWidth - 8)
@@ -335,11 +336,11 @@ describe('ReactionPicker', () => {
   it('clamp_uses_real_picker_width_from_offsetWidth', () => {
     // DM3 (design MAJOR): #position reads offsetWidth which is 0 pre-paint in jsdom.
     // Clamp formula viewportWidth - 0 - 8 = effectively disabled.
-    // Fix: CSS sets explicit width on .oxp-reaction-picker so JS reads stable value,
+    // Fix: CSS sets explicit width on .oxp-reaction-quick-bar so JS reads stable value,
     // OR measure post-requestAnimationFrame with 256px fallback.
     // Test: mock offsetWidth to 240, anchor near right edge → clamped left < unclamped value.
     const onSelect = vi.fn();
-    const picker = new ReactionPicker({ container, onSelect });
+    const picker = new ReactionQuickBar({ container, onSelect });
 
     Object.defineProperty(window, 'innerWidth', { value: 400, configurable: true });
 
@@ -353,7 +354,7 @@ describe('ReactionPicker', () => {
     });
 
     picker.show(anchor);
-    const pickerEl = container.querySelector('.oxp-reaction-picker') as HTMLElement | null;
+    const pickerEl = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
     expect(pickerEl).not.toBeNull();
 
     // Mock offsetWidth = 240 on the rendered element (simulates real width measurement)
@@ -362,7 +363,7 @@ describe('ReactionPicker', () => {
     // Re-show to trigger position with the mocked offsetWidth
     picker.hide();
     picker.show(anchor);
-    const pickerEl2 = container.querySelector('.oxp-reaction-picker') as HTMLElement | null;
+    const pickerEl2 = container.querySelector('.oxp-reaction-quick-bar') as HTMLElement | null;
     expect(pickerEl2).not.toBeNull();
 
     // With pickerEl.offsetWidth=0 (jsdom default), clamped left = min(380, 400-0-8) = 380

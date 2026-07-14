@@ -1,5 +1,9 @@
 /**
- * @oxpulse/chat-widget — ReactionPicker (W2.2 slice 3).
+ * @oxpulse/chat-widget — ReactionQuickBar (reactions quick-bar redesign,
+ * spec 2026-07-14). Renamed from ReactionPicker (W2.2 slice 3) — same
+ * floating-popover mechanics, now reached via hover/long-press/keyboard-focus
+ * instead of a click-triggered two-step flow (see ui/reaction-trigger.ts and
+ * MessageList's wiring).
  *
  * Plain TS class, no framework. Renders emoji buttons inside the container,
  * handles keyboard navigation, outside click, and AbortSignal.
@@ -10,8 +14,8 @@ import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 
 // ── Constructor options ───────────────────────────────────────────────────────
 
-export interface ReactionPickerOptions {
-  /** Container element to render the picker inside. */
+export interface ReactionQuickBarOptions {
+  /** Container element to render the bar inside. */
   container: HTMLElement;
   /** Called when the user selects an emoji. */
   onSelect: (emoji: string) => void;
@@ -21,36 +25,36 @@ export interface ReactionPickerOptions {
   lang?: string;
 }
 
-// ── ReactionPicker ────────────────────────────────────────────────────────────
+// ── ReactionQuickBar ──────────────────────────────────────────────────────────
 
 /**
- * ReactionPicker renders a floating emoji selection popover.
+ * ReactionQuickBar renders a floating emoji quick-select bar.
  *
  * Lifecycle:
- *   show(anchorEl) — appends picker to container, positions it, focuses first emoji
+ *   show(anchorEl) — appends bar to container, positions it, focuses first emoji
  *   hide()         — removes from DOM, restores focus to anchor
  *
  * A11y:
  *   role="dialog", first emoji focused on open, Arrow keys navigate,
  *   Escape hides + restores focus to anchor, outside mousedown hides.
  */
-export class ReactionPicker {
+export class ReactionQuickBar {
   #container: HTMLElement;
   #onSelect: (emoji: string) => void;
   #signal: AbortSignal | undefined;
   #lang: Locale;
-  #pickerEl: HTMLElement | null = null;
+  #barEl: HTMLElement | null = null;
   #anchorEl: HTMLElement | null = null;
   #outsideClickHandler: ((e: MouseEvent) => void) | null = null;
   #keydownHandler: ((e: KeyboardEvent) => void) | null = null;
-  /** Code MAJOR-2: abort listener to hide picker when signal fires mid-open. */
+  /** Code MAJOR-2: abort listener to hide bar when signal fires mid-open. */
   #abortListener: (() => void) | null = null;
-  /** Buttons inside picker — stored for Tab focus trap. */
-  #pickerButtons: HTMLButtonElement[] = [];
-  /** Track where the picker was mounted to determine positioning strategy. */
+  /** Buttons inside the bar — stored for Tab focus trap. */
+  #barButtons: HTMLButtonElement[] = [];
+  /** Track where the bar was mounted to determine positioning strategy. */
   #mountTo: HTMLElement | undefined = undefined;
 
-  constructor(opts: ReactionPickerOptions) {
+  constructor(opts: ReactionQuickBarOptions) {
     this.#container = opts.container;
     this.#onSelect = opts.onSelect;
     this.#signal = opts.signal;
@@ -58,35 +62,35 @@ export class ReactionPicker {
   }
 
   /**
-   * Show the picker anchored to the given element.
+   * Show the bar anchored to the given element.
    *
    * @param anchorEl  — element to anchor position to
-   * @param mountTo   — element to append the picker to (default: constructor container).
+   * @param mountTo   — element to append the bar to (default: constructor container).
    *                    Pass the ShadowRoot host element to escape overflow:hidden clip contexts.
    *                    F3 (design MAJOR-5): container has overflow:hidden which clips absolute children.
    */
   show(anchorEl: HTMLElement, mountTo?: HTMLElement): void {
     if (this.#signal?.aborted) return;
     // If already visible, hide first
-    if (this.#pickerEl) this.#removePicker();
+    if (this.#barEl) this.#removeBar();
 
     this.#anchorEl = anchorEl;
     this.#mountTo = mountTo;
-    this.#pickerEl = this.#buildPicker();
+    this.#barEl = this.#buildBar();
     const appendTarget = mountTo ?? this.#container;
-    appendTarget.appendChild(this.#pickerEl);
+    appendTarget.appendChild(this.#barEl);
 
     // Position: above anchor if room, below otherwise
     this.#position(anchorEl);
 
     // Focus first button
-    if (this.#pickerButtons.length > 0) {
-      this.#pickerButtons[0]!.focus();
+    if (this.#barButtons.length > 0) {
+      this.#barButtons[0]!.focus();
     }
 
     // Outside click handler
     this.#outsideClickHandler = (e: MouseEvent) => {
-      if (this.#pickerEl && !this.#pickerEl.contains(e.target as Node) &&
+      if (this.#barEl && !this.#barEl.contains(e.target as Node) &&
           e.target !== anchorEl && !anchorEl.contains(e.target as Node)) {
         this.hide();
       }
@@ -101,8 +105,8 @@ export class ReactionPicker {
         this.hide();
         this.#anchorEl?.focus();
       } else if (e.key === 'Tab') {
-        // M2: Tab focus trap — keep focus inside picker
-        const buttons = this.#pickerButtons;
+        // M2: Tab focus trap — keep focus inside the bar
+        const buttons = this.#barButtons;
         if (buttons.length === 0) return;
         const first = buttons[0]!;
         const last = buttons[buttons.length - 1]!;
@@ -121,21 +125,21 @@ export class ReactionPicker {
     };
     document.addEventListener('keydown', this.#keydownHandler);
 
-    // Code MAJOR-2: listen for abort mid-open → hide picker
+    // Code MAJOR-2: listen for abort mid-open → hide bar
     if (this.#signal) {
       this.#abortListener = () => this.hide();
       this.#signal.addEventListener('abort', this.#abortListener, { once: true });
     }
   }
 
-  /** Hide the picker without firing onSelect. */
+  /** Hide the bar without firing onSelect. */
   hide(): void {
-    this.#removePicker();
+    this.#removeBar();
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
 
-  #removePicker(): void {
+  #removeBar(): void {
     if (this.#outsideClickHandler) {
       document.removeEventListener('mousedown', this.#outsideClickHandler);
       this.#outsideClickHandler = null;
@@ -149,17 +153,17 @@ export class ReactionPicker {
       this.#signal.removeEventListener('abort', this.#abortListener);
       this.#abortListener = null;
     }
-    if (this.#pickerEl?.parentNode) {
-      this.#pickerEl.parentNode.removeChild(this.#pickerEl);
+    if (this.#barEl?.parentNode) {
+      this.#barEl.parentNode.removeChild(this.#barEl);
     }
-    this.#pickerEl = null;
-    this.#pickerButtons = [];
+    this.#barEl = null;
+    this.#barButtons = [];
     this.#mountTo = undefined;
   }
 
-  #buildPicker(): HTMLElement {
+  #buildBar(): HTMLElement {
     const el = document.createElement('div');
-    el.className = 'oxp-reaction-picker';
+    el.className = 'oxp-reaction-quick-bar';
     el.setAttribute('role', 'dialog');
     // M2: aria-modal=true prevents Tab from escaping dialog (broken dialog pattern fix)
     el.setAttribute('aria-modal', 'true');
@@ -169,7 +173,7 @@ export class ReactionPicker {
 
     for (const emoji of REACTION_EMOJIS) {
       const btn = document.createElement('button');
-      btn.className = 'oxp-reaction-picker-button';
+      btn.className = 'oxp-reaction-quick-bar-button';
       btn.textContent = emoji;
       btn.setAttribute('aria-label', reactionAriaLabel(emoji, this.#lang));
       btn.type = 'button';
@@ -198,47 +202,47 @@ export class ReactionPicker {
     }
 
     // Store buttons array for Tab focus trap in show()
-    this.#pickerButtons = buttons;
+    this.#barButtons = buttons;
     return el;
   }
 
   #position(anchorEl: HTMLElement): void {
-    if (!this.#pickerEl) return;
+    if (!this.#barEl) return;
     const anchorRect = anchorEl.getBoundingClientRect();
     const isMountedOutside = this.#mountTo !== undefined && this.#mountTo !== this.#container;
-    // DM3 (design MAJOR): CSS sets explicit width: 256px on .oxp-reaction-picker so offsetWidth
+    // DM3 (design MAJOR): CSS sets explicit width: 256px on .oxp-reaction-quick-bar so offsetWidth
     // returns a stable non-zero value pre-paint. Fallback 256 guards jsdom (no layout engine)
     // and any edge case where CSS width isn't applied.
-    const pickerWidth = this.#pickerEl.offsetWidth || 256;
+    const barWidth = this.#barEl.offsetWidth || 256;
     const viewportWidth = window.innerWidth;
 
     if (isMountedOutside) {
       // Mounted outside container (e.g. shadow host) — use viewport coords via position:fixed.
       // getBoundingClientRect() returns viewport-relative coords, which map directly to
       // fixed positioning. This avoids the coordinate mismatch when container has
-      // overflow:hidden and the picker is appended to a different ancestor (F2/M5).
-      this.#pickerEl.style.position = 'fixed';
-      this.#pickerEl.style.top = `${Math.max(8, anchorRect.top - this.#pickerEl.offsetHeight - 8)}px`;
+      // overflow:hidden and the bar is appended to a different ancestor (F2/M5).
+      this.#barEl.style.position = 'fixed';
+      this.#barEl.style.top = `${Math.max(8, anchorRect.top - this.#barEl.offsetHeight - 8)}px`;
       // 4C: clamp right edge — prevent overflow on narrow viewports (320px)
       const clampedLeft = Math.min(
         Math.max(8, anchorRect.left),
-        viewportWidth - pickerWidth - 8,
+        viewportWidth - barWidth - 8,
       );
-      this.#pickerEl.style.left = `${clampedLeft}px`;
+      this.#barEl.style.left = `${clampedLeft}px`;
     } else {
       // Inside container — offset-parent-relative coords via position:absolute.
       const containerRect = this.#container.getBoundingClientRect();
-      this.#pickerEl.style.position = 'absolute';
-      this.#pickerEl.style.top = `${Math.max(0, anchorRect.top - containerRect.top - this.#pickerEl.offsetHeight - 8)}px`;
+      this.#barEl.style.position = 'absolute';
+      this.#barEl.style.top = `${Math.max(0, anchorRect.top - containerRect.top - this.#barEl.offsetHeight - 8)}px`;
       // 4C: clamp right edge relative to container
       const rawLeft = anchorRect.left - containerRect.left;
       const containerWidth = this.#container.offsetWidth || viewportWidth;
       const clampedLeft = Math.min(
         Math.max(0, rawLeft),
-        containerWidth - pickerWidth - 8,
+        containerWidth - barWidth - 8,
       );
-      this.#pickerEl.style.left = `${clampedLeft}px`;
+      this.#barEl.style.left = `${clampedLeft}px`;
     }
-    this.#pickerEl.style.zIndex = '10';
+    this.#barEl.style.zIndex = '10';
   }
 }

@@ -729,7 +729,7 @@ export const THEME_CSS = `
   text-overflow: ellipsis;
 }
 
-.oxp-reaction-picker {
+.oxp-reaction-quick-bar {
   position: absolute;
   z-index: 10;
   background: var(--oxp-bg);
@@ -755,7 +755,7 @@ export const THEME_CSS = `
     0 2px 4px rgba(0, 0, 0, 0.15);
 }
 
-:host([data-theme='dark']) .oxp-reaction-picker {
+:host([data-theme='dark']) .oxp-reaction-quick-bar {
   /* F1: dark theme — rgba(255,255,255,0.50) on #1c1c1e → 4.39:1 PASS */
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.50),
@@ -763,15 +763,15 @@ export const THEME_CSS = `
 }
 
 @media (prefers-color-scheme: dark) {
-  :host([data-theme='auto']) .oxp-reaction-picker,
-  :host(:not([data-theme])) .oxp-reaction-picker {
+  :host([data-theme='auto']) .oxp-reaction-quick-bar,
+  :host(:not([data-theme])) .oxp-reaction-quick-bar {
     box-shadow:
       0 0 0 1px rgba(255, 255, 255, 0.50),
       0 4px 12px rgba(0, 0, 0, 0.60);
   }
 }
 
-.oxp-reaction-picker-button {
+.oxp-reaction-quick-bar-button {
   min-width: 36px;
   min-height: 36px;
   background: none;
@@ -786,7 +786,7 @@ export const THEME_CSS = `
 }
 
 @media (hover: none) {
-  .oxp-reaction-picker-button {
+  .oxp-reaction-quick-bar-button {
     min-width: 44px;
     min-height: 44px;
   }
@@ -802,12 +802,12 @@ export const THEME_CSS = `
   .oxp-attachment-retry { min-height: 44px; min-width: 44px; }
 }
 
-.oxp-reaction-picker-button:hover,
-.oxp-reaction-picker-button:focus {
+.oxp-reaction-quick-bar-button:hover,
+.oxp-reaction-quick-bar-button:focus {
   background: var(--oxp-border);
 }
 
-.oxp-reaction-picker-button:focus-visible {
+.oxp-reaction-quick-bar-button:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
 }

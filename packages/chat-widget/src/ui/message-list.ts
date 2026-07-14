@@ -16,7 +16,7 @@ import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText
 import { reactionButtonAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
-import { ReactionPicker } from './reaction-picker.js';
+import { ReactionQuickBar } from './reaction-quick-bar.js';
 import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
 import type { ProductMeta } from '../types.js';
@@ -399,8 +399,8 @@ export class MessageList {
   #reactions: Map<string, ReactionState> = new Map();
   /** Whether reaction UI is enabled. */
   #reactionsEnabled = true;
-  /** Active ReactionPicker instance (at most one visible at a time). */
-  #picker: ReactionPicker | null = null;
+  /** Active ReactionQuickBar instance (at most one visible at a time). */
+  #quickBar: ReactionQuickBar | null = null;
   /** Reactions fetches currently in flight, keyed by msgId. */
   #reactionFetchInFlight: Set<string> = new Set();
   /** Messages whose reaction fetch should be retried when the in-flight one completes. */
@@ -513,8 +513,8 @@ export class MessageList {
     }
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = null;
-    this.#picker?.hide();
-    this.#picker = null;
+    this.#quickBar?.hide();
+    this.#quickBar = null;
     this.#rows.clear();
     this.#order = [];
     this.#reactions.clear();
@@ -1223,7 +1223,7 @@ export class MessageList {
       reactionBtn.textContent = '❤️';
       reactionBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.#showPicker(row.msgId, reactionBtn);
+        this.#showQuickBar(row.msgId, reactionBtn);
       });
       footerEl.appendChild(reactionBtn);
     }
@@ -1251,37 +1251,37 @@ export class MessageList {
     el.appendChild(footerEl);
   }
 
-  /** Show the reaction picker for a specific message. */
-  #showPicker(msgId: string, anchorEl: HTMLElement): void {
-    // Close any existing picker first
-    if (this.#picker) {
-      this.#picker.hide();
-      this.#picker = null;
+  /** Show the reaction quick-bar for a specific message. */
+  #showQuickBar(msgId: string, anchorEl: HTMLElement): void {
+    // Close any existing bar first
+    if (this.#quickBar) {
+      this.#quickBar.hide();
+      this.#quickBar = null;
     }
 
-    // M5: Append picker to the outer container (not #listEl which has overflow:auto).
-    // This prevents the picker from being clipped near scroll edges.
-    // Picker position is computed relative to the outer container via getBoundingClientRect.
+    // M5: Append bar to the outer container (not #listEl which has overflow:auto).
+    // This prevents the bar from being clipped near scroll edges.
+    // Bar position is computed relative to the outer container via getBoundingClientRect.
     const container = this.#container;
-    this.#picker = new ReactionPicker({
+    this.#quickBar = new ReactionQuickBar({
       container,
       onSelect: (emoji) => {
-        this.#picker = null;
+        this.#quickBar = null;
         void this.#optimisticAddReaction(msgId, emoji);
       },
       signal: this.#signal,
       lang: this.#lang,
     });
-    // MAJOR-5: mount picker into shadow host (ShadowRoot) to escape overflow:hidden widgetRoot.
+    // MAJOR-5: mount bar into shadow host (ShadowRoot) to escape overflow:hidden widgetRoot.
     // ShadowRoot is not HTMLElement but supports appendChild; cast is safe at runtime.
     const mountTo = this.#shadowHost ? (this.#shadowHost as unknown as HTMLElement) : undefined;
-    this.#picker.show(anchorEl, mountTo);
+    this.#quickBar.show(anchorEl, mountTo);
 
-    // M5: Close picker on scroll — acceptable UX when picker is outside scroll container
+    // M5: Close bar on scroll — acceptable UX when bar is outside scroll container
     const onScroll = (): void => {
-      if (this.#picker) {
-        this.#picker.hide();
-        this.#picker = null;
+      if (this.#quickBar) {
+        this.#quickBar.hide();
+        this.#quickBar = null;
       }
       this.#listEl?.removeEventListener('scroll', onScroll);
     };

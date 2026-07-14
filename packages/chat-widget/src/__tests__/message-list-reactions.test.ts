@@ -258,7 +258,7 @@ describe('MessageList — reactions', () => {
     await drainMicrotasks(5);
 
     // Picker should be visible
-    const picker = container.querySelector('.oxp-reaction-picker');
+    const picker = container.querySelector('.oxp-reaction-quick-bar');
     expect(picker).not.toBeNull();
     ml.destroy();
   });
@@ -277,7 +277,7 @@ describe('MessageList — reactions', () => {
     await drainMicrotasks(5);
 
     // Select first emoji in picker
-    const emojiBtn = container.querySelector('.oxp-reaction-picker-button') as HTMLButtonElement | null;
+    const emojiBtn = container.querySelector('.oxp-reaction-quick-bar-button') as HTMLButtonElement | null;
     expect(emojiBtn).not.toBeNull();
     emojiBtn!.click();
     await drainMicrotasks(5);
@@ -473,8 +473,8 @@ describe('MessageList — reactions', () => {
     await drainMicrotasks(5);
 
     // Picker must be appended to shadowHost, NOT container
-    const pickerInShadowHost = shadowHost.querySelector('.oxp-reaction-picker');
-    const pickerInContainer = container.querySelector('.oxp-reaction-picker');
+    const pickerInShadowHost = shadowHost.querySelector('.oxp-reaction-quick-bar');
+    const pickerInContainer = container.querySelector('.oxp-reaction-quick-bar');
     expect(pickerInShadowHost).not.toBeNull(); // mounted to shadow host
     expect(pickerInContainer).toBeNull();       // NOT in overflow:hidden container
 
