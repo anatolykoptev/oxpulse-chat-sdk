@@ -51,6 +51,58 @@ async function drain(n = 10): Promise<void> {
   for (let i = 0; i < n; i++) await Promise.resolve();
 }
 
+/**
+ * Stub the browser image-decode pipeline compress() needs
+ * (createImageBitmap + canvas + FileReader), matching the working pattern
+ * in attachments.test.ts's "compress — decompression bomb defense" suite.
+ * jsdom implements none of these natively, so every test that uploads an
+ * image/* file through the REAL AttachmentPicker.#upload() (which now runs
+ * compress() before sendFile — image compression wiring) needs this stub,
+ * not just the tests that assert on compression specifically.
+ *
+ * Installed ONCE per test in beforeEach; the stubbed bitmap dims / output
+ * blob read from mutable module state (bitmapWidth/bitmapHeight/compressedOutBlob)
+ * so a single test can override just those before calling handleFiles()
+ * without re-installing the document.createElement spy — re-installing on
+ * top of an already-spied createElement double-wraps it and recurses.
+ */
+let bitmapWidth = 400;
+let bitmapHeight = 300;
+let compressedOutBlob: Blob = new Blob(['compressed'], { type: 'image/webp' });
+
+function installImageCompressionStubs(): void {
+  vi.stubGlobal(
+    'createImageBitmap',
+    vi.fn().mockImplementation(async () => ({ width: bitmapWidth, height: bitmapHeight, close: vi.fn() })),
+  );
+
+  const mockCtx = { imageSmoothingEnabled: false, imageSmoothingQuality: 'high', drawImage: vi.fn() };
+  const mockCanvas = {
+    width: 0,
+    height: 0,
+    getContext: vi.fn().mockReturnValue(mockCtx),
+    toBlob: vi.fn().mockImplementation((cb: (b: Blob | null) => void) => cb(compressedOutBlob)),
+  };
+  const origCreate = globalThis.document?.createElement?.bind(globalThis.document);
+  vi.spyOn(globalThis.document, 'createElement').mockImplementation((tag: string) => {
+    if (tag === 'canvas') return mockCanvas as unknown as HTMLElement;
+    return origCreate?.(tag);
+  });
+
+  // Resolves via microtask (not setTimeout) — every test in this file drains
+  // pending work with a bounded `await Promise.resolve()` loop (drain()), which
+  // does not advance macrotask timers. A real FileReader is macrotask-based in
+  // the browser, but this test double only needs to be AWAITABLE the same way
+  // the rest of the upload chain already is.
+  class FakeReader {
+    onerror: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    result = 'data:image/webp;base64,AA==';
+    readAsDataURL() { void Promise.resolve().then(() => this.onload?.()); }
+  }
+  vi.stubGlobal('FileReader', FakeReader);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('AttachmentPicker', () => {
@@ -59,10 +111,20 @@ describe('AttachmentPicker', () => {
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
+    // Compression wiring (issue #67): #upload() now runs compress() for every
+    // image/* file before calling client.sendFile — stub its browser deps
+    // globally so every pre-existing makePngFile() upload test still reaches
+    // sendFile (it previously called sendFile directly with the raw File).
+    bitmapWidth = 400;
+    bitmapHeight = 300;
+    compressedOutBlob = new Blob(['compressed'], { type: 'image/webp' });
+    installImageCompressionStubs();
   });
 
   afterEach(() => {
     if (container.parentNode) container.parentNode.removeChild(container);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   // ── Rendering ───────────────────────────────────────────────────────────────
@@ -187,6 +249,76 @@ describe('AttachmentPicker', () => {
 
     // Both files should have been uploaded
     expect(client.sendFile).toHaveBeenCalledTimes(2);
+
+    picker.destroy();
+  });
+
+  // ── Compression wiring (issue #67) ───────────────────────────────────────────
+
+  it('compresses image/* files and threads the resulting dims into sendFile args', async () => {
+    // Distinct compressed bytes from the source File — proves sendFile receives
+    // compress()'s output blob, not the raw 1024-zero-byte File from makePngFile().
+    const compressedBlob = new Blob(['webp-bytes'], { type: 'image/webp' });
+    bitmapWidth = 640;
+    bitmapHeight = 480;
+    compressedOutBlob = compressedBlob;
+
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('photo.png')]);
+    await drain(15);
+
+    expect(client.sendFile).toHaveBeenCalledTimes(1);
+    const [, blobArg, argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Blob,
+      Record<string, unknown>,
+    ];
+    expect(blobArg).toBe(compressedBlob);
+    expect(argsArg.width).toBe(640);
+    expect(argsArg.height).toBe(480);
+
+    picker.destroy();
+  });
+
+  it('bypasses compress() for a non-image file — original File reaches sendFile untouched', async () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    const pdfFile = new File(['%PDF-1.4'], 'doc.pdf', { type: 'application/pdf' });
+    picker.handleFiles([pdfFile]);
+    await drain(15);
+
+    expect(client.sendFile).toHaveBeenCalledTimes(1);
+    const [, blobArg, argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Blob,
+      Record<string, unknown>,
+    ];
+    expect(blobArg).toBe(pdfFile);
+    expect(argsArg.width).toBeUndefined();
+    expect(argsArg.height).toBeUndefined();
+
+    picker.destroy();
+  });
+
+  it('threads the sanitized filename into sendFile args for both image and non-image files', async () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('vacation photo.png')]);
+    await drain(15);
+
+    const [, , argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Blob,
+      Record<string, unknown>,
+    ];
+    expect(argsArg.filename).toBe('vacation photo.png');
 
     picker.destroy();
   });

@@ -111,6 +111,15 @@ export interface MessageListClient {
    * Returns a Map<epid, RosterEntry> (display name + optional avatar URL).  Optional — when absent roster is disabled.
    */
   getRoster?(roomId: string): Promise<Map<string, RosterEntry>>;
+  /**
+   * issue #67: fetch an attachment blob WITH authentication. The attachment
+   * GET route is JWT-authenticated (Authorization: Bearer only — no signed
+   * query-token the way the PUT upload URL has), so a bare `<img src>` 401s
+   * for every viewer. Optional — when absent, renderAttachment() falls back
+   * to a direct `img.src = att.url` assignment (existing behavior, used by
+   * tests and any environment without an authenticated fetch bridge).
+   */
+  fetchAttachmentBlob?(url: string, signal?: AbortSignal): Promise<Blob>;
 }
 
 // ── Constructor options ───────────────────────────────────────────────────────
@@ -196,8 +205,47 @@ function renderUnsafePlaceholder(att: AttachmentMeta, container: HTMLElement, la
   container.appendChild(el);
 }
 
+/**
+ * issue #67: attach the media src, authenticated when the client can (hydrate
+ * present) — the GET /api/sdk/attachments/{id} route is JWT-authenticated
+ * (Authorization: Bearer only, no signed query-token), so a bare `img.src =
+ * att.url` 401s for every viewer once this is wired against the real server.
+ * Falls back to the direct URL when no hydrate bridge is wired (existing
+ * behavior — test mocks / any environment without MessageListClient.fetchAttachmentBlob).
+ * trackObjectUrl lets the caller revoke the created blob: URL on teardown.
+ */
+function hydrateMediaSrc(
+  el: HTMLImageElement | HTMLAudioElement,
+  att: AttachmentMeta,
+  hydrate: ((url: string, signal?: AbortSignal) => Promise<Blob>) | undefined,
+  trackObjectUrl: ((url: string) => void) | undefined,
+  signal: AbortSignal | undefined,
+): void {
+  if (!hydrate) {
+    el.src = att.url;
+    return;
+  }
+  hydrate(att.url, signal)
+    .then((blob) => {
+      if (signal?.aborted) return;
+      const objectUrl = URL.createObjectURL(blob);
+      trackObjectUrl?.(objectUrl);
+      el.src = objectUrl;
+    })
+    .catch(() => {
+      // Authenticated fetch failed (network/401/aborted) — leave broken-image
+      // state rather than crash; no PII in the console.
+    });
+}
+
 /** Render a single attachment element based on its MIME type. */
-function renderAttachment(att: AttachmentMeta, lang: Locale): HTMLElement {
+function renderAttachment(
+  att: AttachmentMeta,
+  lang: Locale,
+  hydrate?: (url: string, signal?: AbortSignal) => Promise<Blob>,
+  trackObjectUrl?: (url: string) => void,
+  signal?: AbortSignal,
+): HTMLElement {
   // CM1: use raw att.filename for DOM property/textContent assignments — these treat
   // the value as text, not HTML. escapeHtml() is only needed for innerHTML/setAttribute.
   const filename = att.filename;
@@ -215,7 +263,7 @@ function renderAttachment(att: AttachmentMeta, lang: Locale): HTMLElement {
     }
 
     const img = document.createElement('img');
-    img.src = att.url;
+    hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal);
     // CM1: alt is a DOM property — text-safe, no escaping needed
     img.alt = filename;
     img.setAttribute('loading', 'lazy');
@@ -257,7 +305,7 @@ function renderAttachment(att: AttachmentMeta, lang: Locale): HTMLElement {
     }
 
     const audio = document.createElement('audio');
-    audio.src = att.url;
+    hydrateMediaSrc(audio, att, hydrate, trackObjectUrl, signal);
     audio.controls = true;
     audio.preload = 'metadata';
     // CM1: setAttribute for aria-label — use escapeHtml
@@ -484,6 +532,13 @@ export class MessageList {
   /** Write-401 fix (issue #78): failure-counter hook — fires on every write
    *  failure (not just auth), classified by op + reason. */
   #onWriteFailure?: (op: WriteFailureOp, reason: WriteFailureReason, message: string) => void;
+  /** issue #67: blob: object URLs created by hydrateMediaSrc() (authenticated
+   *  attachment fetch) — revoked in destroy() so a torn-down MessageList
+   *  doesn't leak them. Not revoked per-row-eviction yet (a live infinite-scroll
+   *  eviction leak is a narrower, lower-severity follow-up than the 401 this
+   *  closes — the full teardown here already bounds the leak to one page's
+   *  worth of open images per MessageList lifetime). */
+  #attachmentObjectUrls: Set<string> = new Set();
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -605,7 +660,18 @@ export class MessageList {
       this.#listEl.parentNode.removeChild(this.#listEl);
     }
     this.#listEl = null;
+    // issue #67: revoke every blob: URL created by the authenticated
+    // attachment-hydration path — a torn-down MessageList must not leak them.
+    for (const url of this.#attachmentObjectUrls) URL.revokeObjectURL(url);
+    this.#attachmentObjectUrls.clear();
   }
+
+  /** issue #67: records a blob: URL created for an attachment image/audio src
+   *  so destroy() can revoke it. Bound method (not inline in #populateBubble)
+   *  so renderAttachment() — a free function — gets a stable callback reference. */
+  readonly #trackAttachmentObjectUrl = (url: string): void => {
+    this.#attachmentObjectUrls.add(url);
+  };
 
   // ── Private ────────────────────────────────────────────────────────────────
 
@@ -1499,16 +1565,19 @@ export class MessageList {
     }
 
     // W2.2 slice 4: Render attachment bubbles.
-    // review-fix LOW#1: gate on !deletedAt && !unsealError — unreachable today
-    // (no code path sets row.attachments alongside either flag) but closes the
-    // same latent fall-through deletedAt already had: without this guard, a
-    // future wiring of attachment metadata onto a tombstoned or failed-decrypt
-    // row would render attachment links next to the placeholder text.
+    // review-fix LOW#1: gate on !deletedAt && !unsealError — closes the same
+    // latent fall-through deletedAt already had: without this guard, wiring
+    // attachment metadata onto a tombstoned or failed-decrypt row would
+    // render attachment links next to the placeholder text. (issue #67:
+    // row.attachments is now populated by element.ts's decodeRowAttachments()
+    // for any row whose plaintext decodes as an attachment envelope.)
     if (!row.deletedAt && !row.unsealError && row.attachments && row.attachments.length > 0) {
       const attachmentsEl = document.createElement('div');
       attachmentsEl.className = 'oxp-bubble-attachments';
       for (const att of row.attachments) {
-        attachmentsEl.appendChild(renderAttachment(att, this.#lang));
+        attachmentsEl.appendChild(
+          renderAttachment(att, this.#lang, this.#client.fetchAttachmentBlob, this.#trackAttachmentObjectUrl, this.#signal),
+        );
       }
       el.appendChild(attachmentsEl);
     }

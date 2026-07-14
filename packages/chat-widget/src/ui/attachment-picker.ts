@@ -9,7 +9,7 @@
  * Dispatches `oxpulse-chat:error` events on validation/upload failures.
  */
 
-import { validate, sanitizeFilename } from '../utils/attachments.js';
+import { validate, sanitizeFilename, compress } from '../utils/attachments.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { generateUUID } from '@oxpulse/chat-sdk';
 
@@ -20,7 +20,17 @@ export interface AttachmentPickerClient {
   sendFile(
     roomId: string,
     blob: Blob,
-    args: { senderUid?: string; sha256?: string; mimeType?: string; signal?: AbortSignal },
+    args: {
+      senderUid?: string;
+      sha256?: string;
+      mimeType?: string;
+      /** Sanitized display filename, threaded into the attachment envelope. */
+      filename?: string;
+      /** Pixel dimensions of the (possibly compressed) image blob — omitted for non-image files. */
+      width?: number;
+      height?: number;
+      signal?: AbortSignal;
+    },
   ): Promise<{ msgId: string; attachmentId: string }>;
 }
 
@@ -210,13 +220,34 @@ export class AttachmentPicker {
     this.#announce(t('announceUploadingFile', this.#lang, { name: item.file.name }));
 
     try {
+      // Compression wiring (issue #67): downscale/re-encode images (WebP, long-edge
+      // 1920, decompression-bomb guard already inside compress()) before upload —
+      // closes the aspect-reservation gap message-list.ts:214-216 already consumes
+      // (att.width/att.height). Non-images pass through unchanged — compress() only
+      // understands raster images and would reject a PDF/audio blob outright.
+      let uploadBlob: Blob = item.file;
+      let width: number | undefined;
+      let height: number | undefined;
+      if (item.file.type.startsWith('image/')) {
+        const compressed = await compress(item.file);
+        uploadBlob = compressed.blob;
+        width = compressed.width;
+        height = compressed.height;
+      }
+
       // CB2: pass AbortSignal so server-side upload can be cancelled when user clicks ✕.
       // If the real SDK does not yet support signal, abort() is still called on the
       // AbortController (client-side cleanup) even if the server ignores it.
       const result = await this.#client.sendFile(
         this.#roomId,
-        item.file,
-        { mimeType: item.file.type, signal: item.abortController.signal },
+        uploadBlob,
+        {
+          mimeType: uploadBlob.type || item.file.type,
+          filename: sanitizeFilename(item.file.name),
+          width,
+          height,
+          signal: item.abortController.signal,
+        },
       );
       if (this.#destroyed) return;
       item.status = 'done';

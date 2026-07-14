@@ -18,6 +18,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement, mount } from '../element.js';
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
+import { encodeAttachmentEnvelope, decodeAttachmentEnvelope } from '../utils/attachment-envelope.js';
 
 // Vitest uses jsdom by default when configured. We need to ensure customElements is available.
 
@@ -1211,5 +1212,266 @@ describe('OxpulseChatElement — W2.2 slice 2 composer', () => {
     const composerIdx = children.findIndex((c) => c.classList.contains('oxp-composer') || c.querySelector('.oxp-composer'));
     expect(listIdx).toBeGreaterThanOrEqual(0);
     expect(composerIdx).toBeGreaterThan(listIdx);
+  });
+});
+
+// ── issue #67: attachments wired end-to-end ────────────────────────────────────
+//
+// Root cause (repo-verified, no server source available): chat-sdk's
+// sendFile() (attachments.ts:120-176) presigns an attachment, PUTs the blob,
+// then calls client.send(roomId, {senderUid, sealed}) WITHOUT ever forwarding
+// attachmentId into the sealed payload or any sibling wire field — SendArgs /
+// MessageRow / rowToMessageRow carry no attachments field at all, so a stored
+// blob is structurally unlinked from any message. Fix (zero chat-sdk changes):
+// element.ts's composerClient bypasses the sendFile() convenience wrapper and
+// drives presignAttachment() + PUT + send() directly, encoding attachment
+// metadata into the plaintext body via attachment-envelope.ts — the same
+// "app-level metadata rides the plaintext payload" convention the product-card
+// feature already established with productRef/productMeta, and the one the
+// project's own web app attachment path already uses.
+describe('OxpulseChatElement — attachments (issue #67)', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    defineElement(); // ensure registered — this describe block runs standalone too (vitest -t)
+    container = document.createElement('div');
+    document.body.appendChild(container);
+
+    // compress() browser-API stubs (createImageBitmap/canvas/FileReader) —
+    // these tests drive a REAL image file through the REAL AttachmentPicker,
+    // which now runs compress() before upload (issue #67 compression wiring).
+    vi.stubGlobal(
+      'createImageBitmap',
+      vi.fn().mockResolvedValue({ width: 640, height: 480, close: vi.fn() }),
+    );
+    const mockCtx = { imageSmoothingEnabled: false, imageSmoothingQuality: 'high', drawImage: vi.fn() };
+    const compressedBlob = new Blob(['webp-bytes'], { type: 'image/webp' });
+    const mockCanvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn().mockReturnValue(mockCtx),
+      toBlob: vi.fn().mockImplementation((cb: (b: Blob | null) => void) => cb(compressedBlob)),
+    };
+    const origCreate = globalThis.document.createElement.bind(globalThis.document);
+    vi.spyOn(globalThis.document, 'createElement').mockImplementation((tag: string) => {
+      if (tag === 'canvas') return mockCanvas as unknown as HTMLElement;
+      return origCreate(tag);
+    });
+    class FakeReader {
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      result: string | ArrayBuffer = 'data:image/webp;base64,AA==';
+      readAsDataURL() { void Promise.resolve().then(() => this.onload?.()); }
+      // composerClient.sendFile reads the blob via FileReader.readAsArrayBuffer
+      // (jsdom's Blob has no .arrayBuffer()) before hashing it for presign.
+      readAsArrayBuffer() {
+        this.result = new ArrayBuffer(8);
+        void Promise.resolve().then(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal('FileReader', FakeReader);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** A client shaped like a real SDKChatClient — has send()/baseUrl/jwt, the
+   *  capability composerClient.sendFile feature-detects (mirrors the existing
+   *  sendReaction?/getReactions? optional-capability pattern in widgetClient). */
+  function makeCapableClient() {
+    return {
+      ...makeMockClient(),
+      send: vi.fn().mockResolvedValue({ seq: 1, msgId: 'msg-att-1' }),
+      baseUrl: 'https://chat.example.com',
+      jwt: 'test-jwt',
+    };
+  }
+
+  it('paperclip renders through the real custom element when the client is upload-capable', async () => {
+    const client = makeCapableClient();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const btn = el.shadowRoot!.querySelector('.oxp-composer-attachment-btn');
+    expect(btn).not.toBeNull();
+  });
+
+  it('paperclip stays hidden for a client without send/baseUrl/jwt (existing sendText-only mock, no regression)', async () => {
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const btn = el.shadowRoot!.querySelector('.oxp-composer-attachment-btn');
+    expect(btn).toBeNull();
+  });
+
+  it('paste event with an image routes through the REAL composerClient.sendFile: presign -> PUT -> send an attachment envelope', async () => {
+    // Drives composer.ts:265's real #onPaste handler (not a picker-internal
+    // mock) all the way through element.ts's composerClient.sendFile.
+    const client = makeCapableClient();
+
+    const presignResp = { attachment_id: 'att-paste-1', upload_url: '/api/sdk/attachments/att-paste-1?t=tok' };
+    const presignCalls: RequestInit[] = [];
+    const putCalls: RequestInit[] = [];
+    // Routed by URL (not call order): mounting the element ALSO triggers a
+    // roster fetch (widgetClient.getRoster -> fetchRoster, unconditional —
+    // unrelated to attachments) over the SAME global fetch, so a plain
+    // mockImplementationOnce chain would consume its slot on the wrong call.
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === 'https://chat.example.com/api/sdk/attachments/presign') {
+        presignCalls.push(init ?? {});
+        return { ok: true, status: 200, json: async () => presignResp } as Response;
+      }
+      if (urlStr === 'https://chat.example.com/api/sdk/attachments/att-paste-1?t=tok') {
+        putCalls.push(init ?? {});
+        return { ok: true, status: 204, json: async () => null } as Response;
+      }
+      // Roster fetch (or anything else unrelated) — reject harmlessly, matching
+      // the "no fetch stub" behavior other tests already rely on (MessageList's
+      // #fetchRoster swallows failures and logs, non-fatal to the test).
+      return { ok: false, status: 404, json: async () => null, text: async () => '' } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const textarea = el.shadowRoot!.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+    expect(textarea).not.toBeNull();
+
+    const pngFile = new File([new Uint8Array(16)], 'photo.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pngFile] } });
+    textarea.dispatchEvent(pasteEvent);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(presignCalls).toHaveLength(1);
+    expect(presignCalls[0]?.method).toBe('POST');
+    const presignBody = JSON.parse(presignCalls[0]!.body as string) as Record<string, unknown>;
+    // sha256 hex computed via crypto.subtle.digest over the (compressed) blob
+    expect(presignBody['sha256']).toMatch(/^[0-9a-f]{64}$/);
+    expect(presignBody['mime_type']).toBe('image/webp');
+    expect(putCalls).toHaveLength(1);
+    expect(putCalls[0]?.method).toBe('PUT');
+    expect(client.send).toHaveBeenCalledTimes(1);
+    const [roomIdArg, sendArgs] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { senderUid: string; sealed: ArrayBuffer },
+    ];
+    expect(roomIdArg).toBe('room1');
+    const envelope = decodeAttachmentEnvelope(new TextDecoder().decode(sendArgs.sealed));
+    expect(envelope).not.toBeNull();
+    expect(envelope!.attachments[0]).toMatchObject({
+      id: 'att-paste-1',
+      mime: 'image/webp',
+      width: 640,
+      height: 480,
+    });
+  });
+
+  it('a row carrying an attachment envelope in plaintext renders <img> with width/height set (read side, no server changes needed)', async () => {
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+    // No fetchAttachmentBlob assertion in this test — img.width/height are set
+    // synchronously from the envelope regardless of the (async, separately
+    // covered) authenticated hydration fetch. Stub fetch so that hydration
+    // attempt does not make a real network call.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('not stubbed')));
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(capturedOnMessage).not.toBeNull();
+
+    const envelope = encodeAttachmentEnvelope('', [
+      { id: 'att-read-1', mime: 'image/webp', filename: 'photo.webp', sizeBytes: 500, width: 640, height: 480 },
+    ]);
+    capturedOnMessage!({
+      seq: 1,
+      msgId: 'msg-read-1',
+      senderUid: 'other-user',
+      sealed: envelope,
+      plaintext: envelope,
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: null,
+      productMeta: null,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const img = el.shadowRoot!.querySelector('.oxp-attachment-image img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img!.width).toBe(640);
+    expect(img!.height).toBe(480);
+    // F4 precedent (message-list.ts): explicit dims must NOT fall back to the
+    // 80px grey-bar placeholder style reserved for unknown dimensions.
+    expect(img!.style.minHeight).toBe('');
+  });
+
+  it('a plain-text message (no envelope) still renders as ordinary text — backward compatible', async () => {
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(capturedOnMessage).not.toBeNull();
+    const plainBytes = new TextEncoder().encode('hello world').buffer as ArrayBuffer;
+    capturedOnMessage!({
+      seq: 1,
+      msgId: 'msg-plain-1',
+      senderUid: 'other-user',
+      sealed: plainBytes,
+      plaintext: plainBytes,
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: null,
+      productMeta: null,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const bodyEl = el.shadowRoot!.querySelector('.oxp-bubble-body');
+    expect(bodyEl?.textContent).toContain('hello world');
+    expect(el.shadowRoot!.querySelector('.oxp-attachment-image')).toBeNull();
   });
 });
