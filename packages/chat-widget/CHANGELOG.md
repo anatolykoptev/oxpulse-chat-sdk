@@ -1,5 +1,63 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- 779bf9f: feat: roster avatar_url + display name end-to-end
+
+  `GET /api/sdk/roster` now returns an additive `avatars` map alongside `roster`.
+  `fetchRoster` parses it and returns `Map<epid, RosterEntry>` (`{ displayName,
+avatarUrl }`) instead of `Map<epid, string>`. `rosterDisplayName(map, epid)` is
+  unchanged; new `rosterAvatar(map, epid): string | null`. The widget renders a
+  leading avatar (image with an initials-circle fallback, deterministic color per
+  epid) beside other writers' messages; own messages are unchanged.
+
+  BREAKING (@oxpulse/chat-sdk): code reading the raw roster map value as a string
+  must switch to `rosterDisplayName(map, epid)` / `rosterAvatar(map, epid)` (or read
+  `.displayName` / `.avatarUrl`). The HTTP response is backward-compatible — the
+  `roster` name map is unchanged and `avatars` is purely additive, so a widget
+  built against the old response keeps working.
+
+- 6c59dcb: feat: roster role badge (moderator/owner)
+
+  `GET /api/sdk/roster` now returns an additive, sparse `roles` map alongside
+  `roster`/`avatars` (only privileged members appear; a plain `member` is
+  implied by absence). `fetchRoster` parses it into `RosterEntry.role?:
+"moderator" | "owner"`; new `rosterRole(map, epid): PrivilegedRole |
+undefined`. An unrecognised role string fails closed (no role, no badge).
+
+  The widget renders a small badge ("mod" / "owner" by default) next to a
+  privileged member's name for other writers' messages (own messages are
+  unchanged, mirroring the avatar convention). New widget config option
+  `roleLabels?: Record<string, string>` lets partners rebrand the badge text
+  (e.g. `{ moderator: "Seller" }`) — presentation only, never client-side
+  authorization.
+
+  Fully additive and backward-compatible: a server response with no `roles`
+  key (old engine) parses with `role` `undefined` on every entry, and the
+  badge simply does not render.
+
+- 601f154: W9: render product cards in the widget and wire them through the Composer.
+
+  - Add `ProductMeta` type and `OxpulseChatElement.setProductCard(ref, meta)` API.
+  - `Composer` forwards `productRef`/`productMeta` to `sendText`/`sendTextOptimistic`.
+  - `MessageList` renders a clickable product card preview (image, title, price, link) when a row has `productRef` + `productMeta`.
+  - Add i18n key `productViewAria` and theme CSS for `.oxp-bubble-product`.
+
+### Patch Changes
+
+- 98df8ff: Fix unbounded DOM/memory growth in the live message stream: `MessageList` now caps the live-streamed window at `MAX_LIVE_MESSAGES` (300), evicting the oldest messages — from internal bookkeeping and the DOM — once a live append crosses the cap. Previously every live message was appended with no eviction, so a visitor keeping a product-page tab open through a busy period (e.g. a high-traffic central chat room) accumulated unbounded DOM nodes.
+
+  Eviction is two-tiered. While the user is pinned to the bottom, every live append trims to the 300-message soft cap — invisible to them, since they're not looking at the top. While scrolled up reading history, eviction is skipped up to a much higher hard ceiling (600) so an actively-reading visitor never gets content yanked out from under them mid-read; only a session that piles up 600+ messages while permanently scrolled away (the "walk away and never come back to bottom" case) gets trimmed down to that ceiling. Without the hard ceiling, that walk-away session was still genuinely unbounded — caught in review before merge.
+
+  This is a safety cap on the live window only — full scroll-back virtualization (for paging through evicted history) is a separate future feature once "load older" pagination UI exists.
+
+- 2597744: Fix self/other bubble alignment when no `self-uid` attribute is set: the widget now falls back to the JWT `sub` claim, so the visitor's own messages align right (messenger-standard) out of the box. An explicit `self-uid` attribute still wins. Display-side only — the server never trusts this value.
+- Updated dependencies [779bf9f]
+- Updated dependencies [6c59dcb]
+  - @oxpulse/chat-sdk@3.0.0
+
 ## 0.4.1
 
 ### Patch Changes

@@ -1,5 +1,45 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.0.0
+
+### Major Changes
+
+- 779bf9f: feat: roster avatar_url + display name end-to-end
+
+  `GET /api/sdk/roster` now returns an additive `avatars` map alongside `roster`.
+  `fetchRoster` parses it and returns `Map<epid, RosterEntry>` (`{ displayName,
+avatarUrl }`) instead of `Map<epid, string>`. `rosterDisplayName(map, epid)` is
+  unchanged; new `rosterAvatar(map, epid): string | null`. The widget renders a
+  leading avatar (image with an initials-circle fallback, deterministic color per
+  epid) beside other writers' messages; own messages are unchanged.
+
+  BREAKING (@oxpulse/chat-sdk): code reading the raw roster map value as a string
+  must switch to `rosterDisplayName(map, epid)` / `rosterAvatar(map, epid)` (or read
+  `.displayName` / `.avatarUrl`). The HTTP response is backward-compatible — the
+  `roster` name map is unchanged and `avatars` is purely additive, so a widget
+  built against the old response keeps working.
+
+### Minor Changes
+
+- 6c59dcb: feat: roster role badge (moderator/owner)
+
+  `GET /api/sdk/roster` now returns an additive, sparse `roles` map alongside
+  `roster`/`avatars` (only privileged members appear; a plain `member` is
+  implied by absence). `fetchRoster` parses it into `RosterEntry.role?:
+"moderator" | "owner"`; new `rosterRole(map, epid): PrivilegedRole |
+undefined`. An unrecognised role string fails closed (no role, no badge).
+
+  The widget renders a small badge ("mod" / "owner" by default) next to a
+  privileged member's name for other writers' messages (own messages are
+  unchanged, mirroring the avatar convention). New widget config option
+  `roleLabels?: Record<string, string>` lets partners rebrand the badge text
+  (e.g. `{ moderator: "Seller" }`) — presentation only, never client-side
+  authorization.
+
+  Fully additive and backward-compatible: a server response with no `roles`
+  key (old engine) parses with `role` `undefined` on every entry, and the
+  badge simply does not render.
+
 ## 2.0.1
 
 ### Patch Changes
