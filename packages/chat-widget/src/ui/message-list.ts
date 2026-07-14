@@ -1137,7 +1137,7 @@ export class MessageList {
     this.#onWriteFailure?.(op, reason, err instanceof Error ? err.message : String(err));
     if (reason === 'auth_expired') {
       this.#onAuthExpired?.();
-      this.#scheduleDelayedRollback(msgId, preSnapshot);
+      this.#scheduleDelayedRollback(msgId);
     } else {
       this.#reactions.set(msgId, preSnapshot);
       this.#updateReactionCluster(msgId);
@@ -1145,19 +1145,26 @@ export class MessageList {
   }
 
   /**
-   * Write-401 fix (issue #78): (re)schedule a delayed rollback to
-   * `preSnapshot`, replacing any prior pending timer for this msgId — a
-   * second write attempt on the same message before the first's delay
-   * elapses supersedes the earlier snapshot. Cleared wholesale in
-   * destroy().
+   * Write-401 fix (issue #78, pr-review-council #80 MAJOR fix): after
+   * WRITE_AUTH_ROLLBACK_DELAY_MS, reconcile with SERVER truth via
+   * #scheduleReactionRefresh — never restore a captured pre-optimistic
+   * snapshot wholesale. A blind snapshot-restore would silently clobber any
+   * SSE reaction event (#handleReaction) or refresh result that arrived
+   * DURING the delay window: the write-401 scenario this feature targets
+   * (write-JWT dead, SSE healthy) makes concurrent reactions from OTHER
+   * users the expected case, not an edge case. #scheduleReactionRefresh is
+   * this file's own established source of eventual truth (see its doc
+   * comment and the #optimisticReplaceReaction call site below) — the
+   * delayed path must defer to it too, not bypass it with a stale local
+   * value. (Re)scheduling here replaces any prior pending timer for this
+   * msgId. Cleared wholesale in destroy().
    */
-  #scheduleDelayedRollback(msgId: string, preSnapshot: ReactionState): void {
+  #scheduleDelayedRollback(msgId: string): void {
     const existing = this.#rollbackTimers.get(msgId);
     if (existing !== undefined) clearTimeout(existing);
     const timer = setTimeout(() => {
       this.#rollbackTimers.delete(msgId);
-      this.#reactions.set(msgId, preSnapshot);
-      this.#updateReactionCluster(msgId);
+      void this.#scheduleReactionRefresh(msgId);
     }, WRITE_AUTH_ROLLBACK_DELAY_MS);
     this.#rollbackTimers.set(msgId, timer);
   }

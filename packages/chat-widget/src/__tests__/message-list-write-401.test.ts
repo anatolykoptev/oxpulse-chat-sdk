@@ -13,12 +13,17 @@
  *      flashes the chip away and back.
  *  (b) a non-auth failure keeps the existing immediate-rollback behaviour
  *      and still reports a reason via onWriteFailure.
+ *  (c) [pr-review-council #80 MAJOR fix] the delayed rollback reconciles via
+ *      server truth (getReactions), not a blind wholesale snapshot-restore —
+ *      an SSE reaction event for the same message landing during the delay
+ *      window must survive, not get clobbered by the stale pre-optimistic
+ *      snapshot.
  *  (d) destroy() clears the pending delayed-rollback timer.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageList, WRITE_AUTH_ROLLBACK_DELAY_MS } from '../ui/message-list.js';
-import type { MessageListClient, MessageRow } from '../ui/message-list.js';
+import type { MessageListClient, MessageRow, ReactionEvent } from '../ui/message-list.js';
 
 function makeRow(overrides: Partial<MessageRow> & { senderUid: string }): MessageRow {
   return {
@@ -42,10 +47,19 @@ function drainMicrotasks(n = 10): Promise<void> {
   ) as Promise<void>;
 }
 
+// Captured by makeMockClient's subscribe() mock — lets a test fire a live
+// SSE reaction event via #handleReaction, same pattern as
+// message-list-reactions.test.ts.
+let capturedOnReaction: ((event: ReactionEvent) => void) | null = null;
+
 function makeMockClient(rows: MessageRow[] = []): MessageListClient {
+  capturedOnReaction = null;
   return {
     list: vi.fn().mockResolvedValue({ items: rows, hasNext: false }),
-    subscribe: vi.fn().mockReturnValue(() => {}),
+    subscribe: vi.fn().mockImplementation((_roomId: string, args: { onReaction?: (event: ReactionEvent) => void }) => {
+      capturedOnReaction = args.onReaction ?? null;
+      return () => {};
+    }),
     getReactions: vi.fn().mockResolvedValue({ counts: {}, users: {}, truncated: false }),
     sendReaction: vi.fn().mockResolvedValue(undefined),
     removeReaction: vi.fn().mockResolvedValue(undefined),
@@ -75,6 +89,7 @@ describe('MessageList — write-401 (issue #78)', () => {
   afterEach(() => {
     vi.useRealTimers();
     if (container.parentNode) container.parentNode.removeChild(container);
+    capturedOnReaction = null;
   });
 
   it('sendReaction_401_signals_auth_expired_and_delays_rollback', async () => {
@@ -109,10 +124,83 @@ describe('MessageList — write-401 (issue #78)', () => {
     chip = container.querySelector('.oxp-reaction-chip[data-emoji="❤️"]');
     expect(chip).not.toBeNull();
 
-    // Rolled back once the full delay elapses.
+    // getReactions was already called once at mount() time (#fetchAllReactions)
+    // — capture the count here so the post-delay assertion below proves a NEW
+    // call happened (not just that it was ever called, which is already true).
+    const callsBeforeDelay = (client.getReactions as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // Rolled back once the full delay elapses — reconciled via a FRESH
+    // getReactions call (the mock's default empty response), not a
+    // synchronous restore of the captured snapshot.
     await vi.advanceTimersByTimeAsync(WRITE_AUTH_ROLLBACK_DELAY_MS - 1000);
+    await drainMicrotasks(10);
+    expect((client.getReactions as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(callsBeforeDelay);
     chip = container.querySelector('.oxp-reaction-chip[data-emoji="❤️"]');
     expect(chip).toBeNull();
+
+    ml.destroy();
+  });
+
+  it('sendReaction_401_delayed_rollback_reconciles_via_server_not_stale_snapshot_on_SSE_collision', async () => {
+    // pr-review-council #80 MAJOR fix: a naive "restore the pre-optimistic
+    // snapshot wholesale" rollback would silently drop an SSE reaction event
+    // that landed DURING the 3s delay window — exactly the scenario this
+    // feature targets (write-JWT dead, SSE healthy → concurrent reactions
+    // from other users are expected). The delayed rollback must reconcile
+    // via #scheduleReactionRefresh (server truth), never clobber it.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-4', seq: 1 });
+    const client = makeMockClient([row]);
+    (client.sendReaction as ReturnType<typeof vi.fn>).mockRejectedValue(authError());
+    // FIRST getReactions call is the mount-time #fetchAllReactions fetch —
+    // must return empty so the click's preSnapshot is genuinely "no
+    // reactions yet" (NOT pre-contaminated with u2's 👍, which would let a
+    // buggy wholesale-restore accidentally "survive" it and make this test
+    // vacuously pass regardless of the fix). Every call AFTER that
+    // (the delayed rollback's reconcile) simulates the server having since
+    // recorded u2's SSE-delivered 👍.
+    const getReactionsMock = client.getReactions as ReturnType<typeof vi.fn>;
+    getReactionsMock.mockResolvedValueOnce({ counts: {}, users: {}, truncated: false });
+    getReactionsMock.mockResolvedValue({
+      counts: { '👍': 1 },
+      users: { '👍': ['u2'] },
+      truncated: false,
+    });
+
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await drainMicrotasks(10);
+
+    // SSE echo for a DIFFERENT user's reaction lands mid-window — merged
+    // in-place by #handleReaction (does NOT itself call getReactions, since
+    // totalCount is supplied), so this is the ONLY source of the 👍 chip
+    // until the delayed rollback's own reconcile call.
+    expect(capturedOnReaction).not.toBeNull();
+    capturedOnReaction!({ msgId: 'msg-4', emoji: '👍', op: 'add', userUid: 'u2', totalCount: 1 });
+    await drainMicrotasks(5);
+
+    let chip = container.querySelector('.oxp-reaction-chip[data-emoji="👍"]');
+    expect(chip?.textContent).toContain('1');
+    expect(getReactionsMock.mock.calls.length).toBe(1); // still just the mount-time call
+
+    // Delayed rollback fires — must reconcile via a FRESH getReactions call,
+    // not clobber the SSE-delivered 👍 with the stale (empty) pre-optimistic
+    // snapshot captured at click time.
+    await vi.advanceTimersByTimeAsync(WRITE_AUTH_ROLLBACK_DELAY_MS);
+    await drainMicrotasks(10);
+
+    expect(getReactionsMock.mock.calls.length).toBeGreaterThan(1);
+    expect(getReactionsMock).toHaveBeenCalledWith('r1', 'msg-4');
+    chip = container.querySelector('.oxp-reaction-chip[data-emoji="👍"]');
+    expect(chip).not.toBeNull();
+    expect(chip!.textContent).toContain('1');
+    // Self's failed heart add is gone (server truth wins — self never actually added it).
+    const heart = container.querySelector('.oxp-reaction-chip[data-emoji="❤️"]');
+    expect(heart).toBeNull();
 
     ml.destroy();
   });

@@ -41,7 +41,12 @@ export function isAuthError(err: unknown): boolean {
   // kind-based detection (widget-bridged shape)
   if (e['kind'] === 'auth_expired') return true;
 
-  // code-based detection (raw SDKChatError shape)
+  // code-based detection (raw SDKChatError shape). Deliberate broadening
+  // (pr-review-council #80 MINOR): the old inline subscribe-path check this
+  // replaced only matched code === 'unauthorized'; 'forbidden' is added
+  // here as a superset — a 403 is auth-shaped the same way a 401 is (both
+  // already matched via the status branch below), so a raw SDKChatError
+  // with code 'forbidden' should be treated identically.
   if (e['code'] === 'unauthorized' || e['code'] === 'forbidden') return true;
 
   // status-based detection — widget shape uses `status`, SDKChatError uses `statusCode`.
