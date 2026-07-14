@@ -245,3 +245,12 @@ export interface MountOptions extends WidgetConfig {
   /** Shadow DOM mode. Default: 'open'. */
   shadowMode?: 'open' | 'closed';
 }
+
+/** W9: Marketplace product display metadata. Non-sensitive catalog info. */
+export interface ProductMeta {
+  title: string;
+  price: string;
+  currency: string;
+  imageUrl: string;
+  productUrl: string;
+}
