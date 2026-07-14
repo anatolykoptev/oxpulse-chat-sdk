@@ -1,5 +1,45 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.7.1
+
+### Patch Changes
+
+- a14ec58: a11y: timestamp + product-price on-bubble contrast token; keep scroll pinned when composer resizes (reply bar toggle).
+
+  - Fix WCAG 1.4.3 contrast failure on `.oxp-bubble-time` (message timestamp, every
+    message, both themes — measured live 3.99:1 light / 4.27:1 dark at 11.2px, needs
+    4.5:1) and `.oxp-product-price` (same latent `--oxp-muted`-on-tinted-bg issue inside
+    the in-bubble product card). Both now use `--oxp-fg-secondary`, this file's own
+    designated on-bubble text token (already ≥4.5:1 on all four self/other ×
+    light/dark bubble backgrounds).
+  - Fix a scroll-desync bug: toggling the reply-preview bar resizes the composer (a
+    sibling of the message list in the widgetRoot flex column), shrinking the list's
+    own clientHeight without moving `scrollTop` — the newest message clipped by the
+    resize delta and only self-healed on the next appended message. `MessageList` now
+    observes its own scroll container's resize and re-pins to bottom when the reader
+    was pinned before the resize; a reader scrolled up to read history is left alone.
+
+- e9d86d1: a11y: reply-preview contrast token + role=status; product-card contract docs + sendText type parity.
+
+  - Fix WCAG 1.4.3 contrast failure on reply-body preview text: `.oxp-composer-reply-body`
+    and `.oxp-bubble-reply-body` now use `--oxp-fg-secondary` instead of `--oxp-muted`
+    (light ≈4.2:1, dark ≈2.95:1 — both below the 4.5:1 AA floor). Matches the sibling
+    `-label`/`-sender` selectors already on this token.
+  - Change the reply-preview bar from `role="region"` to `role="status"` (implicit polite
+    live region) so it no longer announces as a persistent landmark that flickers in and
+    out with every reply.
+  - Document `ProductMeta.price` as host-pre-formatted display text (the widget renders
+    `${price} ${currency}` verbatim, no `Intl.NumberFormat`).
+  - Document that `setProductCard()` metadata travels unsealed on the wire and is
+    server-visible even in E2EE rooms (by design, mirrors `sendProductCard`).
+  - Add `productRef`/`productMeta` to `WidgetConfig.client.sendText` for type parity with
+    `element.ts`'s `composerClient`.
+  - Add an element-level test exercising the public `el.setProductCard()` wrapper end to
+    end (previously only the inner `Composer.setProductCard()` was covered).
+
+- Updated dependencies [ba359e1]
+  - @oxpulse/chat-sdk@3.0.1
+
 ## 0.7.0
 
 ### Minor Changes
