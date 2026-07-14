@@ -186,17 +186,12 @@ export class Composer {
     sendBtn.type = 'button';
     sendBtn.setAttribute('aria-label', t('sendMessageAria', this.#lang));
     sendBtn.setAttribute('aria-describedby', 'oxp-send-hint');
-    sendBtn.textContent = t('send', this.#lang);
+    sendBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22,2 15,22 11,13 2,9 22,2"></polygon></svg>`;
     sendBtn.disabled = true;
 
-    // M9: footer row wraps counter + send button (no magic position:absolute)
-    const footer = document.createElement('div');
-    footer.className = 'oxp-composer-footer';
-
-    const counter = document.createElement('span');
-    counter.className = 'oxp-composer-counter';
-    counter.setAttribute('aria-live', 'polite');
-    counter.hidden = true;
+    // M9: input row — textarea + send button side by side.
+    const main = document.createElement('div');
+    main.className = 'oxp-composer-main';
 
     // W2.2 slice 4: paperclip attachment button (only when client supports sendFile)
     if (typeof this.#client.sendFile === 'function') {
@@ -208,15 +203,26 @@ export class Composer {
       attachBtn.addEventListener('click', () => {
         this.#attachmentPicker?.openFileDialog();
       });
-      footer.appendChild(attachBtn);
+      main.appendChild(attachBtn);
     }
 
+    main.appendChild(textarea);
+    main.appendChild(sendBtn);
+
+    // Counter row sits below the input row.
+    const footer = document.createElement('div');
+    footer.className = 'oxp-composer-footer';
+
+    const counter = document.createElement('span');
+    counter.className = 'oxp-composer-counter';
+    counter.setAttribute('aria-live', 'polite');
+    counter.hidden = true;
+
     footer.appendChild(counter);
-    footer.appendChild(sendBtn);
 
     root.appendChild(sendHint);
     root.appendChild(replyEl);
-    root.appendChild(textarea);
+    root.appendChild(main);
     root.appendChild(footer);
     this.#container.appendChild(root);
 
@@ -234,7 +240,7 @@ export class Composer {
     if (typeof this.#client.sendFile === 'function') {
       // Mount picker inside composer root for queue display
       const pickerContainer = document.createElement('div');
-      root.insertBefore(pickerContainer, textarea);
+      root.insertBefore(pickerContainer, main);
       // sendFile existence is already guarded above; cast is safe
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.#attachmentPicker = new AttachmentPicker({
