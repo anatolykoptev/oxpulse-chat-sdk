@@ -851,6 +851,76 @@ describe('OxpulseChatElement — W2.2 slice 3 SDK wiring', () => {
   });
 });
 
+// ── Write-401 fix (issue #78): composer send auth failure → token-expired ──
+
+describe('OxpulseChatElement — write-401 (issue #78)', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+  });
+
+  it('composer_send_401_fires_token_expired_and_write_error_on_the_plain_authed_path', async () => {
+    // Regression guard (issue #78): previously oxpulse-chat:write-error only
+    // fired on the isNamedWritePath-gated branch — a composer send failing
+    // on the PLAIN authed jwt path (no allow-write) fired neither
+    // token-expired nor write-error, only the generic oxpulse-chat:error.
+    // Revert the composerClient.sendText generalisation and this goes RED.
+    const authErr = Object.assign(new Error('unauthorized'), { statusCode: 401, code: 'unauthorized' });
+    const client = makeMockClient();
+    (client.sendText as ReturnType<typeof vi.fn>).mockRejectedValue(authErr);
+
+    const onTokenExpired = vi.fn().mockResolvedValue('new.jwt.token');
+    const onWriteError = vi.fn();
+    const writeErrors: CustomEvent[] = [];
+    const tokenExpiredEvents: CustomEvent[] = [];
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client, onTokenExpired, onWriteError });
+    el.addEventListener('oxpulse-chat:write-error', (ev) => writeErrors.push(ev as CustomEvent));
+    el.addEventListener('oxpulse-chat:token-expired', (ev) => tokenExpiredEvents.push(ev as CustomEvent));
+
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const shadow = el.shadowRoot!;
+    const textarea = shadow.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+    const sendBtn = shadow.querySelector('.oxp-composer-send') as HTMLButtonElement;
+    expect(textarea).not.toBeNull();
+    expect(sendBtn).not.toBeNull();
+
+    textarea.value = 'will 401';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    sendBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Same signal the subscribe path uses.
+    expect(tokenExpiredEvents).toHaveLength(1);
+    expect(onTokenExpired).toHaveBeenCalledTimes(1);
+
+    // Failure-counter hook — event detail extended (not a new event type).
+    expect(writeErrors).toHaveLength(1);
+    const detail = writeErrors[0]!.detail as { code?: string; op?: string; reason?: string };
+    expect(detail.code).toBe('WRITE_SEND_FAILED');
+    expect(detail.op).toBe('send');
+    expect(detail.reason).toBe('auth_expired');
+
+    // The config callback fires with the same {op, reason} shape.
+    expect(onWriteError).toHaveBeenCalledWith({ op: 'send', reason: 'auth_expired' });
+
+    el.destroy();
+  });
+});
+
 // ── W2.2 slice 5: token refresh + reconnect integration ──────────────────────
 
 import { isAuthError } from '../utils/auth.js';

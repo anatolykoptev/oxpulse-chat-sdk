@@ -16,12 +16,15 @@ import {
   type MountOptions,
   type WidgetConfig,
   type ProductMeta,
+  type WidgetErrorCode,
+  type WriteFailureOp,
+  type WriteFailureReason,
 } from './types.js';
 import { THEME_CSS, applyTheme } from './ui/theme.js';
 import { MessageList } from './ui/message-list.js';
 import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEvent, ReactionEvent as WidgetReactionEvent } from './ui/message-list.js';
 import { Composer, type SendTextArgs } from './ui/composer.js';
-import { isAuthError } from './utils/auth.js';
+import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
 import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
@@ -286,11 +289,55 @@ export class OxpulseChatElement extends HTMLElement {
    * Not exposed as attributes — only via the JS API.
    * @internal
    */
-  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken'>): void {
+  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'onWriteError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken'>): void {
     this.#config = {
       ...(this.#config ?? { appId: '', jwt: '', roomId: '' }),
       ...config,
     };
+  }
+
+  /**
+   * Write-401 fix (issue #78): single choke-point for the token-expired
+   * signal — dispatches the DOM event + calls the config callback. Reused
+   * by the origin-check JWT_EXPIRED branch, the subscribe-error path
+   * (handleSubscribeError), and the write-401 paths (composer send,
+   * reaction add/remove/replace via MessageList's onAuthExpired) so every
+   * route fires the SAME signal the host already listens for, instead of
+   * re-implementing dispatch at each call site.
+   */
+  #notifyTokenExpired(roomId: string): void {
+    this.dispatchEvent(
+      new CustomEvent('oxpulse-chat:token-expired', {
+        bubbles: true,
+        composed: true,
+        detail: { roomId },
+      }),
+    );
+    if (this.#config?.onTokenExpired) {
+      void this.#config.onTokenExpired();
+    }
+  }
+
+  /**
+   * Write-401 fix (issue #78): failure-counter hook — dispatches
+   * `oxpulse-chat:write-error` (extending the existing event/WidgetError
+   * shape with op/reason fields, not inventing a new event) and calls
+   * config.onWriteError, for EVERY write-op failure (not just auth) so an
+   * integrator can count silent write failures.
+   */
+  #notifyWriteFailure(op: WriteFailureOp, reason: WriteFailureReason, message: string): void {
+    const code: WidgetErrorCode = op === 'send' ? 'WRITE_SEND_FAILED' : 'WRITE_REACTION_FAILED';
+    const err = new WidgetError(code, message, { op, reason });
+    this.dispatchEvent(
+      new CustomEvent('oxpulse-chat:write-error', {
+        bubbles: true,
+        composed: true,
+        detail: err,
+      }),
+    );
+    if (this.#config?.onWriteError) {
+      this.#config.onWriteError({ op, reason });
+    }
   }
 
   async #bootstrap(signal: AbortSignal): Promise<void> {
@@ -352,18 +399,7 @@ export class OxpulseChatElement extends HTMLElement {
 
       // M3: dispatch appropriate event and call config callback
       if (widgetErr.code === 'JWT_EXPIRED') {
-        // Fire token-expired event
-        this.dispatchEvent(
-          new CustomEvent('oxpulse-chat:token-expired', {
-            bubbles: true,
-            composed: true,
-            detail: { roomId: config.roomId },
-          }),
-        );
-        // Call onTokenExpired callback if provided
-        if (this.#config?.onTokenExpired) {
-          void this.#config.onTokenExpired();
-        }
+        this.#notifyTokenExpired(config.roomId);
       } else {
         // All other errors → fire error event
         this.dispatchEvent(
@@ -585,26 +621,14 @@ export class OxpulseChatElement extends HTMLElement {
       let subscribeFnRef: SubscribeFn | null = null;
 
       const handleSubscribeError = (err: unknown): void => {
-        // Normalise SDKChatError.statusCode → err.status so isAuthError() can detect it.
-        const errObj: Record<string, unknown> =
-          err != null && typeof err === 'object' ? (err as Record<string, unknown>) : {};
-        const normalised: Record<string, unknown> = {
-          ...errObj,
-          // Bridge SDKChatError.statusCode → .status so isAuthError() can detect 401.
-          status: errObj['status'] ?? errObj['statusCode'],
-          // Bridge SDKChatError.code === 'unauthorized' → kind 'auth_expired'.
-          kind: errObj['kind'] ?? (errObj['code'] === 'unauthorized' ? 'auth_expired' : undefined),
-        };
-        if (isAuthError(normalised)) {
+        // isAuthError() understands both the widget-bridged {status, kind}
+        // shape and the raw SDKChatError {statusCode, code} shape directly —
+        // no hand-built bridge object needed here (write-401 fix, issue #78:
+        // extracted into utils/auth.ts so this normalisation isn't copied a
+        // 2nd/3rd time into the write-401 paths below).
+        if (isAuthError(err)) {
           reconnectorRef?.notifyAuthExpired();
-          this.dispatchEvent(new CustomEvent('oxpulse-chat:token-expired', {
-            bubbles: true,
-            composed: true,
-            detail: { roomId: config.roomId },
-          }));
-          if (this.#config?.onTokenExpired) {
-            void this.#config.onTokenExpired();
-          }
+          this.#notifyTokenExpired(config.roomId);
         } else if (reconnectorRef !== null && subscribeFnRef !== null) {
           reconnectorRef.startReconnectLoop(subscribeFnRef, config.roomId);
         }
@@ -710,10 +734,6 @@ export class OxpulseChatElement extends HTMLElement {
         // above), not the pre-mint config.selfUid, or the two would drift on the very same
         // anon-read + named-write combo this fix targets.
         const capturedSendClient = effectiveSendClient;
-        // isNamedWritePath: true when effectiveSendClient is the dedicated writeClient.
-        // Used to dispatch the specific oxpulse-chat:write-error event on send failure
-        // (in addition to the generic oxpulse-chat:error the Composer fires internally).
-        const isNamedWritePath = writeClient !== null && capturedSendClient === writeClient;
         const self = this;
         const composerClient = {
           sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> =>
@@ -726,18 +746,18 @@ export class OxpulseChatElement extends HTMLElement {
               }));
               return res;
             }).catch((err: unknown) => {
-              // For the named-write path: dispatch oxpulse-chat:write-error with
-              // WRITE_SEND_FAILED so integrators can distinguish write failures from
-              // generic widget errors. The Composer's own catch still fires
+              // Write-401 fix (issue #78): every composer send failure — named-write
+              // or the plain authed path alike — fires the write-error telemetry
+              // event (dispatch generalised beyond the old isNamedWritePath gate, so
+              // an integrator can count silent write failures regardless of mode).
+              // An auth failure additionally fires the SAME token-expired signal the
+              // subscribe path uses. The Composer's own catch still fires
               // oxpulse-chat:error and renders the inline error chip — we do not swallow.
-              if (isNamedWritePath) {
-                const errMsg = err instanceof Error ? err.message : String(err);
-                const writeErr = new WidgetError('WRITE_SEND_FAILED', errMsg);
-                self.dispatchEvent(new CustomEvent('oxpulse-chat:write-error', {
-                  bubbles: true,
-                  composed: true,
-                  detail: writeErr,
-                }));
+              const reason = classifyWriteFailureReason(err);
+              const errMsg = err instanceof Error ? err.message : String(err);
+              self.#notifyWriteFailure('send', reason, errMsg);
+              if (reason === 'auth_expired') {
+                self.#notifyTokenExpired(config.roomId);
               }
               // Re-throw so the Composer's catch path fires (renders error chip + generic error event).
               throw err;
@@ -772,6 +792,12 @@ export class OxpulseChatElement extends HTMLElement {
         onSetReply: effectiveSendClient
           ? (snapshot) => { this.#composer?.setReplyTarget(snapshot); }
           : undefined,
+        // Write-401 fix (issue #78): reaction write failures route through
+        // the SAME token-expired signal + write-error telemetry the
+        // subscribe path and composer send path use — wired here rather
+        // than re-implemented inside MessageList.
+        onAuthExpired: () => this.#notifyTokenExpired(config.roomId),
+        onWriteFailure: (op, reason, message) => this.#notifyWriteFailure(op, reason, message),
       });
 
       await this.#messageList.mount();
@@ -921,6 +947,7 @@ export class OxpulseChatElement extends HTMLElement {
       // Merge stored callbacks + test factory overrides
       onTokenExpired: this.#config?.onTokenExpired,
       onError: this.#config?.onError,
+      onWriteError: this.#config?.onWriteError,
       allowLegacyToken: this.#config?.allowLegacyToken,
       _createClient: this.#config?._createClient,
       _mintAnonReadToken: this.#config?._mintAnonReadToken,
@@ -1004,6 +1031,7 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
   el._setCallbacks({
     onTokenExpired: config.onTokenExpired,
     onError: config.onError,
+    onWriteError: config.onWriteError,
     allowLegacyToken: config.allowLegacyToken,
     _createClient: config._createClient,
     _mintAnonReadToken: config._mintAnonReadToken,

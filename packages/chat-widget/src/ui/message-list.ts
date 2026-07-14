@@ -21,7 +21,8 @@ import { ReactionQuickBar } from './reaction-quick-bar.js';
 import { ReactionTrigger } from './reaction-trigger.js';
 import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
-import type { ProductMeta } from '../types.js';
+import type { ProductMeta, WriteFailureOp, WriteFailureReason } from '../types.js';
+import { classifyWriteFailureReason } from '../utils/auth.js';
 
 // ── Duck-typed SDK interface ──────────────────────────────────────────────────
 
@@ -147,6 +148,21 @@ export interface MessageListOptions {
 
   /** Whether reaction UI is enabled. Default: true. */
   reactionsEnabled?: boolean;
+
+  /**
+   * Write-401 fix (issue #78): fires when a reaction write op
+   * (sendReaction/removeReaction) fails with an auth error — routes
+   * through the SAME token-expired signal the subscribe path uses
+   * (element.ts's shared notifier), wired by the caller rather than
+   * re-implemented here.
+   */
+  onAuthExpired?: () => void;
+  /**
+   * Write-401 fix (issue #78): failure-counter hook — fires on EVERY
+   * reaction write failure (auth, network, or other), not just 401s, so an
+   * integrator can count silent write failures.
+   */
+  onWriteFailure?: (op: WriteFailureOp, reason: WriteFailureReason, message: string) => void;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -370,6 +386,23 @@ export const MAX_LIVE_MESSAGES_HARD_CEILING = MAX_LIVE_MESSAGES * 2;
 export const HEART_PULSE_MS = 240;
 
 /**
+ * Write-401 fix (issue #78): how long an optimistic reaction stays visually
+ * applied after an auth-expired write failure before rolling back.
+ *
+ * Rationale: a 401 here means the host's JWT expired. The widget signals
+ * onAuthExpired (same token-expired flow the subscribe path uses)
+ * immediately, but the actual refresh+retry happens by the HOST swapping
+ * the jwt attribute — which re-bootstraps the element and tears this
+ * MessageList instance down, repainting from server state. There is no
+ * useful in-place retry to build here: either the remount wins the race
+ * (the delayed rollback below never runs, the timer is cleared in
+ * destroy()) or it doesn't, in which case the delayed rollback still fires
+ * so the UI does not lie about pending state forever. A short bounded
+ * delay + signal is the whole feature — deliberately not a retry queue.
+ */
+export const WRITE_AUTH_ROLLBACK_DELAY_MS = 3000;
+
+/**
  * MessageList renders a chat message history inside a given container element.
  * It fetches initial history via client.list() and subscribes to live updates.
  *
@@ -441,6 +474,16 @@ export class MessageList {
   #roleLabels: Record<string, string> | undefined;
   /** W7: callback to the consumer (Composer) when a reply is requested on a bubble. */
   #onSetReply?: (snapshot: ReplySnapshot) => void;
+  /** Write-401 fix (issue #78): pending delayed-rollback timers for an
+   *  auth-expired write failure, keyed by msgId — cleared on destroy() so a
+   *  torn-down MessageList never mutates state after the fact. */
+  #rollbackTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  /** Write-401 fix (issue #78): notifies the host that a write op hit an
+   *  auth error — same signal the subscribe path uses. */
+  #onAuthExpired?: () => void;
+  /** Write-401 fix (issue #78): failure-counter hook — fires on every write
+   *  failure (not just auth), classified by op + reason. */
+  #onWriteFailure?: (op: WriteFailureOp, reason: WriteFailureReason, message: string) => void;
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -451,6 +494,8 @@ export class MessageList {
     this.#shadowHost = opts.shadowHost;
     this.#roleLabels = opts.roleLabels;
     this.#onSetReply = opts.onSetReply;
+    this.#onAuthExpired = opts.onAuthExpired;
+    this.#onWriteFailure = opts.onWriteFailure;
     this.#reactionsEnabled = opts.reactionsEnabled ?? true;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
@@ -541,6 +586,10 @@ export class MessageList {
     // explicit sweep here.
     for (const timer of this.#pulseTimers.values()) clearTimeout(timer);
     this.#pulseTimers.clear();
+    // Write-401 fix (issue #78): clear any pending delayed-rollback timer —
+    // a torn-down MessageList must never mutate #reactions after the fact.
+    for (const timer of this.#rollbackTimers.values()) clearTimeout(timer);
+    this.#rollbackTimers.clear();
     this.#rows.clear();
     this.#order = [];
     this.#reactions.clear();
@@ -1075,6 +1124,52 @@ export class MessageList {
   }
 
   /**
+   * Write-401 fix (issue #78): shared failure path for every optimistic
+   * reaction write (add/remove/replace). Classifies the failure, fires the
+   * failure-counter hook unconditionally, and — when the failure is an
+   * auth error — signals onAuthExpired and defers the rollback (see
+   * WRITE_AUTH_ROLLBACK_DELAY_MS for the rationale) instead of rolling
+   * back immediately. Non-auth failures roll back immediately (existing
+   * behaviour, unchanged).
+   */
+  #handleWriteFailure(op: WriteFailureOp, err: unknown, msgId: string, preSnapshot: ReactionState): void {
+    const reason = classifyWriteFailureReason(err);
+    this.#onWriteFailure?.(op, reason, err instanceof Error ? err.message : String(err));
+    if (reason === 'auth_expired') {
+      this.#onAuthExpired?.();
+      this.#scheduleDelayedRollback(msgId);
+    } else {
+      this.#reactions.set(msgId, preSnapshot);
+      this.#updateReactionCluster(msgId);
+    }
+  }
+
+  /**
+   * Write-401 fix (issue #78, pr-review-council #80 MAJOR fix): after
+   * WRITE_AUTH_ROLLBACK_DELAY_MS, reconcile with SERVER truth via
+   * #scheduleReactionRefresh — never restore a captured pre-optimistic
+   * snapshot wholesale. A blind snapshot-restore would silently clobber any
+   * SSE reaction event (#handleReaction) or refresh result that arrived
+   * DURING the delay window: the write-401 scenario this feature targets
+   * (write-JWT dead, SSE healthy) makes concurrent reactions from OTHER
+   * users the expected case, not an edge case. #scheduleReactionRefresh is
+   * this file's own established source of eventual truth (see its doc
+   * comment and the #optimisticReplaceReaction call site below) — the
+   * delayed path must defer to it too, not bypass it with a stale local
+   * value. (Re)scheduling here replaces any prior pending timer for this
+   * msgId. Cleared wholesale in destroy().
+   */
+  #scheduleDelayedRollback(msgId: string): void {
+    const existing = this.#rollbackTimers.get(msgId);
+    if (existing !== undefined) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.#rollbackTimers.delete(msgId);
+      void this.#scheduleReactionRefresh(msgId);
+    }, WRITE_AUTH_ROLLBACK_DELAY_MS);
+    this.#rollbackTimers.set(msgId, timer);
+  }
+
+  /**
    * Replace the caller's reaction from `fromEmoji` to `toEmoji`: removeReaction(from)
    * then sendReaction(to), both applied optimistically off ONE pre-mutation
    * snapshot (spec 2026-07-14).
@@ -1132,8 +1227,7 @@ export class MessageList {
       await this.#client.removeReaction(this.#roomId, msgId, fromEmoji);
     } catch (err) {
       console.warn(`[MessageList] replaceReaction removeReaction(${fromEmoji}) failed: ${String(err)}`);
-      this.#reactions.set(msgId, preSnapshot);
-      this.#updateReactionCluster(msgId);
+      this.#handleWriteFailure('reaction_remove', err, msgId, preSnapshot);
       return; // remove failed → abort, never call sendReaction(toEmoji)
     }
 
@@ -1146,8 +1240,7 @@ export class MessageList {
       // doc comment for why local rollback here doesn't re-call removeReaction's
       // server-side inverse: the existing #scheduleReactionRefresh/live-event
       // reconciliation path is this codebase's established source of eventual truth.
-      this.#reactions.set(msgId, preSnapshot);
-      this.#updateReactionCluster(msgId);
+      this.#handleWriteFailure('reaction_add', err, msgId, preSnapshot);
     }
   }
 
@@ -1182,8 +1275,7 @@ export class MessageList {
     } catch (err) {
       // Code MAJOR-3: Rollback to pre-mutation snapshot (not post-mutation state)
       console.warn(`[MessageList] sendReaction failed: ${String(err)}`);
-      this.#reactions.set(msgId, preSnapshot);
-      this.#updateReactionCluster(msgId);
+      this.#handleWriteFailure('reaction_add', err, msgId, preSnapshot);
     } finally {
       this.#inflight.delete(inflightKey);
     }
@@ -1229,8 +1321,7 @@ export class MessageList {
     } catch (err) {
       console.warn(`[MessageList] removeReaction failed: ${String(err)}`);
       // Code MAJOR-3: Rollback to pre-mutation snapshot
-      this.#reactions.set(msgId, preSnapshot);
-      this.#updateReactionCluster(msgId);
+      this.#handleWriteFailure('reaction_remove', err, msgId, preSnapshot);
     } finally {
       this.#inflight.delete(inflightKey);
     }
