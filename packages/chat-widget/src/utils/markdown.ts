@@ -48,6 +48,18 @@ function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** Decode the entities produced by the initial HTML-escape pass so URLs can be
+ * re-validated and re-escaped once (avoiding double-escaping of `&` etc.).
+ * `&amp;` is decoded last so literal input like `&lt;` is not over-decoded. */
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 export function renderMarkdown(text: string): string {
   // Escape HTML first
   let out = text
@@ -86,18 +98,19 @@ export function renderMarkdown(text: string): string {
 
   // Links: [text](url) — allowlist schemes; drop link (keep text) if scheme not allowed
   out = out.replace(LINK_RE, (_, linkText: string, rawUrl: string) => {
-    const safeUrl = sanitizeUrl(rawUrl);
-    const escapedText = escapeAttr(linkText);
-    if (!safeUrl) return escapedText;
-    return `<a class="md-link" target="_blank" rel="noopener" href="${escapeAttr(safeUrl)}">${escapedText}</a>`;
+    const safeUrl = sanitizeUrl(decodeHtmlEntities(rawUrl));
+    // linkText is already HTML-escaped by the initial pass; escapeAttr would double-escape &.
+    if (!safeUrl) return linkText;
+    return `<a class="md-link" target="_blank" rel="noopener" href="${escapeAttr(safeUrl)}">${linkText}</a>`;
   });
   // Autolinks — AUTOLINK_RE already requires https?:// so all matches are safe;
   // still wrap through sanitizeUrl for consistency and skip inside existing hrefs.
   out = out.replace(AUTOLINK_RE, (url, _, offset) => {
     const before = out.slice(Math.max(0, offset - 6), offset);
     if (before.includes('href="') || before.includes("href='")) return url;
-    const safeUrl = sanitizeUrl(url);
-    if (!safeUrl) return escapeAttr(url);
+    const decoded = decodeHtmlEntities(url);
+    const safeUrl = sanitizeUrl(decoded);
+    if (!safeUrl) return escapeAttr(decoded);
     return `<a class="md-link" target="_blank" rel="noopener" href="${escapeAttr(safeUrl)}">${escapeAttr(safeUrl)}</a>`;
   });
 

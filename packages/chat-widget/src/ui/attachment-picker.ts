@@ -11,6 +11,7 @@
 
 import { validate, sanitizeFilename } from '../utils/attachments.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
+import { generateUUID } from '@oxpulse/chat-sdk';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -187,8 +188,8 @@ export class AttachmentPicker {
 
   #enqueue(file: File): void {
     // F5: assign stable id so two files with same filename get distinct queue rows.
-    // crypto.randomUUID() is available in all modern browsers + jsdom.
-    const id = crypto.randomUUID();
+    // generateUUID() uses crypto.randomUUID when available, with a secure fallback.
+    const id = generateUUID();
     const item: UploadItem = {
       id,
       file,
