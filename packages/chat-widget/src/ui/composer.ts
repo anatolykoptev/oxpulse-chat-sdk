@@ -106,6 +106,12 @@ export class Composer {
    * W9: Attach a product card to the next outgoing text message.
    * The product ref and metadata are forwarded to sendText/sendTextOptimistic
    * and are cleared once the message is sent.
+   *
+   * E2EE posture: `productMeta` (title/price/imageUrl/productUrl) travels
+   * UNSEALED in the wire payload and is server-visible even in E2EE rooms —
+   * by design, mirroring the sendProductCard contract to enable marketplace
+   * search. Only `productRef` is opaque. Do not put sensitive data in
+   * `productMeta`.
    */
   setProductCard(productRef: string, productMeta: ProductMeta): void {
     this.#productRef = productRef;
@@ -153,8 +159,11 @@ export class Composer {
     // W7: reply preview bar — hidden until setReplyTarget() is called.
     const replyEl = document.createElement('div');
     replyEl.className = 'oxp-composer-reply';
-    replyEl.setAttribute('role', 'region');
-    replyEl.setAttribute('aria-live', 'polite');
+    // review pr-review-council 2026-07-14: role="status" carries an implicit
+    // polite live region — no separate aria-live, and no landmark noise from
+    // a bar that appears/disappears with every reply (unlike role="region",
+    // meant for significant persistent sections).
+    replyEl.setAttribute('role', 'status');
     replyEl.setAttribute('aria-label', t('replyingToMessageAria', this.#lang));
     replyEl.hidden = true;
 

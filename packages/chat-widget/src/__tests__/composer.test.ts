@@ -919,5 +919,23 @@ describe('Composer', () => {
 
     composer.destroy();
   });
+
+  it('reply_preview_bar_uses_status_role_not_region', () => {
+    // review pr-review-council 2026-07-14: role="region" is a landmark meant
+    // for significant persistent sections; this bar is small/transient and
+    // appears/disappears with every reply, which is screen-reader landmark
+    // noise. role="status" carries an implicit polite live region, so the
+    // explicit aria-live is redundant and dropped. aria-label is kept.
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const replyEl = container.querySelector('.oxp-composer-reply') as HTMLElement;
+    expect(replyEl.getAttribute('role')).toBe('status');
+    expect(replyEl.getAttribute('aria-live')).toBeNull();
+    expect(replyEl.getAttribute('aria-label')).not.toBeNull();
+
+    composer.destroy();
+  });
 });
 

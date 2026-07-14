@@ -182,6 +182,12 @@ export class OxpulseChatElement extends HTMLElement {
   /**
    * W9: Attach a product card to the next outgoing composer message.
    * Call after the 'oxpulse-chat:ready' event when the composer is mounted.
+   *
+   * E2EE posture: `productMeta` (title/price/imageUrl/productUrl) travels
+   * UNSEALED in the wire payload and is server-visible even in E2EE rooms —
+   * by design, mirroring the sendProductCard contract to enable marketplace
+   * search. Only `productRef` is opaque. Do not put sensitive data in
+   * `productMeta`.
    */
   setProductCard(productRef: string, productMeta: ProductMeta): void {
     this.#composer?.setProductCard(productRef, productMeta);

@@ -17,7 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement, mount } from '../element.js';
-import type { MessageListClient } from '../ui/message-list.js';
+import type { MessageListClient, MessageRow } from '../ui/message-list.js';
 
 // Vitest uses jsdom by default when configured. We need to ensure customElements is available.
 
@@ -770,6 +770,83 @@ describe('OxpulseChatElement — W2.2 slice 3 SDK wiring', () => {
     await new Promise((r) => setTimeout(r, 30));
 
     expect(client.subscribe).toHaveBeenCalledWith('room1', expect.objectContaining({ onMessage: expect.any(Function) }));
+    el.destroy();
+  });
+
+  it('setProductCard_public_wrapper_forwards_and_renders_through_real_element_path', async () => {
+    // review pr-review-council 2026-07-14: OxpulseChatElement.setProductCard()
+    // (the PUBLIC wrapper) had zero end-to-end coverage — only the inner
+    // Composer.setProductCard() was exercised directly (composer.test.ts).
+    // This drives the real custom-element path: el.setProductCard() ->
+    // Composer -> widget client.sendText forwarding, then simulates the
+    // server echoing the sent message back over the live subscribe stream
+    // to confirm the product card actually RENDERS (not just that args
+    // were forwarded).
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    // The gap under test: the PUBLIC wrapper, not Composer.setProductCard() directly.
+    el.setProductCard('sku-1', productMeta);
+
+    const shadow = el.shadowRoot!;
+    const textarea = shadow.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+    const sendBtn = shadow.querySelector('.oxp-composer-send') as HTMLButtonElement;
+    expect(textarea).not.toBeNull();
+    expect(sendBtn).not.toBeNull();
+
+    textarea.value = 'check this out';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    sendBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Forwarded through the real wrapper -> Composer -> widget client sendText call.
+    expect(client.sendText).toHaveBeenCalledWith(
+      'room1',
+      expect.objectContaining({ text: 'check this out', productRef: 'sku-1', productMeta }),
+    );
+
+    // Simulate the server echoing the sent message back over the live stream.
+    expect(capturedOnMessage).not.toBeNull();
+    capturedOnMessage!({
+      seq: 1,
+      msgId: 'mock-msg-id',
+      senderUid: 'u1',
+      sealed: new ArrayBuffer(0),
+      text: 'check this out',
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: 'sku-1',
+      productMeta,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const card = shadow.querySelector('.oxp-bubble-product');
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain('Widget Pro');
+
     el.destroy();
   });
 });

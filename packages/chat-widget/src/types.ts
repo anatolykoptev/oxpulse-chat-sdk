@@ -80,7 +80,7 @@ export interface WidgetConfig {
       onMutation?: (event: { msgId: string; op: string; deletedAt?: string; editedAt?: string; [k: string]: unknown }) => void;
       onReaction?: (event: { msgId: string; op: 'reaction_add' | 'reaction_remove'; reaction: string; userId: string; [k: string]: unknown }) => void;
     }): () => void;
-    sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string }): Promise<{ seq?: number; msgId: string }>;
+    sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: ProductMeta }): Promise<{ seq?: number; msgId: string }>;
     getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
     sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
     removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
@@ -257,6 +257,13 @@ export interface MountOptions extends WidgetConfig {
 /** W9: Marketplace product display metadata. Non-sensitive catalog info. */
 export interface ProductMeta {
   title: string;
+  /**
+   * Host-pre-formatted display text (e.g. "1 200", "12.99"), NOT a raw
+   * numeric amount. The widget renders it verbatim as `${price} ${currency}`
+   * (message-list.ts) — no Intl.NumberFormat or locale-aware formatting is
+   * applied. Callers own formatting (decimals, thousands separators, symbol
+   * placement) before setting this field.
+   */
   price: string;
   currency: string;
   imageUrl: string;
