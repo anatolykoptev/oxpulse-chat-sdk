@@ -1,5 +1,64 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.8.0
+
+### Minor Changes
+
+- 05096fe: reactions: heart-first quick-bar replaces the '+😀' button + two-step popover.
+
+  - Each bubble gets a heart button (outline/filled SVG) — hover-revealed on
+    desktop, always visible on touch, focusable for keyboard/SR. A plain
+    tap/click/Enter/Space instantly toggles ❤️ (add / remove / replace-to-heart
+    via `#selectReaction`, reusing the existing optimistic-mutation +
+    rollback-to-snapshot pattern). A ≥400ms press-and-hold (touch/pen) or a
+    ≥400ms hover-intent on the button itself (mouse) or ArrowUp opens the full
+    6-emoji `ReactionQuickBar` (renamed from `ReactionPicker`), which keeps its
+    keyboard nav, per-emoji stagger-in / select-burst animation (reduced-motion
+    gated), outside-dismissal, and shadow-host mount.
+  - Telegram/WhatsApp-style single-reaction replace, client-enforced against a
+    Slack-model idempotent per-(user,emoji) server: selecting a second emoji
+    while already owning one removes the old reaction then adds the new one
+    (one pre-mutation snapshot, rollback on either leg's failure).
+  - Own-emoji marked in the bar (aria-pressed + accent ring); the heart button
+    mirrors the same own/❤️ state and gets a one-shot pulse on a successful add.
+  - Bar placement (above/below flip, right-edge anchor for the caller's own
+    messages) and long-press timing/gating, outside-dismissal (capture-phase
+    pointerdown), and focus-restore (deferred to a microtask) are ported from
+    oxpulse-chat web's prod, unit-tested primitives:
+    `web/src/lib/chat/list/usePopover.svelte.ts`,
+    `web/src/lib/chat/reactions/message-actions-helpers.ts::computePopoverPosition`,
+    `web/src/lib/chat/reactions/MessageActions.svelte`'s dismissal pattern, and
+    `web/src/lib/chat/list/Bubble.svelte`'s heart-pulse keyframe.
+  - Gated behind `reactionsEnabled` + `client.sendReaction`, same as before.
+
+### Patch Changes
+
+- 42e4999: write 401 fires token-expired + delays optimistic rollback for host refresh; write-failure telemetry event
+
+  - A write op (`sendReaction`/`removeReaction`/composer `sendText`) failing
+    with an auth error (401/403, `unauthorized`/`forbidden` code) now fires
+    the SAME `oxpulse-chat:token-expired` signal + `onTokenExpired` callback
+    the subscribe path already used — previously a write-401 silently rolled
+    back with only a `console.warn`, and the host never learned the JWT had
+    expired.
+  - Reaction rollback on an auth-expired write is delayed
+    (`WRITE_AUTH_ROLLBACK_DELAY_MS`, 3s) instead of immediate: a host that
+    refreshes the `jwt` attribute quickly re-bootstraps the widget (tearing
+    down the in-flight `MessageList`) before the delay elapses, so the chip
+    never flashes away and back. Non-auth failures still roll back
+    immediately (unchanged). The timer is cleared on `destroy()`.
+  - New failure-counter hook: `WidgetConfig.onWriteError({op, reason})` fires
+    on every write failure (not just auth), and the existing
+    `oxpulse-chat:write-error` event's `WidgetError` detail now carries
+    `op`/`reason` fields — extended, not a new event. Dispatch is no longer
+    scoped to the named-write path only; any composer send failure reports.
+  - `isAuthError()` now understands the raw `SDKChatError` shape
+    (`statusCode`/`code`) directly, removing a hand-rolled normalizer that
+    would otherwise have been copied a 2nd and 3rd time into the reaction and
+    composer write paths.
+
+  Closes #78.
+
 ## 0.7.1
 
 ### Patch Changes
