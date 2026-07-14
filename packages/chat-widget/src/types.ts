@@ -31,6 +31,13 @@ export interface WidgetConfig {
   /** Called on unrecoverable widget errors. */
   onError?: (err: WidgetError) => void;
   /**
+   * Failure-counter hook (issue #78): fires on EVERY write-op failure
+   * (reaction add/remove, message send) — not just auth errors — so an
+   * integrator can count silent write failures without parsing the
+   * `oxpulse-chat:write-error` DOM event. Mirrors `onError`'s callback shape.
+   */
+  onWriteError?: (detail: WriteFailureDetail) => void;
+  /**
    * Allow JWTs without aud_origins claim (pre-W1.1 issuers). Default false (deny — recommended).
    * Set to true only when migrating from a legacy token-minting service.
    */
@@ -194,16 +201,47 @@ export type WidgetErrorCode =
   | 'NETWORK_ERROR'
   | 'WRITE_MINT_FAILED'
   | 'WRITE_SEND_FAILED'
+  | 'WRITE_REACTION_FAILED'
   | 'UNKNOWN';
 
 export class WidgetError extends Error {
   readonly code: WidgetErrorCode;
+  /** Present on write-failure events (issue #78) — which op failed. */
+  readonly op?: WriteFailureOp;
+  /** Present on write-failure events (issue #78) — coarse failure reason. */
+  readonly reason?: WriteFailureReason;
 
-  constructor(code: WidgetErrorCode, message: string) {
+  constructor(
+    code: WidgetErrorCode,
+    message: string,
+    writeFailure?: { op: WriteFailureOp; reason: WriteFailureReason },
+  ) {
     super(message);
     this.name = 'WidgetError';
     this.code = code;
+    this.op = writeFailure?.op;
+    this.reason = writeFailure?.reason;
   }
+}
+
+// ── Write-failure telemetry (issue #78) ─────────────────────────────────────
+//
+// A write op (sendReaction/removeReaction/sendText) failing with 401 used to
+// roll back silently (console.warn only) — the host never learned the JWT
+// had expired. These types back the failure-counter hook (onWriteError /
+// oxpulse-chat:write-error) so an integrator can count silent write
+// failures by class instead of only seeing a vanished optimistic update.
+
+/** Which write operation failed. */
+export type WriteFailureOp = 'reaction_add' | 'reaction_remove' | 'send';
+
+/** Coarse failure-reason bucket for write-failure telemetry. */
+export type WriteFailureReason = 'auth_expired' | 'network' | 'other';
+
+/** Detail payload for the write-failure counter hook (config.onWriteError). */
+export interface WriteFailureDetail {
+  op: WriteFailureOp;
+  reason: WriteFailureReason;
 }
 
 export class OriginNotAllowedError extends WidgetError {
