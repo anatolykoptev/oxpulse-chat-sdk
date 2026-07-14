@@ -105,9 +105,17 @@ function fail(code, msg) {
 	process.exit(code);
 }
 
+function normalizeVersionInput(v) {
+	if (v == null) return '0.0.0';
+	if (Array.isArray(v)) return String(v[0] ?? '0.0.0').trim();
+	return String(v).trim();
+}
+
 function semverCompare(a, b) {
-	const pa = a.split('.').map((n) => parseInt(n, 10));
-	const pb = b.split('.').map((n) => parseInt(n, 10));
+	const sa = normalizeVersionInput(a);
+	const sb = normalizeVersionInput(b);
+	const pa = sa.split('.').map((n) => parseInt(n, 10));
+	const pb = sb.split('.').map((n) => parseInt(n, 10));
 	for (let i = 0; i < 3; i++) {
 		if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
 	}
