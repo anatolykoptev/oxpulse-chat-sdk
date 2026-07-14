@@ -1,5 +1,18 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.6.2
+
+### Patch Changes
+
+- Fix message list not pinned to bottom on initial load.
+
+  `MessageList` was mounted and scrolled to the bottom before `Composer` was
+  added to the widget root, so the scroll container had the full widget height
+  instead of the composer-shrunken height. After the composer mounted, the list
+  stuck partway up and new messages stopped auto-scrolling. Mounting the
+  composer before `MessageList` gives the scroll container its final height when
+  `scrollToBottom` runs.
+
 ## 0.6.1
 
 ### Patch Changes
