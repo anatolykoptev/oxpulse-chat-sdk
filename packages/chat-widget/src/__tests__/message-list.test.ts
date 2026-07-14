@@ -53,6 +53,52 @@ function makeMockClient(rows: MessageRow[] = []): MessageListClient {
   };
 }
 
+// ── Mock ResizeObserver ───────────────────────────────────────────────────────
+// jsdom does not implement ResizeObserver (confirmed empirically under this
+// project's vitest jsdom environment). Same "stub the global, expose a way to
+// fire the callback" shape as packages/chat-sdk/src/__tests__/helpers.ts's
+// MockES for EventSource.
+
+interface MockRoInstance {
+  readonly observedElements: Element[];
+  disconnected: boolean;
+  trigger(): void;
+}
+
+function installMockResizeObserver(): { getLastInstance: () => MockRoInstance | null } {
+  const instances: MockRoInstance[] = [];
+
+  class MockResizeObserver {
+    #callback: ResizeObserverCallback;
+    observedElements: Element[] = [];
+    disconnected = false;
+
+    constructor(callback: ResizeObserverCallback) {
+      this.#callback = callback;
+      instances.push(this);
+    }
+
+    observe(el: Element): void {
+      this.observedElements.push(el);
+    }
+
+    unobserve(el: Element): void {
+      this.observedElements = this.observedElements.filter((e) => e !== el);
+    }
+
+    disconnect(): void {
+      this.disconnected = true;
+    }
+
+    trigger(): void {
+      this.#callback([] as unknown as ResizeObserverEntry[], this as unknown as ResizeObserver);
+    }
+  }
+
+  vi.stubGlobal('ResizeObserver', MockResizeObserver);
+  return { getLastInstance: () => instances[instances.length - 1] ?? null };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('MessageList', () => {
@@ -1270,5 +1316,118 @@ describe('MessageList — W9 product card', () => {
     expect(quote!.textContent).toContain('original');
 
     ml.destroy();
+  });
+});
+
+// ── P2: scroll re-pins when the composer resizes (reply-bar toggle) ──────────
+//
+// design-empirical review 2026-07-14 (starthey.com/demo): opening/closing the
+// reply preview bar resizes the composer (a sibling of #listEl in the
+// widgetRoot flex column). Nothing previously re-pinned the message list, so
+// the newest message clipped by the resize delta (56px observed) — it only
+// self-healed on the next appended message, because 56px sits under
+// shouldAutoScroll's 80px threshold and #handleNewMessage's own wasPinned
+// check would then read a scrollTop that's already been silently left behind.
+//
+// jsdom has no layout engine and does not implement ResizeObserver at all
+// (confirmed empirically — `typeof ResizeObserver` is 'undefined' under this
+// project's vitest jsdom environment), so both are mocked here: a
+// MockResizeObserver capturing its callback (same "stub the global, expose a
+// way to fire it" shape this repo already uses for EventSource in
+// packages/chat-sdk/src/__tests__/helpers.ts), and Object.defineProperty on
+// #listEl's scrollHeight/clientHeight/scrollTop (same technique the
+// `preserves_scroll_position_when_user_scrolled_up` test above already uses).
+describe('MessageList — P2 scroll re-pin on composer resize', () => {
+  let container: HTMLDivElement;
+  let roCtor: ReturnType<typeof installMockResizeObserver>;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    container.style.height = '400px';
+    container.style.overflow = 'auto';
+    document.body.appendChild(container);
+    roCtor = installMockResizeObserver();
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    vi.unstubAllGlobals();
+  });
+
+  it('re_pins_scroll_to_bottom_when_composer_resize_shrinks_pinned_list', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1 })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const listEl = container.querySelector('.oxp-message-list') as HTMLElement;
+    expect(listEl).not.toBeNull();
+
+    // (a) pin to bottom: scrollHeight - scrollTop - clientHeight === 0
+    Object.defineProperty(listEl, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(listEl, 'clientHeight', { value: 400, configurable: true });
+    listEl.scrollTop = 600; // exactly at bottom (1000 - 600 - 400 = 0)
+
+    // (b) simulate the composer growing (reply bar shown): #listEl's
+    // clientHeight shrinks by 56px, scrollTop does NOT move (browsers never
+    // auto-adjust scrollTop on a resize) — the newest message clips 56px.
+    Object.defineProperty(listEl, 'clientHeight', { value: 344, configurable: true });
+    expect(listEl.scrollTop).toBe(600); // unchanged by the resize itself
+
+    // (c) fire the ResizeObserver callback registered against #listEl
+    const ro = roCtor.getLastInstance();
+    expect(ro).not.toBeNull();
+    expect(ro!.observedElements).toContain(listEl);
+    ro!.trigger();
+
+    // (d) re-pinned: scrollTop snaps back to scrollHeight
+    expect(listEl.scrollTop).toBe(listEl.scrollHeight);
+
+    ml.destroy();
+  });
+
+  it('does_not_force_scroll_on_composer_resize_when_reader_scrolled_up', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1 })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const listEl = container.querySelector('.oxp-message-list') as HTMLElement;
+    expect(listEl).not.toBeNull();
+
+    // Reader has scrolled well away from bottom, reading history.
+    Object.defineProperty(listEl, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(listEl, 'clientHeight', { value: 400, configurable: true });
+    listEl.scrollTop = 50; // far from bottom (1000 - 50 - 400 = 550 >> 80 threshold)
+
+    const scrollTopBefore = listEl.scrollTop;
+
+    // Composer resize still fires (any reply-bar toggle triggers it
+    // regardless of the reader's scroll position).
+    Object.defineProperty(listEl, 'clientHeight', { value: 344, configurable: true });
+    const ro = roCtor.getLastInstance();
+    expect(ro).not.toBeNull();
+    ro!.trigger();
+
+    // Not pinned before the resize — reader's position must be preserved,
+    // not yanked to bottom.
+    expect(listEl.scrollTop).toBe(scrollTopBefore);
+
+    ml.destroy();
+  });
+
+  it('disconnects_the_resize_observer_on_destroy', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1 })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const ro = roCtor.getLastInstance();
+    expect(ro).not.toBeNull();
+    expect(ro!.disconnected).toBe(false);
+
+    ml.destroy();
+
+    expect(ro!.disconnected).toBe(true);
   });
 });

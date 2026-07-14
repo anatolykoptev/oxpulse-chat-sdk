@@ -1155,4 +1155,20 @@ describe('theme foundation', () => {
     expect(THEME_CSS).toMatch(/\.oxp-bubble-reply-body[^}]*var\(--oxp-fg-secondary\)/s);
     expect(THEME_CSS).not.toMatch(/\.oxp-bubble-reply-body[^}]*var\(--oxp-muted\)/s);
   });
+
+  it('bubble_time_and_product_price_use_fg_secondary_not_muted', () => {
+    // design-empirical review of starthey.com/demo 2026-07-14: WCAG 1.4.3
+    // contrast failure on EVERY message's timestamp, both themes — measured
+    // live 3.99:1 light / 4.27:1 dark at 11.2px (needs 4.5:1). --oxp-muted is
+    // not safe at small sizes on bubble backgrounds (documented :369-373 /
+    // :636-638); --oxp-fg-secondary is this file's own designated token for
+    // on-bubble text and already passes ≥4.5:1 on all four self/other ×
+    // light/dark bubble backgrounds. .oxp-product-price sits inside
+    // .oxp-bubble-product (:1116 "product card inside message bubble") and
+    // carries the same latent --oxp-muted-on-tinted-bg issue.
+    expect(THEME_CSS).toMatch(/\.oxp-bubble-time[^}]*var\(--oxp-fg-secondary\)/s);
+    expect(THEME_CSS).not.toMatch(/\.oxp-bubble-time[^}]*var\(--oxp-muted\)/s);
+    expect(THEME_CSS).toMatch(/\.oxp-product-price[^}]*var\(--oxp-fg-secondary\)/s);
+    expect(THEME_CSS).not.toMatch(/\.oxp-product-price[^}]*var\(--oxp-muted\)/s);
+  });
 });

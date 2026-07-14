@@ -385,6 +385,16 @@ export class MessageList {
   #order: string[] = [];
   /** Inner scrollable list element. */
   #listEl: HTMLElement | null = null;
+  /**
+   * P2 design-empirical review 2026-07-14: re-pins scroll to bottom when
+   * #listEl's own clientHeight shrinks (the composer — a sibling in the
+   * widgetRoot flex column — grows when the reply-preview bar toggles on).
+   * Observing #listEl itself (not the composer) is the clean seam: no
+   * cross-component coupling, and it fires for ANY future cause of the same
+   * shrink, not just the reply bar. jsdom has no ResizeObserver — guarded by
+   * a feature check in mount() so the widget's test suite stays green.
+   */
+  #resizeObserver: ResizeObserver | null = null;
   /** Reaction state per message — keyed by msgId. */
   #reactions: Map<string, ReactionState> = new Map();
   /** Whether reaction UI is enabled. */
@@ -445,6 +455,23 @@ export class MessageList {
     this.#listEl.className = 'oxp-message-list';
     this.#container.appendChild(this.#listEl);
 
+    // P2: re-pin to bottom when a composer resize (reply-bar toggle) shrinks
+    // #listEl's clientHeight out from under a pinned reader. See #resizeObserver
+    // doc comment. Feature-detected — not every test/runtime environment
+    // implements ResizeObserver (jsdom does not).
+    if (typeof ResizeObserver !== 'undefined') {
+      this.#resizeObserver = new ResizeObserver(() => {
+        // Mirrors #handleNewMessage's wasPinned-before-mutation pattern:
+        // read pinned-ness once, act on that snapshot. scrollTop does not
+        // move on a pure resize, so a reader who was at the bottom reads as
+        // still-pinned (small clips stay under shouldAutoScroll's threshold)
+        // while a reader scrolled up is left exactly where they are.
+        const wasPinned = this.#isPinnedToBottom();
+        if (wasPinned) this.#scrollToBottom();
+      });
+      this.#resizeObserver.observe(this.#listEl);
+    }
+
     // DM2: shared fetch-render-subscribe logic (also used by #retryMount).
     await this.#fetchAndRender();
   }
@@ -475,7 +502,8 @@ export class MessageList {
     this.#handleReaction(event);
   }
 
-  /** Tear down: abort in-flight mount(), unsubscribe, clear DOM, close picker. */
+  /** Tear down: abort in-flight mount(), unsubscribe, clear DOM, close picker,
+   *  disconnect the resize observer (P2). */
   destroy(): void {
     // C1: abort first so mid-flight mount() bails before subscribe
     this.#abortController.abort();
@@ -483,6 +511,8 @@ export class MessageList {
       this.#unsubscribe();
       this.#unsubscribe = null;
     }
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
     this.#picker?.hide();
     this.#picker = null;
     this.#rows.clear();
