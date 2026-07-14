@@ -1,5 +1,11 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.6.0
+
+### Minor Changes
+
+- ac9f91e: Add thread reply support to the chat widget. The `MessageList` now renders a reply button on each message and a compact quote preview for messages with `threadRootMsgId`. The `Composer` exposes `setReplyTarget()` to preview the message being replied to and sends with `threadRootMsgId` populated. Includes i18n (`en`/`ru`) and theme styles for touch and desktop.
+
 ## 0.5.0
 
 ### Minor Changes
