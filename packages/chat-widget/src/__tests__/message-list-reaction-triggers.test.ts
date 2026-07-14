@@ -4,10 +4,10 @@
  *
  * Tests: MessageList wires a ReactionTrigger to each bubble's heart button —
  * tap/click instantly toggles the heart reaction (add/remove/replace via
- * #selectReaction), a ≥500ms hold (mouse or touch) or ArrowUp opens the full
- * ReactionQuickBar, movement >10px cancels a hold. Gated behind
- * reactionsEnabled + client.sendReaction. Trigger listeners/timers are torn
- * down on destroy() and on eviction.
+ * #selectReaction), a ≥400ms touch/pen hold, a ≥400ms mouse hover-intent, or
+ * ArrowUp opens the full ReactionQuickBar, movement >10px cancels a hold.
+ * Gated behind reactionsEnabled + client.sendReaction. Trigger
+ * listeners/timers are torn down on destroy() and on eviction.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -202,6 +202,33 @@ describe('MessageList — reaction quick-bar triggers (heart-first)', () => {
     ml.destroy();
   });
 
+  it('replacing_to_heart_does_not_pulse_when_the_client_cannot_removeReaction', async () => {
+    // Review fix LOW#10: #optimisticReplaceReaction silently no-ops without
+    // client.removeReaction (its own internal capability gate) — the pulse
+    // must respect the SAME gate, not fire regardless.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-pulse-4', seq: 1 });
+    const reactions: Record<string, ReactionsResponse> = {
+      'msg-pulse-4': { counts: { '👍': 1 }, users: { '👍': ['u1'] }, truncated: false },
+    };
+    const client = makeMockClient([row], reactions);
+    // removeReaction deliberately capability-less — sendReaction stays (so
+    // the heart button still renders; the gate is #populateBubble's own).
+    delete (client as { removeReaction?: unknown }).removeReaction;
+
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await drainMicrotasks(5);
+
+    expect(heartBtn.classList.contains('oxp-reaction-heart-btn--pulse')).toBe(false);
+    expect(client.sendReaction).not.toHaveBeenCalled();
+    ml.destroy();
+  });
+
   it('mouse_hover_400ms_on_the_heart_button_opens_the_quick_bar', async () => {
     // Reuse-update (2026-07-14): mouse gets hover-intent, not long-press —
     // scoped to the heart button itself (TG-desktop pattern), not the bubble.
@@ -217,6 +244,59 @@ describe('MessageList — reaction quick-bar triggers (heart-first)', () => {
     await vi.advanceTimersByTimeAsync(400);
 
     expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+    ml.destroy();
+  });
+
+  it('hover_opening_the_bar_does_not_steal_focus_from_a_focused_input', async () => {
+    // Review fix CRITICAL#2 (2026-07-14): a user typing in the composer
+    // (or any other input) whose pointer happens to rest on a heart for
+    // 400ms must not have focus ripped out from under them.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-4c', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const composer = document.createElement('input');
+    container.appendChild(composer);
+    composer.focus();
+    expect(document.activeElement).toBe(composer);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(pointerEvent('pointerenter', { pointerType: 'mouse' }));
+    await vi.advanceTimersByTimeAsync(400);
+
+    // The hover-intent guard (reaction-trigger.ts) suppresses the open
+    // entirely while an input is focused — the bar never appears AND
+    // focus stays put either way this is enforced.
+    expect(document.activeElement).toBe(composer);
+
+    composer.remove();
+    ml.destroy();
+  });
+
+  it('hover_open_bar_does_not_focus_its_buttons_even_when_nothing_else_is_focused', async () => {
+    // Distinct from the input-guard test above: this proves the SEPARATE
+    // focusFirstButton=false wiring (source==='hover') independent of the
+    // typing-target guard — hover opens the bar here (no input focused),
+    // but must still not move focus into it.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-4d', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const activeBeforeHover = document.activeElement;
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(pointerEvent('pointerenter', { pointerType: 'mouse' }));
+    await vi.advanceTimersByTimeAsync(400);
+
+    const bar = container.querySelector('.oxp-reaction-quick-bar');
+    expect(bar).not.toBeNull();
+    expect(bar!.contains(document.activeElement)).toBe(false);
+    expect(document.activeElement).toBe(activeBeforeHover);
     ml.destroy();
   });
 
@@ -251,7 +331,10 @@ describe('MessageList — reaction quick-bar triggers (heart-first)', () => {
     heartBtn.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
     await vi.advanceTimersByTimeAsync(400);
 
-    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+    const bar = container.querySelector('.oxp-reaction-quick-bar');
+    expect(bar).not.toBeNull();
+    // Unlike a hover-open, a deliberate hold still focuses the bar.
+    expect(bar!.contains(document.activeElement)).toBe(true);
     ml.destroy();
   });
 
@@ -383,6 +466,57 @@ describe('MessageList — reaction quick-bar triggers (heart-first)', () => {
     ml.destroy();
   });
 
+  it('bar_reopens_on_the_same_message_after_escape', async () => {
+    // Review fix HIGH#4: without onHide wiring, #quickBarMsgId went stale
+    // after Escape and #showQuickBar's idempotent-reshow guard blocked
+    // reopening the SAME message's bar forever.
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-7c', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    await drainMicrotasks(5);
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await drainMicrotasks(5);
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+
+    // Reopen the SAME heart's bar via ArrowUp again.
+    heartBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    await drainMicrotasks(5);
+
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+    ml.destroy();
+  });
+
+  it('bar_reopens_on_the_same_message_after_outside_click', async () => {
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-7d', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    await drainMicrotasks(5);
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    await drainMicrotasks(5);
+    expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+
+    // Reopen the SAME heart's bar via ArrowUp again.
+    heartBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    await drainMicrotasks(5);
+
+    expect(container.querySelector('.oxp-reaction-quick-bar')).not.toBeNull();
+    ml.destroy();
+  });
+
   it('heart_button_has_the_addReactionAria_label_and_arrowup_keyshortcut', async () => {
     const row = makeRow({ senderUid: 'u1', msgId: 'msg-8', seq: 1 });
     const client = makeMockClient([row]);
@@ -393,6 +527,72 @@ describe('MessageList — reaction quick-bar triggers (heart-first)', () => {
     const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
     expect(heartBtn?.getAttribute('aria-label')).toBe('Add reaction');
     expect(heartBtn?.getAttribute('aria-keyshortcuts')).toBe('ArrowUp');
+    ml.destroy();
+  });
+
+  it('heart_button_has_a_hold_for_more_title_hint', async () => {
+    // Review fix HIGH#6 (operator decision: gesture-only model, no chevron —
+    // just a native title hint through i18n).
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-8b', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
+    expect(heartBtn?.getAttribute('title')).toBe('React ❤ · hold for more');
+    ml.destroy();
+  });
+
+  it('heart_button_title_is_localized_for_ru', async () => {
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-8c', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'ru', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
+    expect(heartBtn?.getAttribute('title')).toBe('Реакция ❤ · удержите для выбора');
+    ml.destroy();
+  });
+
+  it('heart_aria_label_flips_to_remove_when_the_caller_already_owns_the_heart', async () => {
+    // Review fix HIGH#5: the static 'Add reaction' label was wrong for a
+    // pressed heart — the real action is REMOVE. State-aware at build time.
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-9b', seq: 1 });
+    const reactions: Record<string, ReactionsResponse> = {
+      'msg-9b': { counts: { '❤️': 1 }, users: { '❤️': ['u1'] }, truncated: false },
+    };
+    const client = makeMockClient([row], reactions);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement | null;
+    expect(heartBtn?.getAttribute('aria-pressed')).toBe('true');
+    expect(heartBtn?.getAttribute('aria-label')).toBe('Remove reaction');
+    ml.destroy();
+  });
+
+  it('heart_aria_label_flips_live_on_add_then_back_on_remove', async () => {
+    // State-aware at LIVE-sync time too (#syncHeartButton), not just build.
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-9c', seq: 1 });
+    const client = makeMockClient([row]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    expect(heartBtn.getAttribute('aria-label')).toBe('Add reaction');
+
+    heartBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await drainMicrotasks(5);
+    expect(heartBtn.getAttribute('aria-label')).toBe('Remove reaction');
+
+    heartBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await drainMicrotasks(5);
+    expect(heartBtn.getAttribute('aria-label')).toBe('Add reaction');
+
     ml.destroy();
   });
 

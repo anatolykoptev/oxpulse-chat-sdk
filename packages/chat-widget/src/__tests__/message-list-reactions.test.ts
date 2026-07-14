@@ -247,7 +247,7 @@ describe('MessageList — reactions', () => {
     // Heart-first amendment (spec 2026-07-14): the visible '+😀' click-to-open
     // button is gone — ArrowUp on the heart button is the deterministic
     // (no-fake-timers-needed) path to the full bar, same destination as a
-    // ≥500ms hold (covered with fake timers in message-list-reaction-triggers.test.ts).
+    // ≥400ms hold (covered with fake timers in message-list-reaction-triggers.test.ts).
     const row = makeRow({ senderUid: 'u1', msgId: 'msg-7', seq: 1 });
     const client = makeMockClient([row]);
     const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
@@ -337,6 +337,93 @@ describe('MessageList — reactions', () => {
     expect(client.sendReaction).toHaveBeenCalledTimes(1);
 
     resolveFirst();
+    ml.destroy();
+  });
+
+  it('fast_switching_emoji_while_the_first_add_is_still_in_flight_does_not_race_3_server_calls', async () => {
+    // Review fix MEDIUM#7: #selectReaction's bare-msgId guard used to only
+    // get set by #optimisticReplaceReaction's OWN internal reservation — a
+    // plain add (no own reaction yet) never held it. Selecting a SECOND
+    // emoji while the first add's sendReaction was still pending read the
+    // (already-applied) OPTIMISTIC state as "own reaction is A" and routed
+    // to replace(A, B): removeReaction(A) + sendReaction(B) — three
+    // overlapping server calls total. Fix: #selectReaction reserves the
+    // bare msgId key for its WHOLE routed op (add, remove, or replace),
+    // not just the replace branch — a second selection while the first is
+    // still in flight must be a no-op.
+    const row = makeRow({ senderUid: 'u2', msgId: 'msg-fastswitch', seq: 1 });
+    const reactions: Record<string, ReactionsResponse> = {
+      'msg-fastswitch': { counts: { '👍': 1, '\u{1F602}': 1 }, users: { '👍': ['u2'], '\u{1F602}': ['u2'] }, truncated: false },
+    };
+    let resolveFirstSend!: () => void;
+    const firstSendPromise = new Promise<void>((res) => { resolveFirstSend = res; });
+
+    const client = makeMockClient([row], reactions);
+    (client.sendReaction as ReturnType<typeof vi.fn>).mockReturnValueOnce(firstSendPromise);
+
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    // Tap the 👍 chip (u1 owns nothing yet) — routes to add, sendReaction
+    // hangs (not yet resolved).
+    const thumbsChip = container.querySelector('.oxp-reaction-chip[data-emoji="👍"]') as HTMLButtonElement | null;
+    expect(thumbsChip).not.toBeNull();
+    thumbsChip!.click();
+    await drainMicrotasks(2);
+    expect(client.sendReaction).toHaveBeenCalledTimes(1);
+    expect(client.sendReaction).toHaveBeenCalledWith('r1', 'msg-fastswitch', '👍');
+
+    // Immediately tap a DIFFERENT emoji's chip while the first add is still
+    // in flight — must be a complete no-op (no removeReaction, no second
+    // sendReaction) until the first op finishes.
+    const laughChip = container.querySelector('.oxp-reaction-chip[data-emoji="\u{1F602}"]') as HTMLButtonElement | null;
+    expect(laughChip).not.toBeNull();
+    laughChip!.click();
+    await drainMicrotasks(5);
+
+    expect(client.sendReaction).toHaveBeenCalledTimes(1);
+    expect(client.removeReaction).not.toHaveBeenCalled();
+
+    resolveFirstSend();
+    await drainMicrotasks(5);
+    ml.destroy();
+  });
+
+  it('replace_never_overcounts_toEmoji_when_self_was_already_listed_in_its_users', async () => {
+    // Review fix LOW#8: counts[toEmoji] was incremented UNCONDITIONALLY,
+    // even when self was already present in users[toEmoji] (a reachable
+    // edge state — #ownReactionFor picks the FIRST emoji found when self
+    // legitimately holds more than one, e.g. a pre-redesign multi-emoji
+    // client). The users array push is correctly guarded ("if not already
+    // present"); the count increment must mirror that same guard, or the
+    // count exceeds the users array's actual length.
+    const row = makeRow({ senderUid: 'u1', msgId: 'msg-overcounted', seq: 1 });
+    const reactions: Record<string, ReactionsResponse> = {
+      // #ownReactionFor returns the FIRST key ('👍') per Object.entries
+      // order — u1 legitimately owns BOTH here (edge state).
+      'msg-overcounted': {
+        counts: { '👍': 1, '❤️': 2 },
+        users: { '👍': ['u1'], '❤️': ['u1', 'u3'] },
+      },
+    };
+    const client = makeMockClient([row], reactions);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+    await drainMicrotasks(20);
+
+    // Select ❤️ via the heart button — routes to replace(👍, ❤️) since
+    // ownReactionFor reads '👍' first.
+    const heartBtn = container.querySelector('.oxp-reaction-heart-btn') as HTMLButtonElement;
+    heartBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await drainMicrotasks(5);
+
+    // ❤️'s count must stay 2 (u1 was already counted) — not jump to 3.
+    const heartChip = container.querySelector('.oxp-reaction-chip[data-emoji="❤️"]') as HTMLElement | null;
+    expect(heartChip).not.toBeNull();
+    expect(heartChip!.textContent).toContain('2');
+    expect(heartChip!.textContent).not.toContain('3');
+
     ml.destroy();
   });
 

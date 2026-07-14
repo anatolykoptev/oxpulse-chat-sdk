@@ -954,17 +954,18 @@ export class MessageList {
   }
 
   /** Sync the heart button's aria-pressed + filled/outline state (CSS keys
-   *  off aria-pressed) to whether the caller's own reaction is currently ❤️.
-   *  #populateBubble sets the initial state at render time; this keeps it
-   *  live across optimistic mutations and server-pushed reaction events
-   *  without rebuilding the whole bubble (which would also tear down/rewire
-   *  the button's ReactionTrigger for no reason). */
+   *  off aria-pressed) and its state-aware aria-label (review fix HIGH#5) to
+   *  whether the caller's own reaction is currently ❤️. #populateBubble sets
+   *  the initial state at render time; this keeps it live across optimistic
+   *  mutations and server-pushed reaction events without rebuilding the
+   *  whole bubble (which would also tear down/rewire the button's
+   *  ReactionTrigger for no reason). */
   #syncHeartButton(bubble: HTMLElement, msgId: string): void {
     const heartBtn = bubble.querySelector('.oxp-reaction-heart-btn') as HTMLElement | null;
     if (!heartBtn) return;
     const isOwnHeart = this.#ownReactionFor(msgId) === HEART_EMOJI;
     heartBtn.setAttribute('aria-pressed', String(isOwnHeart));
-    heartBtn.classList.toggle('oxp-reaction-heart-btn--own', isOwnHeart);
+    heartBtn.setAttribute('aria-label', t(isOwnHeart ? 'removeReactionAria' : 'addReactionAria', this.#lang));
   }
 
   #buildReactionChip(msgId: string, emoji: string, count: number, isOwn: boolean): HTMLButtonElement {
@@ -994,25 +995,43 @@ export class MessageList {
    *   own reaction === emoji → remove(emoji)  [toggle off]  (#optimisticRemoveReaction)
    *   own reaction === X≠emoji → replace(X, emoji)          (#optimisticReplaceReaction)
    *
-   * Guarded at the top by the bare-msgId #inflight key #optimisticReplaceReaction
-   * holds for its whole remove-then-add pair — blocks ANY concurrent reaction
-   * op on the same message while a replace is mid-flight.
+   * Review fix MEDIUM#7 (2026-07-14): reserves the bare-msgId #inflight key
+   * for its WHOLE routed op — add, remove, OR replace — not just replace.
+   * #optimisticAddReaction/#optimisticRemoveReaction apply their optimistic
+   * state update SYNCHRONOUSLY before awaiting the network call, so a
+   * second #selectReaction call for the same message (fired while the
+   * first's request is still pending) used to read that ALREADY-APPLIED
+   * optimistic state as "own reaction is X" and route to replace(X, Y) —
+   * three overlapping server calls (the first op's own call, plus
+   * replace's remove+add) racing on the same message. Reserving here for
+   * every branch makes a second selection during the first's flight a
+   * clean no-op instead. #optimisticReplaceReaction assumes this lock is
+   * already held — it does not reserve its own.
    */
   async #selectReaction(msgId: string, emoji: string): Promise<void> {
     if (this.#inflight.has(msgId)) return;
-    const ownEmoji = this.#ownReactionFor(msgId);
-    if (ownEmoji === emoji) {
-      await this.#optimisticRemoveReaction(msgId, emoji);
-    } else if (ownEmoji === undefined) {
-      // Heart-add pulse (reuse-update 2026-07-14, ported from web's
-      // Bubble.svelte .qa-heart.on.pulse / MessageList.svelte
-      // triggerHeartPulse): fires optimistically, same call order as web's
-      // `onToggleReaction?.(...); if (!hadHeart) triggerHeartPulse(...)`.
-      if (emoji === HEART_EMOJI) this.#pulseHeart(msgId);
-      await this.#optimisticAddReaction(msgId, emoji);
-    } else {
-      if (emoji === HEART_EMOJI) this.#pulseHeart(msgId);
-      await this.#optimisticReplaceReaction(msgId, ownEmoji, emoji);
+    this.#inflight.add(msgId);
+    try {
+      const ownEmoji = this.#ownReactionFor(msgId);
+      if (ownEmoji === emoji) {
+        await this.#optimisticRemoveReaction(msgId, emoji);
+      } else if (ownEmoji === undefined) {
+        // Heart-add pulse (reuse-update 2026-07-14, ported from web's
+        // Bubble.svelte .qa-heart.on.pulse / MessageList.svelte
+        // triggerHeartPulse): fires optimistically, same call order as web's
+        // `onToggleReaction?.(...); if (!hadHeart) triggerHeartPulse(...)`.
+        // Review fix LOW#10: gated on the same capability check the routed
+        // op itself uses — no pulse when the reaction can't actually be sent.
+        if (emoji === HEART_EMOJI && this.#client.sendReaction) this.#pulseHeart(msgId);
+        await this.#optimisticAddReaction(msgId, emoji);
+      } else {
+        if (emoji === HEART_EMOJI && this.#client.removeReaction && this.#client.sendReaction) {
+          this.#pulseHeart(msgId);
+        }
+        await this.#optimisticReplaceReaction(msgId, ownEmoji, emoji);
+      }
+    } finally {
+      this.#inflight.delete(msgId);
     }
   }
 
@@ -1063,14 +1082,15 @@ export class MessageList {
    *   remove succeeds, add fails → rollback to snapshot (fromEmoji restored)
    *   remove fails               → abort — sendReaction(to) is never called — rollback
    *
-   * In-flight guard is keyed by the bare msgId (not msgId:emoji) so the whole
-   * pair is atomic from the caller's perspective — #selectReaction checks the
-   * same key before routing here.
+   * In-flight guard: the bare-msgId #inflight key is reserved (and released)
+   * by the CALLER (#selectReaction) for the whole routed op, atomic from the
+   * caller's perspective across add/remove/replace uniformly — this method
+   * assumes that lock is already held and does not reserve its own (review
+   * fix MEDIUM#7: a second internal reservation on the same key here would
+   * self-deadlock now that #selectReaction holds it up-front).
    */
   async #optimisticReplaceReaction(msgId: string, fromEmoji: string, toEmoji: string): Promise<void> {
     if (!this.#client.removeReaction || !this.#client.sendReaction) return;
-    if (this.#inflight.has(msgId)) return;
-    this.#inflight.add(msgId);
 
     const preState = this.#reactions.get(msgId) ?? { counts: {}, users: {} };
     const preSnapshot: ReactionState = {
@@ -1093,9 +1113,16 @@ export class MessageList {
       users[fromEmoji] = fromUsers;
     }
 
+    // Review fix LOW#8: increment the count only when self was ACTUALLY
+    // newly pushed — mirrors the fromEmoji removal guard above. Self can
+    // in principle already be listed in toEmoji's users (e.g. a legacy
+    // multi-emoji client state — #ownReactionFor picks the first emoji
+    // found when self legitimately holds more than one); count must never
+    // exceed the users array's real length.
     const toUsers = users[toEmoji] ? [...users[toEmoji]!] : [];
-    if (!toUsers.some((u) => isSelfMatch(u, this.#selfUid))) toUsers.push(this.#selfUid);
-    counts[toEmoji] = (counts[toEmoji] ?? 0) + 1;
+    const alreadyInToUsers = toUsers.some((u) => isSelfMatch(u, this.#selfUid));
+    if (!alreadyInToUsers) toUsers.push(this.#selfUid);
+    counts[toEmoji] = (counts[toEmoji] ?? 0) + (alreadyInToUsers ? 0 : 1);
     users[toEmoji] = toUsers;
 
     this.#reactions.set(msgId, { counts, users });
@@ -1107,7 +1134,6 @@ export class MessageList {
       console.warn(`[MessageList] replaceReaction removeReaction(${fromEmoji}) failed: ${String(err)}`);
       this.#reactions.set(msgId, preSnapshot);
       this.#updateReactionCluster(msgId);
-      this.#inflight.delete(msgId);
       return; // remove failed → abort, never call sendReaction(toEmoji)
     }
 
@@ -1122,8 +1148,6 @@ export class MessageList {
       // reconciliation path is this codebase's established source of eventual truth.
       this.#reactions.set(msgId, preSnapshot);
       this.#updateReactionCluster(msgId);
-    } finally {
-      this.#inflight.delete(msgId);
     }
   }
 
@@ -1411,20 +1435,27 @@ export class MessageList {
     // visible '+😀' button + two-step popover is gone. A single heart
     // button now carries BOTH affordances — a plain tap/click instantly
     // toggles the ❤️ reaction (add/remove/replace via #selectReaction), a
-    // ≥500ms hold (mouse or touch) or ArrowUp opens the full
-    // ReactionQuickBar. Only wired when reactions are enabled AND the
-    // client has a send path — otherwise there is nothing to trigger.
+    // ≥400ms touch/pen hold, a ≥400ms mouse hover-intent, or ArrowUp opens
+    // the full ReactionQuickBar. Only wired when reactions are enabled AND
+    // the client has a send path — otherwise there is nothing to trigger.
     this.#teardownReactionTrigger(row.msgId);
     if (this.#reactionsEnabled && this.#client.sendReaction) {
       const heartBtn = document.createElement('button');
       const isOwnHeart = this.#ownReactionFor(row.msgId) === HEART_EMOJI;
-      heartBtn.className = isOwnHeart
-        ? 'oxp-reaction-heart-btn oxp-reaction-heart-btn--own'
-        : 'oxp-reaction-heart-btn';
+      // Review fix LOW#11: own-state styling is driven entirely by the
+      // aria-pressed attribute selector (theme.ts:672) — a separate
+      // --own class had zero CSS consumer, dropped rather than given one.
+      heartBtn.className = 'oxp-reaction-heart-btn';
       heartBtn.type = 'button';
-      heartBtn.setAttribute('aria-label', t('addReactionAria', this.#lang));
+      // Review fix HIGH#5: state-aware — the real action on a pressed
+      // heart is REMOVE, not ADD. Kept in sync live by #syncHeartButton.
+      heartBtn.setAttribute('aria-label', t(isOwnHeart ? 'removeReactionAria' : 'addReactionAria', this.#lang));
       heartBtn.setAttribute('aria-pressed', String(isOwnHeart));
       heartBtn.setAttribute('aria-keyshortcuts', 'ArrowUp');
+      // Review fix HIGH#6 (operator decision: gesture-only model, no
+      // chevron/visual cue) — a native title hint for the hold-for-more
+      // affordance, through i18n.
+      heartBtn.title = t('heartButtonTitle', this.#lang);
       // M10-style static trusted SVG (feather "heart" outline) — no
       // interpolated data, safe innerHTML (see composer.ts's send icon for
       // the same established pattern). Filled vs outline is CSS-driven off
@@ -1435,7 +1466,10 @@ export class MessageList {
       const trigger = new ReactionTrigger({
         element: heartBtn,
         onToggle: () => void this.#selectReaction(row.msgId, HEART_EMOJI),
-        onOpenBar: () => this.#showQuickBar(row.msgId, el, heartBtn),
+        // Review fix CRITICAL#2: a hover-sourced open must not steal focus
+        // (the user could be typing elsewhere) — hold/keyboard opens still
+        // focus the bar.
+        onOpenBar: (source) => this.#showQuickBar(row.msgId, el, heartBtn, source !== 'hover'),
         signal: this.#signal,
       });
       this.#reactionTriggers.set(row.msgId, trigger);
@@ -1473,16 +1507,16 @@ export class MessageList {
    * Idempotent by msgId: a redundant show for the message that already owns
    * the bar (e.g. a stacked ArrowUp/hold firing again while it's already up)
    * is a no-op — avoids a hide+reshow flicker.
+   *
+   * `focusFirstButton` (review fix CRITICAL#2): false for a hover-sourced
+   * open — must not steal focus from wherever the user was.
    */
-  #showQuickBar(msgId: string, anchorEl: HTMLElement, restoreFocusEl: HTMLElement): void {
+  #showQuickBar(msgId: string, anchorEl: HTMLElement, restoreFocusEl: HTMLElement, focusFirstButton = true): void {
     if (this.#quickBarMsgId === msgId && this.#quickBar) return;
 
-    // Close any existing bar first
-    if (this.#quickBar) {
-      this.#quickBar.hide();
-      this.#quickBar = null;
-      this.#quickBarMsgId = null;
-    }
+    // Close any existing bar first — its onHide (wired below) resets
+    // #quickBar/#quickBarMsgId, so no manual reset needed here.
+    this.#quickBar?.hide();
 
     // M5: Append bar to the outer container (not #listEl which has overflow:auto).
     // This prevents the bar from being clipped near scroll edges.
@@ -1490,10 +1524,16 @@ export class MessageList {
     const container = this.#container;
     this.#quickBar = new ReactionQuickBar({
       container,
-      onSelect: (emoji) => {
+      onSelect: (emoji) => void this.#selectReaction(msgId, emoji),
+      // Review fix HIGH#4: without this, #quickBar/#quickBarMsgId went
+      // stale on Escape/outside-click (the bar closes ITSELF, MessageList
+      // never finds out) and the idempotent-reshow guard above blocked
+      // reopening the SAME message's bar forever. Single source of truth
+      // for the reset — fires on Escape, outside-click, explicit hide(),
+      // AND the internal hide() a re-show or select-dismiss triggers.
+      onHide: () => {
         this.#quickBar = null;
         this.#quickBarMsgId = null;
-        void this.#selectReaction(msgId, emoji);
       },
       signal: this.#signal,
       lang: this.#lang,
@@ -1504,15 +1544,11 @@ export class MessageList {
     // MAJOR-5: mount bar into shadow host (ShadowRoot) to escape overflow:hidden widgetRoot.
     // ShadowRoot is not HTMLElement but supports appendChild; cast is safe at runtime.
     const mountTo = this.#shadowHost ? (this.#shadowHost as unknown as HTMLElement) : undefined;
-    this.#quickBar.show(anchorEl, mountTo, restoreFocusEl);
+    this.#quickBar.show(anchorEl, mountTo, restoreFocusEl, focusFirstButton);
 
     // M5: Close bar on scroll — acceptable UX when bar is outside scroll container
     const onScroll = (): void => {
-      if (this.#quickBar) {
-        this.#quickBar.hide();
-        this.#quickBar = null;
-        this.#quickBarMsgId = null;
-      }
+      this.#quickBar?.hide();
       this.#listEl?.removeEventListener('scroll', onScroll);
     };
     this.#listEl?.addEventListener('scroll', onScroll, { once: true });

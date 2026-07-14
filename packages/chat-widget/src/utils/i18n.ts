@@ -30,6 +30,8 @@ export type LocaleKey =
   | 'senderYou'
   | 'bubbleAriaLabel'
   | 'addReactionAria'
+  | 'removeReactionAria'
+  | 'heartButtonTitle'
   | 'retryLoadingMessagesAria'
   | 'retry'
   // Reactions
@@ -98,6 +100,8 @@ const en: LocaleTable = {
   senderYou: 'You',
   bubbleAriaLabel: 'Message from {sender} at {time}: {body}',
   addReactionAria: 'Add reaction',
+  removeReactionAria: 'Remove reaction',
+  heartButtonTitle: 'React ❤ · hold for more',
   retryLoadingMessagesAria: 'Retry loading messages',
   retry: 'Retry',
 
@@ -163,6 +167,8 @@ const ru: LocaleTable = {
   senderYou: 'Вы',
   bubbleAriaLabel: 'Сообщение от {sender}, {time}: {body}',
   addReactionAria: 'Добавить реакцию',
+  removeReactionAria: 'Убрать реакцию',
+  heartButtonTitle: 'Реакция ❤ · удержите для выбора',
   retryLoadingMessagesAria: 'Повторить загрузку сообщений',
   retry: 'Повторить',
 

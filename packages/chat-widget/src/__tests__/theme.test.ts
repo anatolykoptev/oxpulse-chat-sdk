@@ -12,6 +12,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement } from '../element.js';
 import { THEME_CSS } from '../ui/theme.js';
+import type { MessageListClient } from '../ui/message-list.js';
+
+/**
+ * Mock client factory — mirrors element.test.ts's makeMockClient. Inject via
+ * config._createClient so mounting the element never issues a real network
+ * call: without this, a bare setAttribute+appendChild mount constructs a real
+ * SDKChatClient hitting a nonexistent backend, and the eventual rejection can
+ * land AFTER a test (and its container) have already torn down, surfacing as
+ * an unhandled rejection from MessageList#dispatchError in a LATER test's
+ * window (CI preflight run 29367295703).
+ */
+function makeMockClient(): MessageListClient {
+  return {
+    list: vi.fn().mockResolvedValue({ items: [], hasNext: false }),
+    subscribe: vi.fn().mockReturnValue(() => {}),
+    getReactions: vi.fn().mockResolvedValue({ counts: {}, users: {}, truncated: false }),
+    sendReaction: vi.fn().mockResolvedValue(undefined),
+    removeReaction: vi.fn().mockResolvedValue(undefined),
+    getRoster: vi.fn().mockResolvedValue(new Map()),
+  };
+}
 
 // Helper: make a valid JWT with aud_origins matching localhost
 function makeJwt(payload: Record<string, unknown>): string {
@@ -261,11 +282,13 @@ describe('theme foundation', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 20));
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
     expect(css).toMatch(/\.oxp-bubble:hover \.oxp-reaction-heart-btn[^{]*\{[^}]*opacity:\s*1/s);
     expect(css).toMatch(/\.oxp-reaction-heart-btn:focus-visible[^{]*\{[^}]*opacity:\s*1/s);
+    el.destroy();
   });
 
   it('reaction_heart_btn_own_state_uses_accent_and_filled_svg', async () => {
@@ -276,11 +299,13 @@ describe('theme foundation', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 20));
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';
     expect(css).toMatch(/\.oxp-reaction-heart-btn\[aria-pressed='true'\][^{]*\{[^}]*var\(--oxp-accent\)/s);
     expect(css).toMatch(/\.oxp-reaction-heart-btn\[aria-pressed='true'\] svg[^{]*\{[^}]*fill:\s*currentColor/s);
+    el.destroy();
   });
 
   it('reaction_picker_has_box_shadow_for_elevation', async () => {
@@ -1292,5 +1317,16 @@ describe('theme foundation', () => {
       searchFrom = blockEnd + 1;
     }
     expect(found).toBe(true);
+  });
+
+  // ── Bar own-emoji accent ring (review fix HIGH#3, 2026-07-14) ────────────
+  // JS (reaction-quick-bar.ts#buildBar) sets
+  // oxp-reaction-quick-bar-button--own + aria-pressed='true' but there was
+  // no matching CSS rule — spec item 6 ("accent ring") went visually unmet.
+
+  it('bar_own_emoji_button_gets_an_accent_ring', () => {
+    expect(THEME_CSS).toMatch(
+      /\.oxp-reaction-quick-bar-button\[aria-pressed='true'\][^{]*\{[^}]*var\(--oxp-accent\)/s,
+    );
   });
 });

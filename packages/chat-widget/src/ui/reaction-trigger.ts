@@ -28,18 +28,35 @@
  * never consumes a click the way a touch/pen long-press does).
  */
 
+/** Which affordance opened the bar — the caller (MessageList) uses this to
+ *  decide whether to move focus into the bar (review fix CRITICAL#2,
+ *  2026-07-14): 'hover' must NOT steal focus (the user's pointer merely
+ *  rested on the button — they could be typing elsewhere), while 'hold'
+ *  and 'keyboard' are deliberate actions that should still focus the bar. */
+export type ReactionTriggerOpenSource = 'hold' | 'hover' | 'keyboard';
+
 export interface ReactionTriggerOptions {
   /** The heart button — hold/hover/click/ArrowUp target, contextmenu suppression scope. */
   element: HTMLElement;
   /** Called on a plain tap/click (not preceded by a completed or cancelled touch/pen hold). */
   onToggle: () => void;
   /** Called when a ≥400ms touch/pen hold, a ≥400ms mouse hover, or ArrowUp fires. */
-  onOpenBar: () => void;
+  onOpenBar: (source: ReactionTriggerOpenSource) => void;
   /** Optional abort signal — destroys the trigger when it fires. */
   signal?: AbortSignal;
   longPressDelayMs?: number;
   longPressMoveCancelPx?: number;
   hoverDelayMs?: number;
+  suppressClickGuardMs?: number;
+}
+
+/** Review fix CRITICAL#2: hover-intent must not fire at all while the user
+ *  is mid-typing elsewhere (e.g. the composer) — a pointer resting on a
+ *  heart for 400ms while they type is incidental, not an open request. */
+function isTypingTarget(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || (el as HTMLElement).isContentEditable === true;
 }
 
 /** Ported from usePopover.svelte.ts's LONG_PRESS_MS. */
@@ -48,22 +65,34 @@ export const DEFAULT_LONG_PRESS_DELAY_MS = 400;
 export const DEFAULT_LONG_PRESS_MOVE_CANCEL_PX = 10;
 /** Mouse hover-intent delay — same budget as the touch/pen hold (reuse-update). */
 export const DEFAULT_HOVER_DELAY_MS = 400;
+/** Review fix LOW#9: #suppressNextClick expects a trailing native click to
+ *  consume it. If pointerup lands off-element (no click ever fires) the
+ *  flag would otherwise dangle true and wrongly swallow a later, unrelated
+ *  genuine tap — this bounds how long the suppression can outlive the
+ *  gesture that armed it. Generously short relative to the 400ms
+ *  interaction delays; a real click fires within the same event tick as
+ *  pointerup, so this only ever fires for the "click never came" case. */
+export const DEFAULT_SUPPRESS_CLICK_GUARD_MS = 300;
 
 export class ReactionTrigger {
   #element: HTMLElement;
   #onToggle: () => void;
-  #onOpenBar: () => void;
+  #onOpenBar: (source: ReactionTriggerOpenSource) => void;
   #signal: AbortSignal | undefined;
   #longPressDelayMs: number;
   #longPressMoveCancelPx: number;
   #hoverDelayMs: number;
+  #suppressClickGuardMs: number;
 
   #longPressTimer: ReturnType<typeof setTimeout> | null = null;
   #pressStart: { x: number; y: number } | null = null;
   /** Set when a touch/pen hold either opens the bar or is cancelled by
    *  movement — the click that follows pointerup must not also toggle.
-   *  Mouse never sets this (see class doc comment). */
+   *  Mouse never sets this (see class doc comment). Always armed via
+   *  #armSuppressNextClick (review fix LOW#9) — never set bare, so the
+   *  guard-window timer is never forgotten. */
   #suppressNextClick = false;
+  #suppressNextClickTimer: ReturnType<typeof setTimeout> | null = null;
   #hoverTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: ReactionTriggerOptions) {
@@ -74,6 +103,7 @@ export class ReactionTrigger {
     this.#longPressDelayMs = opts.longPressDelayMs ?? DEFAULT_LONG_PRESS_DELAY_MS;
     this.#longPressMoveCancelPx = opts.longPressMoveCancelPx ?? DEFAULT_LONG_PRESS_MOVE_CANCEL_PX;
     this.#hoverDelayMs = opts.hoverDelayMs ?? DEFAULT_HOVER_DELAY_MS;
+    this.#suppressClickGuardMs = opts.suppressClickGuardMs ?? DEFAULT_SUPPRESS_CLICK_GUARD_MS;
 
     this.#element.addEventListener('pointerdown', this.#onPointerDown);
     this.#element.addEventListener('pointermove', this.#onPointerMove);
@@ -97,6 +127,7 @@ export class ReactionTrigger {
   destroy(): void {
     this.#clearLongPressTimer();
     this.#clearHoverTimer();
+    this.#clearSuppressNextClickTimer();
     this.#endPress();
 
     this.#element.removeEventListener('pointerdown', this.#onPointerDown);
@@ -128,8 +159,8 @@ export class ReactionTrigger {
     this.#clearLongPressTimer();
     this.#longPressTimer = setTimeout(() => {
       this.#longPressTimer = null;
-      this.#suppressNextClick = true;
-      this.#onOpenBar();
+      this.#armSuppressNextClick();
+      this.#onOpenBar('hold');
     }, this.#longPressDelayMs);
   };
 
@@ -145,7 +176,7 @@ export class ReactionTrigger {
       // for the "moved after the bar already opened" case.
       const wasPending = this.#longPressTimer !== null;
       this.#clearLongPressTimer();
-      if (wasPending) this.#suppressNextClick = true;
+      if (wasPending) this.#armSuppressNextClick();
       this.#pressStart = null;
       this.#element.removeEventListener('contextmenu', this.#onContextMenu);
     }
@@ -165,7 +196,11 @@ export class ReactionTrigger {
     this.#clearHoverTimer();
     this.#hoverTimer = setTimeout(() => {
       this.#hoverTimer = null;
-      this.#onOpenBar();
+      // Review fix CRITICAL#2: skip entirely if the user is mid-typing
+      // elsewhere — a pointer resting on the heart while they type in the
+      // composer is incidental, not an open request.
+      if (isTypingTarget(document.activeElement)) return;
+      this.#onOpenBar('hover');
     }, this.#hoverDelayMs);
   };
 
@@ -184,6 +219,7 @@ export class ReactionTrigger {
   #onClick = (e: Event): void => {
     if (this.#suppressNextClick) {
       this.#suppressNextClick = false;
+      this.#clearSuppressNextClickTimer();
       e.stopPropagation();
       return;
     }
@@ -195,7 +231,7 @@ export class ReactionTrigger {
     const ke = e as KeyboardEvent;
     if (ke.key === 'ArrowUp') {
       ke.preventDefault();
-      this.#onOpenBar();
+      this.#onOpenBar('keyboard');
     }
   };
 
@@ -216,6 +252,26 @@ export class ReactionTrigger {
     if (this.#hoverTimer !== null) {
       clearTimeout(this.#hoverTimer);
       this.#hoverTimer = null;
+    }
+  }
+
+  /** Review fix LOW#9: arm the suppress flag AND a guard-window timer that
+   *  auto-clears it if the expected trailing click never arrives (pointerup
+   *  landed off-element, or activation happened via some other path) — a
+   *  later, unrelated genuine tap must never be silently swallowed. */
+  #armSuppressNextClick(): void {
+    this.#suppressNextClick = true;
+    this.#clearSuppressNextClickTimer();
+    this.#suppressNextClickTimer = setTimeout(() => {
+      this.#suppressNextClickTimer = null;
+      this.#suppressNextClick = false;
+    }, this.#suppressClickGuardMs);
+  }
+
+  #clearSuppressNextClickTimer(): void {
+    if (this.#suppressNextClickTimer !== null) {
+      clearTimeout(this.#suppressNextClickTimer);
+      this.#suppressNextClickTimer = null;
     }
   }
 }

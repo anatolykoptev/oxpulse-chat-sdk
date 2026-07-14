@@ -854,6 +854,14 @@ export const THEME_CSS = `
   outline-offset: 2px;
 }
 
+/* Own-emoji accent ring (review fix HIGH#3, 2026-07-14) — mirrors the heart
+ * button's own-state pattern (:672). aria-pressed='true' is set by
+ * reaction-quick-bar.ts#buildBar for the button matching ownEmoji. */
+.oxp-reaction-quick-bar-button[aria-pressed='true'] {
+  border-color: var(--oxp-accent);
+  box-shadow: 0 0 0 1px var(--oxp-accent);
+}
+
 /* ── Reactions quick-bar MOTION (spec 2026-07-14) ──
  * Bar scale/fade in; each emoji button staggers in on top of that (6 fixed
  * REACTION_EMOJIS slots — nth-child delays need no JS). Stagger span (last

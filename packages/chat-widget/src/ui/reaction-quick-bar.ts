@@ -2,9 +2,9 @@
  * @oxpulse/chat-widget — ReactionQuickBar (reactions quick-bar redesign,
  * heart-first amendment 2026-07-14). Renamed from ReactionPicker (W2.2
  * slice 3) — same floating-popover mechanics, now reached by holding the
- * per-bubble heart button (≥500ms, mouse or touch) or pressing ArrowUp on
- * it, instead of a click-triggered two-step flow (see ui/reaction-trigger.ts
- * and MessageList's wiring).
+ * per-bubble heart button (≥400ms touch/pen hold, ≥400ms mouse hover-intent)
+ * or pressing ArrowUp on it, instead of a click-triggered two-step flow (see
+ * ui/reaction-trigger.ts and MessageList's wiring).
  *
  * Plain TS class, no framework. Renders emoji buttons inside the container,
  * handles keyboard navigation, outside click, and AbortSignal.
@@ -34,6 +34,14 @@ export interface ReactionQuickBarOptions {
    *  via computeQuickBarPosition, ported from oxpulse-chat web's
    *  computePopoverPosition. Default false. */
   isOwnMessage?: boolean;
+  /** Called whenever the bar closes ITSELF — Escape, outside-pointerdown,
+   *  or an explicit hide()/re-show() (review fix HIGH#4, 2026-07-14).
+   *  Without this, a caller that tracks "which message currently owns the
+   *  bar" (MessageList's #quickBar/#quickBarMsgId) has no way to learn the
+   *  bar closed on its own — its state goes stale and an idempotent-reshow
+   *  guard keyed on that state blocks reopening the SAME message forever.
+   *  NOT called for a redundant hide() on an already-closed bar. */
+  onHide?: () => void;
 }
 
 /** MOTION (spec 2026-07-14): select fires a burst/scale-pop on the chosen
@@ -61,6 +69,7 @@ export const SELECT_DISMISS_DELAY_MS = 160;
 export class ReactionQuickBar {
   #container: HTMLElement;
   #onSelect: (emoji: string) => void;
+  #onHide: (() => void) | undefined;
   #signal: AbortSignal | undefined;
   #lang: Locale;
   #ownEmoji: string | undefined;
@@ -88,6 +97,7 @@ export class ReactionQuickBar {
   constructor(opts: ReactionQuickBarOptions) {
     this.#container = opts.container;
     this.#onSelect = opts.onSelect;
+    this.#onHide = opts.onHide;
     this.#signal = opts.signal;
     this.#lang = resolveLocale(opts.lang);
     this.#ownEmoji = opts.ownEmoji;
@@ -104,8 +114,14 @@ export class ReactionQuickBar {
    * @param restoreFocusEl — element Escape restores focus to. Defaults to anchorEl.
    *                    Pass the heart button (anchorEl is the bubble, which is
    *                    not itself focusable).
+   * @param focusFirstButton — whether to move focus into the bar on open.
+   *                    Default true. Pass false for a passively-opened bar
+   *                    (review fix CRITICAL#2, 2026-07-14: a mouse
+   *                    hover-intent open must not steal focus from wherever
+   *                    the user was, e.g. mid-typing in the composer) —
+   *                    a deliberate hold/keyboard open should still focus it.
    */
-  show(anchorEl: HTMLElement, mountTo?: HTMLElement, restoreFocusEl?: HTMLElement): void {
+  show(anchorEl: HTMLElement, mountTo?: HTMLElement, restoreFocusEl?: HTMLElement, focusFirstButton = true): void {
     if (this.#signal?.aborted) return;
     // If already visible, hide first
     if (this.#barEl) this.#removeBar();
@@ -120,8 +136,8 @@ export class ReactionQuickBar {
     // Position: above anchor if room, below otherwise
     this.#position(anchorEl);
 
-    // Focus first button
-    if (this.#barButtons.length > 0) {
+    // Focus first button — skipped for a passively-opened (hover) bar.
+    if (focusFirstButton && this.#barButtons.length > 0) {
       this.#barButtons[0]!.focus();
     }
 
@@ -189,6 +205,10 @@ export class ReactionQuickBar {
   // ── Private ────────────────────────────────────────────────────────────────
 
   #removeBar(): void {
+    // Review fix HIGH#4: only notify the caller if there was actually a bar
+    // to remove — hide() calls this unconditionally, so a redundant hide()
+    // on an already-closed bar must not double-fire onHide.
+    const wasOpen = this.#barEl !== null;
     if (this.#dismissTimer !== null) {
       clearTimeout(this.#dismissTimer);
       this.#dismissTimer = null;
@@ -214,6 +234,7 @@ export class ReactionQuickBar {
     this.#mountTo = undefined;
     this.#anchorEl = null;
     this.#restoreFocusEl = null;
+    if (wasOpen) this.#onHide?.();
   }
 
   #buildBar(): HTMLElement {
@@ -304,6 +325,7 @@ export class ReactionQuickBar {
         viewportTop: 0,
         isOwn: this.#isOwnMessage,
       });
+      this.#applyPlacementClass(pos.placement);
       this.#barEl.style.top = `${Math.max(8, pos.top)}px`;
       if (pos.right !== undefined) {
         // Own message — anchor by right edge (CSS `right` is measured from
@@ -332,6 +354,7 @@ export class ReactionQuickBar {
         viewportTop: 0,
         isOwn: this.#isOwnMessage,
       });
+      this.#applyPlacementClass(pos.placement);
       this.#barEl.style.top = `${Math.max(0, pos.top)}px`;
       const containerWidth = this.#container.offsetWidth || viewportWidth;
       if (pos.right !== undefined) {
@@ -345,5 +368,14 @@ export class ReactionQuickBar {
       }
     }
     this.#barEl.style.zIndex = '10';
+  }
+
+  /** Review fix LOW#12: consume computeQuickBarPosition's placement — a
+   *  class rather than a discarded field — so CSS can key direction-aware
+   *  entrance motion off it later without another positioning pass. */
+  #applyPlacementClass(placement: 'above' | 'below'): void {
+    if (!this.#barEl) return;
+    this.#barEl.classList.toggle('oxp-reaction-quick-bar--above', placement === 'above');
+    this.#barEl.classList.toggle('oxp-reaction-quick-bar--below', placement === 'below');
   }
 }

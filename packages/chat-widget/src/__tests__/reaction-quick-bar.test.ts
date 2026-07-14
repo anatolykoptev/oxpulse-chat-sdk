@@ -203,6 +203,35 @@ describe('ReactionQuickBar', () => {
     expect(document.activeElement).toBe(buttons[1]);
   });
 
+  it('focusFirstButton_false_does_not_move_focus_on_show', () => {
+    // Review fix CRITICAL#2 (2026-07-14): a hover-opened bar must not
+    // steal focus from wherever the user was (e.g. mid-typing in the
+    // composer) — MessageList passes focusFirstButton=false for a
+    // hover-sourced open.
+    const focused = document.createElement('button');
+    document.body.appendChild(focused);
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
+
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    picker.show(anchor, undefined, undefined, false);
+
+    expect(document.activeElement).toBe(focused);
+    picker.hide();
+    focused.remove();
+  });
+
+  it('focusFirstButton_defaults_to_true', () => {
+    const onSelect = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect });
+    picker.show(anchor);
+
+    const buttons = container.querySelectorAll('.oxp-reaction-quick-bar-button');
+    expect(document.activeElement).toBe(buttons[0]);
+    picker.hide();
+  });
+
   it('respects_abort_signal_before_show', () => {
     const ctrl = new AbortController();
     ctrl.abort();
@@ -300,6 +329,75 @@ describe('ReactionQuickBar', () => {
     await drainMicrotasks();
 
     expect(container.querySelector('.oxp-reaction-quick-bar')).toBeNull();
+  });
+
+  // ── onHide callback (review fix HIGH#4, 2026-07-14) ───────────────────────
+  // Without a way to notify the caller when the bar closes itself
+  // (Escape/outside-click), MessageList's #quickBar/#quickBarMsgId went
+  // stale and #showQuickBar's idempotent-reshow guard blocked reopening
+  // the SAME message's bar forever.
+
+  it('onHide_fires_on_escape', async () => {
+    const onSelect = vi.fn();
+    const onHide = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, onHide });
+    picker.show(anchor);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await drainMicrotasks();
+
+    expect(onHide).toHaveBeenCalledOnce();
+  });
+
+  it('onHide_fires_on_outside_pointerdown', async () => {
+    const onSelect = vi.fn();
+    const onHide = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, onHide });
+    picker.show(anchor);
+
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    await drainMicrotasks();
+
+    expect(onHide).toHaveBeenCalledOnce();
+  });
+
+  it('onHide_fires_on_explicit_hide_call', () => {
+    const onSelect = vi.fn();
+    const onHide = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, onHide });
+    picker.show(anchor);
+
+    picker.hide();
+
+    expect(onHide).toHaveBeenCalledOnce();
+  });
+
+  it('onHide_does_not_fire_when_hide_is_called_on_an_already_closed_bar', () => {
+    // #removeBar is idempotent (show() calls it defensively too) — must
+    // not double-fire onHide for a no-op hide.
+    const onSelect = vi.fn();
+    const onHide = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, onHide });
+    picker.show(anchor);
+    picker.hide();
+    onHide.mockClear();
+
+    picker.hide();
+
+    expect(onHide).not.toHaveBeenCalled();
+  });
+
+  it('onHide_fires_before_the_next_shows_own_removal_not_double_counted', () => {
+    // show() while already open calls #removeBar() internally to close the
+    // stale bar first — that internal close also fires onHide once.
+    const onSelect = vi.fn();
+    const onHide = vi.fn();
+    const picker = new ReactionQuickBar({ container, onSelect, onHide });
+    picker.show(anchor);
+    picker.show(anchor); // reopen while already open
+
+    expect(onHide).toHaveBeenCalledOnce();
+    picker.hide();
   });
 
   it('picker_has_role_dialog', () => {
@@ -489,6 +587,10 @@ describe('ReactionQuickBar', () => {
     // anchor's own bottom edge, unlike the above-placement case which would
     // sit well ABOVE anchorRect.top (2).
     expect(parseFloat(barEl!.style.top)).toBeGreaterThanOrEqual(20);
+    // Review fix LOW#12: computeQuickBarPosition's placement is consumed as
+    // a class (enables direction-aware animation), not computed and discarded.
+    expect(barEl!.classList.contains('oxp-reaction-quick-bar--below')).toBe(true);
+    expect(barEl!.classList.contains('oxp-reaction-quick-bar--above')).toBe(false);
 
     picker.hide();
   });
@@ -510,6 +612,8 @@ describe('ReactionQuickBar', () => {
     expect(barEl).not.toBeNull();
     // Above placement: top < anchorRect.top (500).
     expect(parseFloat(barEl!.style.top)).toBeLessThan(500);
+    expect(barEl!.classList.contains('oxp-reaction-quick-bar--above')).toBe(true);
+    expect(barEl!.classList.contains('oxp-reaction-quick-bar--below')).toBe(false);
 
     picker.hide();
   });

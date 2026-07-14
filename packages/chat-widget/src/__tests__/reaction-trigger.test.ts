@@ -133,13 +133,17 @@ describe('ReactionTrigger', () => {
     button.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
     vi.advanceTimersByTime(200);
     button.dispatchEvent(pointerEvent('pointermove', { pointerType: 'touch', clientX: 30, clientY: 10 }));
-    vi.advanceTimersByTime(1000);
 
-    expect(onOpenBar).not.toHaveBeenCalled();
-
+    // pointerup + the trailing native click follow immediately in a real
+    // gesture (same event tick) — dispatch them right away, matching that,
+    // rather than after an artificial delay that would outlive the
+    // suppress-click guard window (review fix LOW#9, DEFAULT_SUPPRESS_CLICK_GUARD_MS=300ms).
     button.dispatchEvent(pointerEvent('pointerup', { pointerType: 'touch', clientX: 30, clientY: 10 }));
     button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(onToggle).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1000);
+    expect(onOpenBar).not.toHaveBeenCalled();
   });
 
   it('movement_under_10px_does_not_cancel_the_touch_hold', () => {
@@ -279,5 +283,139 @@ describe('ReactionTrigger', () => {
 
     button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  // ── onOpenBar source (review fix CRITICAL#2, 2026-07-14): the caller
+  // needs to know WHICH path opened the bar to decide whether to move
+  // focus — a passive mouse hover must not steal focus from wherever the
+  // user was (e.g. the composer), while a deliberate hold/ArrowUp should
+  // still focus the bar for usability/a11y. ──────────────────────────────
+
+  it('touch_hold_reports_source_hold', () => {
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
+    vi.advanceTimersByTime(400);
+
+    expect(onOpenBar).toHaveBeenCalledWith('hold');
+  });
+
+  it('mouse_hover_reports_source_hover', () => {
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerenter', { pointerType: 'mouse' }));
+    vi.advanceTimersByTime(400);
+
+    expect(onOpenBar).toHaveBeenCalledWith('hover');
+  });
+
+  it('arrowup_reports_source_keyboard', () => {
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+
+    expect(onOpenBar).toHaveBeenCalledWith('keyboard');
+  });
+
+  // ── Hover-intent suppressed while an input/textarea is focused (review
+  // fix CRITICAL#2) — a user typing in the composer whose pointer happens
+  // to rest on a heart for 400ms must not have the bar pop open under them. ──
+
+  it('hover_intent_does_not_fire_while_an_input_is_focused', () => {
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerenter', { pointerType: 'mouse' }));
+    vi.advanceTimersByTime(400);
+
+    expect(onOpenBar).not.toHaveBeenCalled();
+    input.remove();
+  });
+
+  it('hover_intent_does_not_fire_while_a_textarea_is_focused', () => {
+    const textarea = document.createElement('textarea');
+    document.body.appendChild(textarea);
+    textarea.focus();
+
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerenter', { pointerType: 'mouse' }));
+    vi.advanceTimersByTime(400);
+
+    expect(onOpenBar).not.toHaveBeenCalled();
+    textarea.remove();
+  });
+
+  it('hover_intent_fires_normally_when_no_input_is_focused', () => {
+    // Sanity/falsification: the guard must not swallow every hover.
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerenter', { pointerType: 'mouse' }));
+    vi.advanceTimersByTime(400);
+
+    expect(onOpenBar).toHaveBeenCalledWith('hover');
+  });
+
+  it('touch_hold_still_fires_while_an_input_is_focused', () => {
+    // The focused-input guard is scoped to hover-intent only — a
+    // deliberate touch/pen hold is not an accidental pointer-rest and
+    // must still open the bar.
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
+    vi.advanceTimersByTime(400);
+
+    expect(onOpenBar).toHaveBeenCalledWith('hold');
+    input.remove();
+  });
+
+  // ── #suppressNextClick leak guard (review fix LOW#9, 2026-07-14) ─────────
+  // A completed/cancelled hold sets the suppress flag expecting a trailing
+  // native click to consume it — but if pointerup lands OFF the element
+  // (no click ever fires) or activation happens via some other path, the
+  // flag used to dangle true forever and would wrongly swallow a later,
+  // completely unrelated genuine tap.
+
+  it('a_completed_hold_with_no_trailing_click_does_not_swallow_a_later_genuine_tap', () => {
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
+    vi.advanceTimersByTime(400);
+    expect(onOpenBar).toHaveBeenCalledOnce();
+    // No 'click' dispatched here — simulates pointerup landing off-element,
+    // the real-world case where the browser never fires a trailing click.
+
+    // Let the leak-guard window elapse, then a later, unrelated genuine tap.
+    vi.advanceTimersByTime(1000);
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it('a_movement_cancelled_hold_with_no_trailing_click_does_not_swallow_a_later_genuine_tap', () => {
+    new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
+    vi.advanceTimersByTime(200);
+    button.dispatchEvent(pointerEvent('pointermove', { pointerType: 'touch', clientX: 30, clientY: 10 }));
+    // No 'click' dispatched — simulates the drag ending off-element.
+
+    vi.advanceTimersByTime(1000);
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it('destroy_clears_a_pending_suppress_next_click_guard_timer', () => {
+    // Lifecycle discipline (matches the repo's no-leaked-timers convention):
+    // the guard-window timer itself must be torn down on destroy(), not
+    // just prevented from having an externally-visible effect.
+    const trigger = new ReactionTrigger({ element: button, onToggle, onOpenBar });
+    button.dispatchEvent(pointerEvent('pointerdown', { pointerType: 'touch', clientX: 10, clientY: 10 }));
+    vi.advanceTimersByTime(400);
+    expect(onOpenBar).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    trigger.destroy();
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
