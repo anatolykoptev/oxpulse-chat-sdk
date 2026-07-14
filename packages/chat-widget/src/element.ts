@@ -145,8 +145,8 @@ export class OxpulseChatElement extends HTMLElement {
       applyTheme(this, value);
     }
 
-    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint)
-    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint') {
+    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint, reactions-enabled)
+    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint' || name === 'reactions-enabled') {
       // In-place iframe refresh keeps the jwt attribute (remount source-of-truth) in
       // sync but must NOT remount — refreshToken() applied the token via postMessage.
       if (name === 'jwt' && this.#suppressJwtReboot) return;
@@ -550,6 +550,14 @@ export class OxpulseChatElement extends HTMLElement {
           : new SDKChatClient({ ...writeClientOpts, compression: 'none', cryptoMode: 'plaintext' }) as unknown as RawClient;
       }
 
+      // Decision matrix:
+      //   isAnonMode && !writeClient → read-only (composer hidden, capability-based block)
+      //   isAnonMode && writeClient  → named-write JWT available; wire composer to writeClient
+      //   !isAnonMode               → authed path; standard JWT handles sends via sdkClient
+      //                               UNLESS allowWrite + writeClient: use write client instead
+      // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
+      const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
+
       // Adapt the real SDK client to the widget's duck-typed MessageListClient interface.
       // The widget components use stable narrow interfaces defined in their own files;
       // we bridge here rather than changing those interfaces.
@@ -630,15 +638,15 @@ export class OxpulseChatElement extends HTMLElement {
               ? (sdkEv: SDKReactionEvent): void => {
                   // Bridge SDK ReactionEvent → widget ReactionEvent.
                   // SDK: { reaction, userId, op: 'reaction_add'|'reaction_remove' }
-                  // Widget: { emoji, userUid, op: 'add'|'remove', totalCount }
-                  // totalCount is not available from the live SSE event; set to 0
-                  // (MessageList maintains its own count state from getReactions).
+                  // Widget: { emoji, userUid, op: 'add'|'remove', totalCount? }.
+                  // totalCount is not available from the live SSE event; MessageList
+                  // re-fetches getReactions when totalCount is omitted/0 for the
+                  // authoritative aggregate.
                   args.onReaction!({
                     msgId: sdkEv.msgId,
                     emoji: sdkEv.reaction,
                     op: sdkEv.op === 'reaction_add' ? 'add' : 'remove',
                     userUid: sdkEv.userId,
-                    totalCount: 0,
                   });
                 }
               : undefined,
@@ -649,11 +657,13 @@ export class OxpulseChatElement extends HTMLElement {
           sdkClient.getReactions?.(roomId, msgId) ??
           Promise.resolve({ counts: {}, users: {}, truncated: false }),
 
-        sendReaction: (roomId: string, msgId: string, emoji: string) =>
-          sdkClient.sendReaction?.(roomId, msgId, emoji) ?? Promise.resolve(),
+        sendReaction: effectiveSendClient?.sendReaction
+          ? (roomId: string, msgId: string, emoji: string) => effectiveSendClient!.sendReaction!(roomId, msgId, emoji)
+          : undefined,
 
-        removeReaction: (roomId: string, msgId: string, emoji: string) =>
-          sdkClient.removeReaction?.(roomId, msgId, emoji) ?? Promise.resolve(),
+        removeReaction: effectiveSendClient?.removeReaction
+          ? (roomId: string, msgId: string, emoji: string) => effectiveSendClient!.removeReaction!(roomId, msgId, emoji)
+          : undefined,
 
         // T18: roster — fetch names for OTHER writers via the same JWT.
         getRoster: (roomId: string) => fetchRoster({
@@ -680,14 +690,6 @@ export class OxpulseChatElement extends HTMLElement {
       const listContainer = document.createElement('div');
       listContainer.className = 'oxp-message-list-wrapper';
       widgetRoot.appendChild(listContainer);
-
-      // Decision matrix:
-      //   isAnonMode && !writeClient → read-only (composer hidden, capability-based block)
-      //   isAnonMode && writeClient  → named-write JWT available; wire composer to writeClient
-      //   !isAnonMode               → authed path; standard JWT handles sends via sdkClient
-      //                               UNLESS allowWrite + writeClient: use write client instead
-      // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
-      const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
 
       // Mount the Composer BEFORE MessageList so the message-list scroll container
       // has its final height when MessageList scrolls to the bottom after render.
@@ -758,6 +760,8 @@ export class OxpulseChatElement extends HTMLElement {
         shadowHost: this.#shadow ?? undefined,
         // P5: role-badge label overrides, presentation only.
         roleLabels: config.roleLabels,
+        // Reactions toggle. Default true when omitted.
+        reactionsEnabled: config.reactionsEnabled,
         // W7: only show reply buttons when there is a composer wired to receive them.
         onSetReply: effectiveSendClient
           ? (snapshot) => { this.#composer?.setReplyTarget(snapshot); }
@@ -782,14 +786,21 @@ export class OxpulseChatElement extends HTMLElement {
 
       // CB1/CM1: SubscribeFn for the Reconnector's retry loop.
       // When the SDK's internal reconnect exhausts and fires onError, the Reconnector
-      // calls this fn to re-establish the stream. We route new messages to the existing
-      // MessageList via its public handleMessage() method.
+      // calls this fn to re-establish the stream. We route new messages and reactions
+      // to the existing MessageList via its public handleMessage()/handleReaction() methods.
       const subscribeFn: SubscribeFn = (roomId, onError) => {
         return sdkClient.subscribe(roomId, {
           onMessage: (row) => { this.#messageList?.handleMessage(row); },
           onError,
           onMutation: undefined,
-          onReaction: undefined,
+          onReaction: (sdkEv) => {
+            this.#messageList?.handleReaction({
+              msgId: sdkEv.msgId,
+              emoji: sdkEv.reaction,
+              op: sdkEv.op === 'reaction_add' ? 'add' : 'remove',
+              userUid: sdkEv.userId,
+            });
+          },
         });
       };
       subscribeFnRef = subscribeFn;
@@ -886,6 +897,7 @@ export class OxpulseChatElement extends HTMLElement {
     // → every message, own included, rendered as "other" / left-aligned).
     const selfUid = this.getAttribute('self-uid') ?? selfUidFromJwt(jwt);
     const baseUrl = this.getAttribute('base-url') ?? undefined;
+    const reactionsEnabled = this.getAttribute('reactions-enabled') !== 'false';
 
     return {
       appId,
@@ -899,6 +911,7 @@ export class OxpulseChatElement extends HTMLElement {
       allowAnonRead,
       allowWrite,
       writeMintEndpoint,
+      reactionsEnabled,
       // Merge stored callbacks + test factory overrides
       onTokenExpired: this.#config?.onTokenExpired,
       onError: this.#config?.onError,
@@ -977,6 +990,9 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
   if (config.allowAnonRead) el.setAttribute('allow-anon-read', '');
   if (config.allowWrite) el.setAttribute('allow-write', '');
   if (config.writeMintEndpoint) el.setAttribute('write-mint-endpoint', config.writeMintEndpoint);
+  // reactions-enabled defaults to true; only set the attribute explicitly to keep
+  // the HTML truthful and to trigger re-init on future attribute changes.
+  el.setAttribute('reactions-enabled', config.reactionsEnabled === false ? 'false' : 'true');
 
   // Store callbacks + test factory overrides (not representable as attributes)
   el._setCallbacks({

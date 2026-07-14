@@ -62,7 +62,9 @@ export interface ReactionEvent {
   emoji: string;
   op: 'add' | 'remove';
   userUid: string;
-  totalCount: number;
+  /** Exact post-mutation total count, when provided by the server/event.
+   *  If omitted or zero, MessageList re-fetches getReactions for the source of truth. */
+  totalCount?: number;
 }
 
 /** Reaction data for a single message. */
@@ -140,6 +142,9 @@ export interface MessageListOptions {
    * Provides a snapshot the consumer can feed to Composer.setReplyTarget().
    */
   onSetReply?: (snapshot: ReplySnapshot) => void;
+
+  /** Whether reaction UI is enabled. Default: true. */
+  reactionsEnabled?: boolean;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -382,8 +387,14 @@ export class MessageList {
   #listEl: HTMLElement | null = null;
   /** Reaction state per message — keyed by msgId. */
   #reactions: Map<string, ReactionState> = new Map();
+  /** Whether reaction UI is enabled. */
+  #reactionsEnabled = true;
   /** Active ReactionPicker instance (at most one visible at a time). */
   #picker: ReactionPicker | null = null;
+  /** Reactions fetches currently in flight, keyed by msgId. */
+  #reactionFetchInFlight: Set<string> = new Set();
+  /** Messages whose reaction fetch should be retried when the in-flight one completes. */
+  #reactionFetchPending: Set<string> = new Set();
   /** M6: Per-chip in-flight tracking. Keys are `${msgId}:${emoji}`. */
   #inflight: Set<string> = new Set();
   /** MAJOR-5: Shadow host for picker mount — escapes overflow:hidden widgetRoot. */
@@ -411,6 +422,7 @@ export class MessageList {
     this.#shadowHost = opts.shadowHost;
     this.#roleLabels = opts.roleLabels;
     this.#onSetReply = opts.onSetReply;
+    this.#reactionsEnabled = opts.reactionsEnabled ?? true;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
     const internal = new AbortController();
@@ -454,6 +466,15 @@ export class MessageList {
     this.#handleNewMessage(row);
   }
 
+  /**
+   * Route a live reaction event to the list's internal handler.
+   * Used by the element's reconnect SubscribeFn to keep reactions live
+   * across SSE reconnects.
+   */
+  handleReaction(event: ReactionEvent): void {
+    this.#handleReaction(event);
+  }
+
   /** Tear down: abort in-flight mount(), unsubscribe, clear DOM, close picker. */
   destroy(): void {
     // C1: abort first so mid-flight mount() bails before subscribe
@@ -467,6 +488,8 @@ export class MessageList {
     this.#rows.clear();
     this.#order = [];
     this.#reactions.clear();
+    this.#reactionFetchInFlight.clear();
+    this.#reactionFetchPending.clear();
     this.#inflight.clear();
     this.#roster.clear();
     if (this.#rosterDebounceTimer !== null) {
@@ -583,21 +606,8 @@ export class MessageList {
 
   /** Batch-fetch reactions for all currently visible messages. */
   async #fetchAllReactions(): Promise<void> {
-    if (!this.#client.getReactions) return;
-    const getReactions = this.#client.getReactions.bind(this.#client);
-    const fetches = this.#order.map(async (msgId) => {
-      try {
-        const data = await getReactions(this.#roomId, msgId);
-        if (this.#signal.aborted) return;
-        this.#reactions.set(msgId, { counts: data.counts, users: data.users });
-        this.#updateReactionCluster(msgId);
-      } catch {
-        // Per CLAUDE.md: write-failures must log or bump metric; read failures here are non-critical
-        // but we still note them to avoid silent suppression.
-        console.warn(`[MessageList] Failed to fetch reactions for ${msgId}`);
-      }
-    });
-    await Promise.all(fetches);
+    if (!this.#reactionsEnabled || !this.#client.getReactions || this.#order.length === 0) return;
+    await Promise.all(this.#order.map((msgId) => this.#scheduleReactionRefresh(msgId)));
   }
 
   #handleNewMessage(row: MessageRow): void {
@@ -635,16 +645,8 @@ export class MessageList {
     }
 
     // Fetch reactions for the new message if supported
-    if (this.#client.getReactions) {
-      void this.#client.getReactions(this.#roomId, row.msgId).then((data) => {
-        if (this.#signal.aborted) return;
-        // Fail-soft: the row may have been evicted (see #evictOldMessages) while
-        // this fetch was in flight — writing back here would resurrect a
-        // #reactions entry for a row no longer in #order/#rows.
-        if (!this.#rows.has(row.msgId)) return;
-        this.#reactions.set(row.msgId, { counts: data.counts, users: data.users });
-        this.#updateReactionCluster(row.msgId);
-      }).catch(() => {});
+    if (this.#reactionsEnabled && this.#client.getReactions) {
+      void this.#scheduleReactionRefresh(row.msgId);
     }
 
     if (wasPinned) this.#scrollToBottom();
@@ -715,30 +717,90 @@ export class MessageList {
 
   /** Handle live reaction event from subscribe onReaction callback. */
   #handleReaction(event: ReactionEvent): void {
+    if (!this.#reactionsEnabled) return;
+    if (this.#signal.aborted) return;
+
     const existing = this.#reactions.get(event.msgId) ?? { counts: {}, users: {} };
     const counts = { ...existing.counts };
     const users = { ...existing.users };
 
+    const priorUsers = users[event.emoji] ? [...users[event.emoji]!] : [];
+    const userIndex = priorUsers.indexOf(event.userUid);
+
     if (event.op === 'add') {
-      counts[event.emoji] = event.totalCount;
-      const emojiUsers = users[event.emoji] ? [...users[event.emoji]!] : [];
-      if (!emojiUsers.includes(event.userUid)) {
-        emojiUsers.push(event.userUid);
+      if (userIndex === -1) {
+        priorUsers.push(event.userUid);
       }
-      users[event.emoji] = emojiUsers;
+      if (event.totalCount !== undefined && event.totalCount > 0) {
+        counts[event.emoji] = event.totalCount;
+      } else {
+        const baseCount = counts[event.emoji] ?? priorUsers.length - (userIndex === -1 ? 1 : 0);
+        counts[event.emoji] = baseCount + (userIndex === -1 ? 1 : 0);
+      }
+      users[event.emoji] = priorUsers;
     } else {
       // remove
-      counts[event.emoji] = event.totalCount;
-      if (event.totalCount <= 0) {
-        delete counts[event.emoji];
-        delete users[event.emoji];
+      if (userIndex !== -1) {
+        priorUsers.splice(userIndex, 1);
+      }
+      if (event.totalCount !== undefined && event.totalCount > 0) {
+        counts[event.emoji] = event.totalCount;
+        users[event.emoji] = priorUsers;
       } else {
-        users[event.emoji] = (users[event.emoji] ?? []).filter((u) => u !== event.userUid);
+        const baseCount = counts[event.emoji] ?? (priorUsers.length + (userIndex === -1 ? 0 : 1));
+        const newCount = baseCount > 0 ? baseCount - 1 : 0;
+        if (newCount <= 0) {
+          delete counts[event.emoji];
+          delete users[event.emoji];
+        } else {
+          counts[event.emoji] = newCount;
+          users[event.emoji] = priorUsers;
+        }
       }
     }
 
     this.#reactions.set(event.msgId, { counts, users });
     this.#updateReactionCluster(event.msgId);
+
+    // If the server did not supply a reliable totalCount, re-fetch the authoritative
+    // aggregate from getReactions. The local optimistic update above gives immediate
+    // visual feedback; the refresh corrects truncation/ordering edge cases.
+    if (event.totalCount === undefined || event.totalCount <= 0) {
+      void this.#scheduleReactionRefresh(event.msgId);
+    }
+  }
+
+  /**
+   * Re-fetch the authoritative reaction aggregate for a message, deduping
+   * concurrent requests by msgId. If a reaction event fires while a fetch is
+   * already in flight, the pending set drives a retry once the current fetch
+   * completes so the latest state wins.
+   */
+  #scheduleReactionRefresh(msgId: string): Promise<void> {
+    if (!this.#client.getReactions) return Promise.resolve();
+    if (this.#reactionFetchInFlight.has(msgId)) {
+      this.#reactionFetchPending.add(msgId);
+      return Promise.resolve();
+    }
+    this.#reactionFetchInFlight.add(msgId);
+    return this.#client.getReactions(this.#roomId, msgId)
+      .then((data) => {
+        if (this.#signal.aborted) return;
+        // Fail-soft: the row may have been evicted while this fetch was in flight.
+        if (!this.#rows.has(msgId)) return;
+        this.#reactions.set(msgId, { counts: data.counts, users: data.users });
+        this.#updateReactionCluster(msgId);
+      })
+      .catch((err) => {
+        console.warn(`[MessageList] Failed to refresh reactions for ${msgId}:`, err);
+      })
+      .finally(() => {
+        this.#reactionFetchInFlight.delete(msgId);
+        if (this.#reactionFetchPending.has(msgId)) {
+          this.#reactionFetchPending.delete(msgId);
+          void this.#scheduleReactionRefresh(msgId);
+        }
+      });
   }
 
   /** Update the reaction cluster element for a specific message. */
@@ -1121,16 +1183,20 @@ export class MessageList {
     const footerEl = document.createElement('div');
     footerEl.className = 'oxp-bubble-footer';
 
-    const reactionBtn = document.createElement('button');
-    reactionBtn.className = 'oxp-reaction-add-btn';
-    reactionBtn.type = 'button';
-    reactionBtn.setAttribute('aria-label', t('addReactionAria', this.#lang));
-    reactionBtn.textContent = '+😀';
-    reactionBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.#showPicker(row.msgId, reactionBtn);
-    });
-    footerEl.appendChild(reactionBtn);
+    // Only render the reaction picker trigger when reactions are enabled and
+    // the client has a send path. Otherwise the button is a dead control.
+    if (this.#reactionsEnabled && this.#client.sendReaction) {
+      const reactionBtn = document.createElement('button');
+      reactionBtn.className = 'oxp-reaction-add-btn';
+      reactionBtn.type = 'button';
+      reactionBtn.setAttribute('aria-label', t('addReactionAria', this.#lang));
+      reactionBtn.textContent = '❤️';
+      reactionBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.#showPicker(row.msgId, reactionBtn);
+      });
+      footerEl.appendChild(reactionBtn);
+    }
 
     // W7: reply button — only when the consumer has wired a composer to receive it.
     if (this.#onSetReply) {
@@ -1298,7 +1364,7 @@ export class MessageList {
     this.#unsubscribe = this.#client.subscribe(this.#roomId, {
       onMessage: (row) => this.#handleNewMessage(row),
       onMutation: (event) => this.#handleMutation(event),
-      onReaction: (event) => this.#handleReaction(event),
+      onReaction: this.#reactionsEnabled ? (event) => this.#handleReaction(event) : undefined,
       // T18: roster SSE invalidation signal — re-fetch roster on debounce.
       onRosterSignal: () => this.#scheduleRosterRefresh(),
     });

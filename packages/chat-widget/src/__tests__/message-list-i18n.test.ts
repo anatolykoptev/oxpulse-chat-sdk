@@ -32,6 +32,8 @@ function makeMockClient(rows: MessageRow[]): MessageListClient {
   return {
     list: async () => ({ items: rows, hasNext: false }),
     subscribe: () => () => {},
+    sendReaction: async () => {},
+    removeReaction: async () => {},
   };
 }
 

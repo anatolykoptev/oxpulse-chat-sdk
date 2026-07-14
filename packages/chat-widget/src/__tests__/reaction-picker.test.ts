@@ -24,7 +24,7 @@ describe('ReactionPicker', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     anchor = document.createElement('button');
-    anchor.textContent = '+😀';
+    anchor.textContent = '❤️';
     document.body.appendChild(anchor);
   });
 

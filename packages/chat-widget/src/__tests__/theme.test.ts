@@ -357,7 +357,7 @@ describe('theme foundation', () => {
   });
 
   it('mobile_touch_targets_44px_min', async () => {
-    // M3/M4: chip ≈24px, +😀 ≈22px on mobile — fail Apple HIG 44px.
+    // M3/M4: chip ≈24px, ❤️ ≈22px on mobile — fail Apple HIG 44px.
     // Fix: @media (hover: none) must contain .oxp-reaction-chip { min-height: 44px; }
     const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
     el.setAttribute('app-id', 'app1');
