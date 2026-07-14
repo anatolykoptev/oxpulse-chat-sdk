@@ -417,8 +417,8 @@ export const THEME_CSS = `
 
 .oxp-composer {
   display: flex;
-  flex-direction: row;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--oxp-spacing-unit);
   padding: var(--oxp-spacing-unit);
   border-top: 1px solid var(--oxp-border);
@@ -496,6 +496,7 @@ export const THEME_CSS = `
   align-items: center;
   justify-content: space-between;
   gap: var(--oxp-spacing-unit);
+  align-self: flex-end;
 }
 
 .oxp-composer-counter {
@@ -506,6 +507,58 @@ export const THEME_CSS = `
 
 .oxp-composer-counter[data-over-limit='true'] {
   color: var(--oxp-danger);
+}
+
+/* W7: reply preview bar above the composer input */
+.oxp-composer-reply {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  padding: calc(var(--oxp-spacing-unit) * 0.5) var(--oxp-spacing-unit);
+  border-left: 3px solid var(--oxp-accent);
+  border-radius: calc(var(--oxp-radius) * 0.5);
+  background: color-mix(in srgb, var(--oxp-bubble-other-bg) 60%, transparent);
+  color: var(--oxp-fg);
+}
+
+.oxp-composer-reply-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.oxp-composer-reply-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--oxp-fg-secondary);
+}
+
+.oxp-composer-reply-body {
+  font-size: 0.85rem;
+  color: var(--oxp-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.oxp-composer-reply-cancel {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--oxp-fg-secondary);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.oxp-composer-reply-cancel:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
 }
 
 /* M10: visually-hidden for screen-reader-only text */
@@ -596,6 +649,65 @@ export const THEME_CSS = `
   opacity: 1;
 }
 
+/* W7: reply button on each bubble */
+.oxp-reply-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--oxp-fg-secondary);
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.oxp-bubble:hover .oxp-reply-btn,
+.oxp-bubble:focus-within .oxp-reply-btn {
+  opacity: 1;
+}
+
+.oxp-reply-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+/* W7: reply quote inside a bubble */
+.oxp-bubble-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 4px;
+  padding-left: 8px;
+  background: transparent;
+  border: none;
+  border-left: 3px solid var(--oxp-accent);
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.oxp-bubble-reply:disabled {
+  cursor: default;
+}
+
+.oxp-bubble-reply-sender {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--oxp-fg-secondary);
+}
+
+.oxp-bubble-reply-body {
+  font-size: 0.8rem;
+  color: var(--oxp-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .oxp-reaction-picker {
   position: absolute;
   z-index: 10;
@@ -662,6 +774,8 @@ export const THEME_CSS = `
    * Merged into one declaration to avoid duplicate selector (prior had split opacity + size). */
   .oxp-reaction-add-btn { opacity: 1; min-height: 44px; min-width: 44px; }
   .oxp-reaction-chip { min-height: 44px; }
+  /* W7: reply button visible + 44px touch target on mobile. */
+  .oxp-reply-btn { opacity: 1; min-height: 44px; min-width: 44px; }
   /* DM1: cancel/retry buttons must meet Apple HIG 44px touch target on mobile. */
   .oxp-attachment-cancel,
   .oxp-attachment-retry { min-height: 44px; min-width: 44px; }

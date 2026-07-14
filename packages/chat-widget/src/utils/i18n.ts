@@ -36,6 +36,12 @@ export type LocaleKey =
   | 'reactionsGroupAria'
   | 'chooseReactionAria'
   | 'youReactedSuffix'
+  // Reply
+  | 'replyToMessageAria'
+  | 'replyingToMessageAria'
+  | 'cancelReply'
+  | 'replyToLabel'
+  | 'replyOriginalUnavailable'
   // Composer
   | 'composerPlaceholder'
   | 'messageInputAria'
@@ -99,6 +105,12 @@ const en: LocaleTable = {
   chooseReactionAria: 'Choose reaction',
   youReactedSuffix: ', you reacted',
 
+  replyToMessageAria: 'Reply to message',
+  replyingToMessageAria: 'Replying to message',
+  cancelReply: 'Cancel reply',
+  replyToLabel: 'Reply to {sender}',
+  replyOriginalUnavailable: 'Original message unavailable',
+
   composerPlaceholder: 'Type a message…',
   messageInputAria: 'Message input',
   sendMessageAria: 'Send message',
@@ -157,6 +169,12 @@ const ru: LocaleTable = {
   reactionsGroupAria: 'Реакции',
   chooseReactionAria: 'Выбрать реакцию',
   youReactedSuffix: ', вы отреагировали',
+
+  replyToMessageAria: 'Ответить на сообщение',
+  replyingToMessageAria: 'Ответ на сообщение',
+  cancelReply: 'Отменить ответ',
+  replyToLabel: 'Ответ {sender}',
+  replyOriginalUnavailable: 'Исходное сообщение недоступно',
 
   composerPlaceholder: 'Введите сообщение…',
   messageInputAria: 'Поле ввода сообщения',

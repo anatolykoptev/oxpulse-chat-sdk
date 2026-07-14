@@ -80,7 +80,7 @@ export interface WidgetConfig {
       onMutation?: (event: { msgId: string; op: string; deletedAt?: string; editedAt?: string; [k: string]: unknown }) => void;
       onReaction?: (event: { msgId: string; op: 'reaction_add' | 'reaction_remove'; reaction: string; userId: string; [k: string]: unknown }) => void;
     }): () => void;
-    sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string }): Promise<{ seq?: number; msgId: string }>;
+    sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string }): Promise<{ seq?: number; msgId: string }>;
     getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
     sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
     removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;

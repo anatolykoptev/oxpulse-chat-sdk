@@ -1214,4 +1214,61 @@ describe('MessageList — W9 product card', () => {
 
     ml.destroy();
   });
+
+  it('renders_reply_button_and_fires_onSetReply', async () => {
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, text: 'hello' })];
+    const client = makeMockClient(rows);
+    const onSetReply = vi.fn();
+    const ml = new MessageList({
+      client,
+      roomId: 'r1',
+      container,
+      lang: 'en',
+      selfUid: 'u1',
+      onSetReply,
+    });
+    await ml.mount();
+
+    const replyBtn = container.querySelector('.oxp-reply-btn') as HTMLButtonElement | null;
+    expect(replyBtn).not.toBeNull();
+    replyBtn!.click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onSetReply).toHaveBeenCalledOnce();
+    const snapshot = onSetReply.mock.calls[0][0];
+    expect(snapshot.msgId).toBe(rows[0].msgId);
+    expect(snapshot.sender).toBe('u2');
+    expect(snapshot.body).toBe('hello');
+
+    ml.destroy();
+  });
+
+  it('does_not_render_reply_button_when_onSetReply_unset', async () => {
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, text: 'hello' })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    expect(container.querySelector('.oxp-reply-btn')).toBeNull();
+
+    ml.destroy();
+  });
+
+  it('renders_reply_quote_for_threadRootMsgId', async () => {
+    const root = makeRow({ senderUid: 'u2', seq: 1, text: 'original' });
+    const reply = makeRow({ senderUid: 'u1', seq: 2, text: 'response', threadRootMsgId: root.msgId });
+    const client = makeMockClient([root, reply]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubbles = container.querySelectorAll('[role="article"]');
+    expect(bubbles.length).toBe(2);
+    const replyBubble = bubbles[1] as HTMLElement;
+    const quote = replyBubble.querySelector('.oxp-bubble-reply') as HTMLElement | null;
+    expect(quote).not.toBeNull();
+    expect(quote!.textContent).toContain('u2');
+    expect(quote!.textContent).toContain('original');
+
+    ml.destroy();
+  });
 });
