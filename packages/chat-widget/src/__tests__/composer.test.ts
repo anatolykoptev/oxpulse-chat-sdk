@@ -508,7 +508,7 @@ describe('Composer', () => {
     const sendBtn = container.querySelector('.oxp-composer-send') as HTMLButtonElement;
     expect(textarea.getAttribute('aria-label')).toBe('Поле ввода сообщения');
     expect(sendBtn.getAttribute('aria-label')).toBe('Отправить сообщение');
-    expect(sendBtn.textContent).toBe('Отправить');
+    expect(sendBtn.querySelector('svg')).not.toBeNull();
 
     composer.destroy();
   });

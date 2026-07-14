@@ -1,5 +1,11 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.6.3
+
+### Patch Changes
+
+- Move the composer send button to the right of the input field and replace the text label with a paper-plane icon. Remove the input focus outline ring, keeping the border-color change as the focus state. The attachment button and character counter remain as row/secondary controls.
+
 ## 0.6.2
 
 ### Patch Changes

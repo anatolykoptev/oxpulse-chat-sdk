@@ -228,10 +228,11 @@ describe('theme foundation', () => {
 
     const shadow = el.shadowRoot;
     const css = shadow!.querySelector('style')!.textContent ?? '';
-    // Must have :focus-visible rules for both input and send button
+    // Must have :focus-visible rule for send button. Composer input uses
+    // border-color change on focus instead of an outline ring.
     expect(css).toContain(':focus-visible');
-    expect(css).toMatch(/oxp-composer-input:focus-visible[^}]*outline/s);
     expect(css).toMatch(/oxp-composer-send:focus-visible[^}]*outline/s);
+    expect(css).not.toMatch(/oxp-composer-input:focus-visible[^}]*outline/s);
   });
 
   it('reaction_add_btn_uses_fg_secondary_not_muted', async () => {

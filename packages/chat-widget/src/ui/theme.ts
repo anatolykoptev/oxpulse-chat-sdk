@@ -435,6 +435,13 @@ export const THEME_CSS = `
   position: relative;
 }
 
+.oxp-composer-main {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: var(--oxp-spacing-unit);
+}
+
 .oxp-composer-input {
   flex: 1;
   min-height: 44px;
@@ -463,32 +470,27 @@ export const THEME_CSS = `
   opacity: 1;
 }
 
-/* M6: focus-visible rings — WCAG 2.4.11 */
-.oxp-composer-input:focus-visible {
-  outline: 2px solid var(--oxp-accent);
-  outline-offset: 2px;
-}
-
 .oxp-composer-send:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
 }
 
 .oxp-composer-send {
-  min-width: 44px;
-  min-height: 44px;
-  padding: 0 calc(var(--oxp-spacing-unit) * 1.5);
+  width: 44px;
+  height: 44px;
+  padding: 0;
   background: var(--oxp-accent);
   /* F1: use --oxp-on-accent for WCAG contrast (#000 on both: 5.39:1 light, 5.82:1 dark) */
   color: var(--oxp-on-accent);
   border: none;
-  border-radius: var(--oxp-radius);
+  border-radius: 999px;
   font-family: var(--oxp-font);
-  font-size: 0.9rem;
-  font-weight: 600;
   cursor: pointer;
   box-sizing: border-box;
   flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  align-self: flex-end;
 }
 
 .oxp-composer-send:disabled {
@@ -496,7 +498,7 @@ export const THEME_CSS = `
   cursor: not-allowed;
 }
 
-/* M9: Counter as flex sibling — removes magic 52px hardcode */
+/* M9: Counter row below the input row. */
 .oxp-composer-footer {
   display: flex;
   flex-direction: row;
@@ -504,6 +506,7 @@ export const THEME_CSS = `
   justify-content: space-between;
   gap: var(--oxp-spacing-unit);
   align-self: flex-end;
+  min-height: 0;
 }
 
 .oxp-composer-counter {
