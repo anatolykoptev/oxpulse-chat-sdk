@@ -819,79 +819,11 @@ export class SDKChatClient {
   async list(roomId: string, args: ListArgs = {}): Promise<ListResult> {
     const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, args);
 
-    // Phase 2 + W6 E2EE: dispatch based on active crypto_mode.
-    // - plaintext: base64-decode → UTF-8 string in plaintext field (no unseal).
-    // - sframe-static (or not yet discovered): use CryptoProvider if configured.
-    let items: MessageRow[];
-    if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
-      // Plaintext mode: sealed is raw UTF-8 bytes — just expose as plaintext.
-      items = rawItems.map(aliasSealedAsPlaintext);
-    } else if (this.#cryptoProvider !== null) {
-      // W6 E2EE: post-decrypt rows when crypto provider is configured.
-      // Failed decryptions are PRESERVED with unsealError set (not dropped) so
-      // pagination counts remain accurate and callers can detect potential attacks.
-      //
-      // SEC-CR-14-02: if THIS room has a LIVE subscription, its per-room
-      // #decryptChain owns the SFrame ratchet — unsealing this fetched page
-      // off-chain would run a SECOND unseal on that ratchet while a streamed /
-      // reconnect-replay unseal is still in flight, desyncing the ratchet /
-      // replay window (the class #14 closed on the stream and #15 on reconnect).
-      // Route the unseal through the SAME serial chain so scrollback / pagination
-      // can never run concurrently with the live stream for that room. If the
-      // room has NO live subscription (refCount 0) there is no chain entry —
-      // appending would no-op and DROP every row — AND no streamed unseal can
-      // race, so unseal directly off-chain.
-      //
-      // The refCount check and the on-chain appends run in ONE synchronous burst
-      // (#unsealRowsOnChain appends before its first await), so no subscribe /
-      // teardown interleaves between the check and the dispatch: the whole page
-      // is queued atomically while refCount is still > 0. The common case (a
-      // stable subscription during scrollback) is thus always serialized.
-      //
-      // Two documented residual off-chain windows remain, both requiring
-      // refCount == 0 at dispatch, both strictly rarer than and no-worse than
-      // main (which unseals list() off-chain UNCONDITIONALLY, racing even at
-      // refCount > 0). Neither can be closed by on-chaining a chainless room —
-      // append() no-ops at refCount 0 and would DROP the rows (the footgun #14/#15
-      // scoped around):
-      //   (1) a subscription that APPEARS after a refCount-0 dispatch runs its
-      //       first streamed unseal concurrently with this one-shot fetch;
-      //   (2) a list() issued during release()'s deferred-delete DRAIN window —
-      //       the entry lingers at refCount 0 while a torn-down subscriber's last
-      //       streamed unseal is still draining (see RoomDecryptChain.release) —
-      //       runs off-chain concurrently with that draining unseal.
-      //
-      // Timeout ASYMMETRY (by design, same list() call, different failure
-      // semantics by subscription state): the on-chain path (refCount > 0)
-      // inherits #appendDecryptTask's abort-deadline + force-drain bound — a stuck
-      // row is aborted at the deadline and, if it still hasn't settled, bailed as an
-      // unsealError at deadline+grace so the chain drains (bounded) — whereas the
-      // off-chain path (refCount 0) awaits provider.unseal with NO bound and hangs the
-      // fetch indefinitely on a stuck row (unchanged from before this fix). See the
-      // changeset for the caller-facing note.
-      if (this.#decryptChain.refCountOf(roomId) > 0) {
-        items = await this.#unsealRowsOnChain(roomId, rawItems);
-      } else {
-        const provider = this.#cryptoProvider;
-        const decrypted: MessageRow[] = [];
-        for (const row of rawItems) {
-          const ctx: SealContext = { roomId, senderUid: row.senderUid };
-          try {
-            const plaintext = await provider.unseal(row.sealed, ctx);
-            decrypted.push({ ...row, plaintext });
-          } catch (err) {
-            // Preserve the row with unsealError — do NOT drop it (M2 fix).
-            // Dropped rows break pagination (caller sees fewer items than server sent)
-            // and mask attacks (tampered/replayed rows vanish silently).
-            console.warn('[chat-sdk] list(): unseal failed for seq', row.seq, err);
-            decrypted.push({ ...row, unsealError: classifyUnsealError(err) });
-          }
-        }
-        items = decrypted;
-      }
-    } else {
-      items = rawItems;
-    }
+    // Phase 2 + W6 E2EE + W7/W9 (pr-review-council MED-3): dispatch through the
+    // shared helper so list() resolves plaintext/E2EE/on-chain-vs-off-chain
+    // identically to getThread() and searchByProductRef() — see
+    // #unsealFetchedRows for the plaintext/E2EE/decrypt-chain rationale.
+    const items = await this.#unsealFetchedRows(roomId, rawItems);
 
     const result: ListResult = { items, hasNext: hasMore };
     if (hasMore && nextCursor != null) {
@@ -1359,7 +1291,17 @@ export class SDKChatClient {
               args.onMessage(row);
             }
           }
-          if (!hasMore || nextCursor == null) break;
+          if (!hasMore) break;
+          // Server is UNTRUSTED (E2EE threat model): a has_more=true page whose
+          // next_cursor does not strictly advance past the current cursor would
+          // spin this loop forever re-fetching the same page. Mirrors #fetchRows'
+          // has_more/next_cursor==null guard above (~line 805) in convention.
+          if (nextCursor == null || nextCursor <= cursor) {
+            throw new SDKChatError(
+              'server_error',
+              'replay: non-monotonic pagination cursor from server',
+            );
+          }
           cursor = nextCursor;
         }
       } catch (err) {
@@ -1934,11 +1876,17 @@ export class SDKChatClient {
   /**
    * W7 + W9: unseal/decrypt a list of fetched rows, preserving the same
    * plaintext / E2EE / poison semantics as list() and subscribe().
-   * Used by list(), getThread() and searchByProductRef().
+   * Used by list(), getThread() and searchByProductRef() — all three now
+   * dispatch through this single implementation (pr-review-council MED-3:
+   * list() previously kept a divergent inline copy that skipped the
+   * #cryptoMode fallback below).
    */
   async #unsealFetchedRows(roomId: string, rawItems: MessageRow[]): Promise<MessageRow[]> {
     // Prefer the per-room discovered mode, then the configured expectation.
-    // This matches the fallback used by send() / sendText() (#effectiveMode).
+    // This matches the fallback used by send() / sendText() (#effectiveMode) —
+    // a room whose crypto_mode has not yet been discovered (server omitted the
+    // envelope field) still resolves against the client's own configured intent
+    // instead of silently skipping the plaintext/E2EE dispatch.
     const mode = this.#activeCryptoModeByRoom.get(roomId) ?? this.#cryptoMode;
 
     if (mode === 'plaintext') {
@@ -1947,8 +1895,48 @@ export class SDKChatClient {
     }
 
     if (this.#cryptoProvider !== null) {
+      // W6 E2EE: post-decrypt rows when a crypto provider is configured. Failed
+      // decryptions are PRESERVED with unsealError set (not dropped) so
+      // pagination counts remain accurate and callers can detect potential attacks.
+      //
       // SEC-CR-14-02: if THIS room has a LIVE subscription, its per-room
-      // #decryptChain owns the SFrame ratchet — route through the SAME serial chain.
+      // #decryptChain owns the SFrame ratchet — unsealing this fetched page
+      // off-chain would run a SECOND unseal on that ratchet while a streamed /
+      // reconnect-replay unseal is still in flight, desyncing the ratchet /
+      // replay window (the class #14 closed on the stream and #15 on reconnect).
+      // Route the unseal through the SAME serial chain so scrollback / pagination
+      // can never run concurrently with the live stream for that room. If the
+      // room has NO live subscription (refCount 0) there is no chain entry —
+      // appending would no-op and DROP every row — AND no streamed unseal can
+      // race, so unseal directly off-chain.
+      //
+      // The refCount check and the on-chain appends run in ONE synchronous burst
+      // (#unsealRowsOnChain appends before its first await), so no subscribe /
+      // teardown interleaves between the check and the dispatch: the whole page
+      // is queued atomically while refCount is still > 0. The common case (a
+      // stable subscription during scrollback) is thus always serialized.
+      //
+      // Two documented residual off-chain windows remain, both requiring
+      // refCount == 0 at dispatch, both strictly rarer than and no-worse than
+      // main (which unseals list() off-chain UNCONDITIONALLY, racing even at
+      // refCount > 0). Neither can be closed by on-chaining a chainless room —
+      // append() no-ops at refCount 0 and would DROP the rows (the footgun #14/#15
+      // scoped around):
+      //   (1) a subscription that APPEARS after a refCount-0 dispatch runs its
+      //       first streamed unseal concurrently with this one-shot fetch;
+      //   (2) a fetch issued during release()'s deferred-delete DRAIN window —
+      //       the entry lingers at refCount 0 while a torn-down subscriber's last
+      //       streamed unseal is still draining (see RoomDecryptChain.release) —
+      //       runs off-chain concurrently with that draining unseal.
+      //
+      // Timeout ASYMMETRY (by design, same call, different failure semantics by
+      // subscription state): the on-chain path (refCount > 0) inherits
+      // #appendDecryptTask's abort-deadline + force-drain bound — a stuck row is
+      // aborted at the deadline and, if it still hasn't settled, bailed as an
+      // unsealError at deadline+grace so the chain drains (bounded) — whereas the
+      // off-chain path (refCount 0) awaits provider.unseal with NO bound and hangs
+      // the fetch indefinitely on a stuck row. See the changeset for the
+      // caller-facing note.
       if (this.#decryptChain.refCountOf(roomId) > 0) {
         return this.#unsealRowsOnChain(roomId, rawItems);
       }
@@ -1962,6 +1950,9 @@ export class SDKChatClient {
           const plaintext = await provider.unseal(row.sealed, ctx);
           decrypted.push({ ...row, plaintext });
         } catch (err) {
+          // Preserve the row with unsealError — do NOT drop it (M2 fix).
+          // Dropped rows break pagination (caller sees fewer items than server sent)
+          // and mask attacks (tampered/replayed rows vanish silently).
           console.warn('[chat-sdk] unseal failed for seq', row.seq, err);
           decrypted.push({ ...row, unsealError: classifyUnsealError(err) });
         }
