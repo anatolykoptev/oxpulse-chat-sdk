@@ -1,5 +1,16 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.6.1
+
+### Patch Changes
+
+- 38a3c8f: Fix reply preview bar visibility when hidden.
+
+  The `[hidden]` attribute on `.oxp-composer-reply` was being overridden by the
+  class's `display: flex` style, so the empty reply preview was visible even when
+  no reply target was set. Added a shadow-DOM `[hidden] { display: none !important; }`
+  rule so `hidden` always wins over component display styles.
+
 ## 0.6.0
 
 ### Minor Changes
