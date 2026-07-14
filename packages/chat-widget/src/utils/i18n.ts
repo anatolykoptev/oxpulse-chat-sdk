@@ -63,6 +63,8 @@ export type LocaleKey =
   | 'imageAria'
   | 'audioAria'
   | 'fileAria'
+  // Product card (W9)
+  | 'productViewAria'
   // Reconnect banner
   | 'sessionExpired'
   | 'refresh'
@@ -123,6 +125,7 @@ const en: LocaleTable = {
   imageAria: 'Image: {name}, {size}',
   audioAria: 'Audio: {name}, {size}',
   fileAria: 'File: {name}, {size}',
+  productViewAria: 'View product: {title}',
 
   sessionExpired: 'Session expired.',
   refresh: 'Refresh',
@@ -181,6 +184,7 @@ const ru: LocaleTable = {
   imageAria: 'Изображение: {name}, {size}',
   audioAria: 'Аудио: {name}, {size}',
   fileAria: 'Файл: {name}, {size}',
+  productViewAria: 'Открыть товар: {title}',
 
   sessionExpired: 'Сессия истекла.',
   refresh: 'Обновить',

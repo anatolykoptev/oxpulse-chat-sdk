@@ -1053,3 +1053,165 @@ describe('MessageList — DM1 retry aria-label + DM2 retryMount teardown', () =>
     ml.destroy();
   });
 });
+
+// ── W9: Product card rendering ─────────────────────────────────────────────────
+
+describe('MessageList — W9 product card', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    container.style.height = '400px';
+    container.style.overflow = 'auto';
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+  });
+
+  function makeProductMeta() {
+    return {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+  }
+
+  it('renders_product_card_when_productRef_and_productMeta_present', async () => {
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-1',
+        productMeta: makeProductMeta(),
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    const card = bubble!.querySelector('.oxp-bubble-product');
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain('Widget Pro');
+    expect(card!.textContent).toContain('999 USD');
+
+    const link = card!.querySelector('.oxp-product-link') as HTMLAnchorElement | null;
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('https://example.com/p/1');
+
+    ml.destroy();
+  });
+
+  it('does_not_render_product_card_without_productMeta', async () => {
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, productRef: 'sku-1', productMeta: null })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-bubble-product')).toBeNull();
+
+    ml.destroy();
+  });
+
+  it('does_not_render_product_card_for_deleted_messages', async () => {
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-1',
+        productMeta: makeProductMeta(),
+        deletedAt: new Date().toISOString(),
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-bubble-product')).toBeNull();
+    expect(bubble!.textContent).toContain('This message was deleted');
+
+    ml.destroy();
+  });
+
+  it('does_not_render_product_card_for_unsealError_rows', async () => {
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-1',
+        productMeta: makeProductMeta(),
+        plaintext: undefined,
+        text: undefined,
+        unsealError: 'auth',
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-bubble-product')).toBeNull();
+    expect(bubble!.querySelector('.oxp-unseal-error')).not.toBeNull();
+
+    ml.destroy();
+  });
+
+  it('renders_product_card_on_live_message', async () => {
+    const client = makeMockClient([]);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    expect(capturedOnMessage).not.toBeNull();
+    capturedOnMessage!(
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-live',
+        productMeta: makeProductMeta(),
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('.oxp-bubble-product')).not.toBeNull();
+    expect(bubble!.textContent).toContain('Widget Pro');
+
+    ml.destroy();
+  });
+
+  it('omits_product_link_when_productUrl_is_unsafe', async () => {
+    const meta = {
+      title: 'Unsafe',
+      price: '1',
+      currency: 'USD',
+      imageUrl: 'javascript://alert(1)',
+      productUrl: 'javascript://alert(2)',
+    };
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, productRef: 'sku-bad', productMeta: meta })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    const card = bubble!.querySelector('.oxp-bubble-product') as HTMLElement | null;
+    expect(card).not.toBeNull();
+    // Image and link should be stripped for unsafe URLs
+    expect(card!.querySelector('img')).toBeNull();
+    expect(card!.querySelector('.oxp-product-link')).toBeNull();
+    expect(card!.textContent).toContain('Unsafe');
+
+    ml.destroy();
+  });
+});

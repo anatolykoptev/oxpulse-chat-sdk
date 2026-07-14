@@ -776,4 +776,87 @@ describe('Composer', () => {
 
     composer.destroy();
   });
+
+  // ── W9: Product card attachment ─────────────────────────────────────────────
+
+  it('forwards_productRef_and_productMeta_to_sendText', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    composer.setProductCard('sku-1', productMeta);
+    setInputValue(getInput(container), 'check this');
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).toHaveBeenCalledOnce();
+    expect(client.sendText).toHaveBeenCalledWith('r1', 'check this', {
+      productRef: 'sku-1',
+      productMeta,
+    });
+
+    composer.destroy();
+  });
+
+  it('forwards_productRef_and_productMeta_to_sendTextOptimistic_when_e2ee', async () => {
+    const client = makeStubClient({ hasE2ee: true });
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    composer.setProductCard('sku-2', productMeta);
+    setInputValue(getInput(container), 'e2ee product');
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).not.toHaveBeenCalled();
+    const optimistic = (client as ReturnType<typeof makeStubClient> & { sendTextOptimistic: ReturnType<typeof vi.fn> }).sendTextOptimistic;
+    expect(optimistic).toHaveBeenCalledOnce();
+    expect(optimistic).toHaveBeenCalledWith('r1', 'e2ee product', {
+      productRef: 'sku-2',
+      productMeta,
+    });
+
+    composer.destroy();
+  });
+
+  it('clearProductCard_prevents_sending_product_card', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    composer.setProductCard('sku-1', productMeta);
+    composer.clearProductCard();
+    setInputValue(getInput(container), 'plain text');
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).toHaveBeenCalledWith('r1', 'plain text', {});
+
+    composer.destroy();
+  });
 });
+

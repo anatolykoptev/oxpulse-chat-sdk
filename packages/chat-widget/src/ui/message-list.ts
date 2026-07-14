@@ -18,6 +18,7 @@ import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { ReactionPicker } from './reaction-picker.js';
 import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
+import type { ProductMeta } from '../types.js';
 
 // ── Duck-typed SDK interface ──────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ export interface MessageRow {
   editedAt?: string;
   threadRootMsgId: string | null;
   productRef: string | null;
-  productMeta: unknown | null;
+  productMeta: ProductMeta | null;
   text?: string; // pre-decoded convenience field (used in tests)
   /** W2.2 slice 4: attachment metadata for bubble rendering. */
   attachments?: AttachmentMeta[];
@@ -265,6 +266,46 @@ function renderAttachment(att: AttachmentMeta, lang: Locale): HTMLElement {
   link.textContent = `${filename} (${formatSizeKb(att.sizeBytes)})`;
   wrap.appendChild(link);
   return wrap;
+}
+
+/** W9: Render a marketplace product card as a clickable preview. */
+function renderProduct(meta: ProductMeta, lang: Locale): HTMLElement {
+  const safeImage = isSafeAttachmentUrl(meta.imageUrl);
+  const safeUrl = isSafeAttachmentUrl(meta.productUrl);
+
+  const card = document.createElement('div');
+  card.className = 'oxp-bubble-product';
+
+  if (safeImage) {
+    const img = document.createElement('img');
+    img.className = 'oxp-product-image';
+    img.src = meta.imageUrl;
+    img.alt = meta.title;
+    img.setAttribute('loading', 'lazy');
+    card.appendChild(img);
+  }
+
+  const title = document.createElement('div');
+  title.className = 'oxp-product-title';
+  title.textContent = meta.title;
+  card.appendChild(title);
+
+  const price = document.createElement('div');
+  price.className = 'oxp-product-price';
+  price.textContent = `${meta.price} ${meta.currency}`;
+  card.appendChild(price);
+
+  if (safeUrl) {
+    const link = document.createElement('a');
+    link.className = 'oxp-product-link';
+    link.href = meta.productUrl;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = t('productViewAria', lang, { title: meta.title });
+    card.appendChild(link);
+  }
+
+  return card;
 }
 
 /** Decode plaintext bytes to a readable string, falling back to empty. */
@@ -976,6 +1017,13 @@ export class MessageList {
       bodyEl.innerHTML = renderMarkdown(text);
     }
     el.appendChild(bodyEl);
+
+    // W9: Render product card when a productRef + productMeta are present.
+    // review-fix LOW: gate on !deletedAt && !unsealError so product card never
+    // replaces or leaks alongside tombstone / failed-decrypt placeholders.
+    if (!row.deletedAt && !row.unsealError && row.productRef && row.productMeta) {
+      el.appendChild(renderProduct(row.productMeta, this.#lang));
+    }
 
     // W2.2 slice 4: Render attachment bubbles.
     // review-fix LOW#1: gate on !deletedAt && !unsealError — unreachable today

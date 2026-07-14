@@ -15,11 +15,12 @@ import {
   OBSERVED_ATTRIBUTES,
   type MountOptions,
   type WidgetConfig,
+  type ProductMeta,
 } from './types.js';
 import { THEME_CSS, applyTheme } from './ui/theme.js';
 import { MessageList } from './ui/message-list.js';
 import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEvent, ReactionEvent as WidgetReactionEvent } from './ui/message-list.js';
-import { Composer } from './ui/composer.js';
+import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
 import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
@@ -176,6 +177,14 @@ export class OxpulseChatElement extends HTMLElement {
    */
   getLastSeq(): number {
     return this.#messageList?.getLastSeq() ?? 0;
+  }
+
+  /**
+   * W9: Attach a product card to the next outgoing composer message.
+   * Call after the 'oxpulse-chat:ready' event when the composer is mounted.
+   */
+  setProductCard(productRef: string, productMeta: ProductMeta): void {
+    this.#composer?.setProductCard(productRef, productMeta);
   }
 
   /**
@@ -404,7 +413,7 @@ export class OxpulseChatElement extends HTMLElement {
           onMutation?: (event: SDKMutationEvent) => void;
           onReaction?: (event: SDKReactionEvent) => void;
         }): () => void;
-        sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string }): Promise<{ seq?: number; msgId: string }>;
+        sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
@@ -741,8 +750,8 @@ export class OxpulseChatElement extends HTMLElement {
         const isNamedWritePath = writeClient !== null && capturedSendClient === writeClient;
         const self = this;
         const composerClient = {
-          sendText: (roomId: string, text: string, _args?: unknown): Promise<{ msgId: string }> =>
-            capturedSendClient.sendText(roomId, { senderUid: resolvedSelfUid ?? '', text }).then((res) => {
+          sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> =>
+            capturedSendClient.sendText(roomId, { senderUid: resolvedSelfUid ?? '', text, ...args }).then((res) => {
               // Dispatch message-sent event on success
               self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                 bubbles: true,

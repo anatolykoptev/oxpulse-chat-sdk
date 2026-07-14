@@ -982,6 +982,53 @@ export const THEME_CSS = `
   /* DM1: touch targets ≥44px on mobile */
   .oxp-reconnect-btn { min-height: 44px; }
 }
+
+/* W9: product card inside message bubble */
+.oxp-bubble-product {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  margin-top: calc(var(--oxp-spacing-unit) * 0.5);
+  padding: var(--oxp-spacing-unit);
+  border: 1px solid var(--oxp-border);
+  border-radius: var(--oxp-radius);
+  background: var(--oxp-bg);
+  color: var(--oxp-fg);
+  max-width: 300px;
+  font-family: var(--oxp-font);
+}
+
+.oxp-product-image {
+  width: 100%;
+  height: auto;
+  max-height: 200px;
+  object-fit: contain;
+  border-radius: calc(var(--oxp-radius) * 0.5);
+}
+
+.oxp-product-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.3;
+}
+
+.oxp-product-price {
+  font-size: 0.9rem;
+  color: var(--oxp-muted);
+}
+
+.oxp-product-link {
+  font-size: 0.85rem;
+  color: var(--oxp-link);
+  text-decoration: underline;
+  align-self: flex-start;
+}
+
+.oxp-product-link:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 `;
 
 /** Resolve theme attribute → 'light' | 'dark' | 'auto'. */

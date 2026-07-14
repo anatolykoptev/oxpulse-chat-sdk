@@ -9,19 +9,26 @@
 import { shouldShowCounter, isCmdEnter, MAX_BODY_CHARS, autogrowHeightPx } from '../utils/textfield-helpers.js';
 import { AttachmentPicker } from './attachment-picker.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
+import type { ProductMeta } from '../types.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
+/** Optional args forwarded to the SDK sendText call. */
+export interface SendTextArgs {
+  productRef?: string;
+  productMeta?: ProductMeta;
+}
+
 /** Minimal SDK client surface required by Composer. */
 interface ComposerClient {
-  sendText(roomId: string, text: string, args?: unknown): Promise<{ msgId: string }>;
-  sendTextOptimistic?(roomId: string, text: string, args?: unknown): Promise<{ msgId: string }>;
+  sendText(roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }>;
+  sendTextOptimistic?(roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }>;
   e2ee?: unknown;
   /** W2.2 slice 4: optional — enables attachment support. */
   sendFile?(
     roomId: string,
     blob: Blob,
-    args: { senderUid?: string; sha256?: string; mimeType?: string },
+    args: { senderUid?: string; sha256?: string; mimeType?: string; signal?: AbortSignal },
   ): Promise<{ msgId: string; attachmentId: string }>;
 }
 
@@ -64,6 +71,9 @@ export class Composer {
   #initialText = '';
   /** W2.2 slice 4: attachment picker — present when client supports sendFile. */
   #attachmentPicker: AttachmentPicker | null = null;
+  /** W9: optional product card to attach to the next outgoing text message. */
+  #productRef: string | null = null;
+  #productMeta: ProductMeta | null = null;
 
   constructor(opts: ComposerOptions) {
     this.#container = opts.container;
@@ -83,6 +93,22 @@ export class Composer {
    */
   setInitialText(text: string): void {
     this.#initialText = text;
+  }
+
+  /**
+   * W9: Attach a product card to the next outgoing text message.
+   * The product ref and metadata are forwarded to sendText/sendTextOptimistic
+   * and are cleared once the message is sent.
+   */
+  setProductCard(productRef: string, productMeta: ProductMeta): void {
+    this.#productRef = productRef;
+    this.#productMeta = productMeta;
+  }
+
+  /** Clear a previously set product card without sending. */
+  clearProductCard(): void {
+    this.#productRef = null;
+    this.#productMeta = null;
   }
 
   mount(): void {
@@ -358,10 +384,16 @@ export class Composer {
         typeof this.#client.sendTextOptimistic === 'function' &&
         Boolean(this.#client.e2ee);
 
+      const sendArgs: SendTextArgs = {};
+      if (this.#productRef && this.#productMeta) {
+        sendArgs.productRef = this.#productRef;
+        sendArgs.productMeta = this.#productMeta;
+      }
+
       if (useOptimistic) {
-        await this.#client.sendTextOptimistic!(this.#roomId, text, {});
+        await this.#client.sendTextOptimistic!(this.#roomId, text, sendArgs);
       } else {
-        await this.#client.sendText(this.#roomId, text, {});
+        await this.#client.sendText(this.#roomId, text, sendArgs);
       }
 
       // 1E: Clear only if not destroyed during the send.
@@ -371,6 +403,8 @@ export class Composer {
         this.#textarea.disabled = false;
         this.#textarea.value = '';
         this.#lastText = '';
+        this.#productRef = null;
+        this.#productMeta = null;
         this.#updateState();
       }
     } catch (err) {
