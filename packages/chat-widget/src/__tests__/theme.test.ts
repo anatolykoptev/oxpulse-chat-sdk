@@ -1142,4 +1142,17 @@ describe('theme foundation', () => {
   it('hidden_attribute_overrides_display_styles', () => {
     expect(THEME_CSS).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/);
   });
+
+  it('reply_body_selectors_use_fg_secondary_not_muted', () => {
+    // review pr-review-council 2026-07-14 (sdk-devin-batch): WCAG 1.4.3 contrast
+    // failure on reply-body text. --oxp-muted fails at small sizes on bubble
+    // backgrounds (documented :369-373/:636-638). Sibling selectors
+    // (.oxp-composer-reply-label, .oxp-bubble-reply-sender) already use
+    // --oxp-fg-secondary; these two -body selectors missed it.
+    // Light ≈4.2:1; dark ≈2.95:1 (both below the 4.5:1 AA floor).
+    expect(THEME_CSS).toMatch(/\.oxp-composer-reply-body[^}]*var\(--oxp-fg-secondary\)/s);
+    expect(THEME_CSS).not.toMatch(/\.oxp-composer-reply-body[^}]*var\(--oxp-muted\)/s);
+    expect(THEME_CSS).toMatch(/\.oxp-bubble-reply-body[^}]*var\(--oxp-fg-secondary\)/s);
+    expect(THEME_CSS).not.toMatch(/\.oxp-bubble-reply-body[^}]*var\(--oxp-muted\)/s);
+  });
 });

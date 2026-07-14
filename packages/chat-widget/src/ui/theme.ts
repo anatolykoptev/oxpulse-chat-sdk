@@ -549,7 +549,10 @@ export const THEME_CSS = `
 
 .oxp-composer-reply-body {
   font-size: 0.85rem;
-  color: var(--oxp-muted);
+  /* review pr-review-council 2026-07-14: --oxp-muted fails WCAG 1.4.3 here
+   * (light ≈4.2:1, dark ≈2.95:1, both below the 4.5:1 floor). Sibling
+   * .oxp-composer-reply-label already uses --oxp-fg-secondary. */
+  color: var(--oxp-fg-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -712,7 +715,10 @@ export const THEME_CSS = `
 
 .oxp-bubble-reply-body {
   font-size: 0.8rem;
-  color: var(--oxp-muted);
+  /* review pr-review-council 2026-07-14: --oxp-muted fails WCAG 1.4.3 here
+   * (light ≈4.2:1, dark ≈2.95:1, both below the 4.5:1 floor). Sibling
+   * .oxp-bubble-reply-sender already uses --oxp-fg-secondary. */
+  color: var(--oxp-fg-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
