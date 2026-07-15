@@ -1101,6 +1101,21 @@ export const THEME_CSS = `
   flex-shrink: 0;
 }
 
+/* Review fix (CRITICAL, PR #88): cancelBtn used to set min-width/min-height
+ * INLINE, which — being higher specificity than any class rule, including
+ * the 44px touch-target rule above — pegged the ✕ at 20x20 on every device,
+ * below the WCAG 2.5.8 AA 24x24 floor. The desktop floor now lives here
+ * (touch already gets 44px from the shared rule above). Sized+centered
+ * separately from .oxp-attachment-retry (a text pill, not an icon button). */
+.oxp-attachment-cancel {
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
 .oxp-attachment-cancel:hover,
 .oxp-attachment-retry:hover { background: var(--oxp-border); }
 
@@ -1163,6 +1178,9 @@ export const THEME_CSS = `
   min-width: 0;
   overflow: hidden;
   display: flex;
+  /* Review fix (MEDIUM, PR #88): spec §B calls for "radius var per tile" —
+   * only the outer .oxp-attachment-collage container had one. */
+  border-radius: var(--oxp-radius);
 }
 
 .oxp-attachment-collage-tile img {
@@ -1170,6 +1188,26 @@ export const THEME_CSS = `
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* Review fix (HIGH, PR #88): tile aspect-ratio now lives here (a real,
+ * reactive CSS media query) instead of a one-time JS matchMedia() snapshot
+ * baked into an inline style at row-build time in message-list.ts — an
+ * inline value can't react to the widget iframe/container crossing this
+ * breakpoint after the row already rendered, unlike every other responsive
+ * rule in this file. */
+.oxp-attachment-collage-tile--square {
+  aspect-ratio: 1 / 1;
+}
+
+.oxp-attachment-collage-tile--wide {
+  aspect-ratio: 3 / 2;
+}
+
+@media (max-width: 640px) {
+  .oxp-attachment-collage-tile--wide {
+    aspect-ratio: 1 / 1;
+  }
 }
 
 .oxp-attachment-collage-overlay {

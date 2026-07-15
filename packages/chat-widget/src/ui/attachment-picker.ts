@@ -89,6 +89,12 @@ export class AttachmentPicker {
   /** Pending awaiters for awaitAllUploaded(). */
   #awaiters: Awaiter[] = [];
 
+  /** Review fix (HIGH, PR #88): true while Composer#send is in flight —
+   *  disables every cancel/retry button so a real click can't race the send
+   *  (defense-in-depth; the authoritative guard is Composer re-checking the
+   *  staged list after awaitAllUploaded() resolves). */
+  #sendLocked = false;
+
   /** Optional callback fired whenever the staged list changes. */
   readonly #onChange: (() => void) | undefined;
 
@@ -122,6 +128,12 @@ export class AttachmentPicker {
     // Staging tray (horizontal thumbnail strip in slice 4)
     const queueEl = document.createElement('div');
     queueEl.className = 'oxp-attachment-queue';
+    // Review fix (LOW, PR #88): group semantics + an accessible name — this
+    // is a collection of independently-actionable cards (mirrors the
+    // reactionsGroupAria role="group" convention in message-list.ts), not
+    // decorative or inert.
+    queueEl.setAttribute('role', 'group');
+    queueEl.setAttribute('aria-label', t('attachmentTrayAria', this.#lang));
     queueEl.hidden = true;
 
     // Live region for a11y announcements
@@ -182,6 +194,23 @@ export class AttachmentPicker {
   /** Whether there is at least one staged attachment. */
   hasStaged(): boolean {
     return this.#items.length > 0;
+  }
+
+  /**
+   * Review fix (HIGH, PR #88): disable/enable every cancel + retry button
+   * while Composer#send is in flight. Purely a UI-level defense — Composer
+   * itself re-checks the staged list after awaitAllUploaded() resolves, since
+   * this alone doesn't cover every way the list could still empty out.
+   */
+  setSendLocked(locked: boolean): void {
+    this.#sendLocked = locked;
+    if (!this.#queueEl) return;
+    const buttons = this.#queueEl.querySelectorAll<HTMLButtonElement>(
+      '.oxp-attachment-cancel, .oxp-attachment-retry',
+    );
+    for (const btn of Array.from(buttons)) {
+      btn.disabled = locked;
+    }
   }
 
   /** Revoke every objectURL and clear the staged list. */
@@ -311,11 +340,22 @@ export class AttachmentPicker {
       if (this.#destroyed) return;
       item.status = 'error';
       item.error = err instanceof Error ? err.message : String(err);
-      this.#announce(t('announceUploadFailedFile', this.#lang, { name: item.file.name }));
       this.#dispatchError('upload_failed', item.file.name, item.error);
     }
 
     this.#renderQueue();
+    // Review fix (HIGH, PR #88): announce AFTER renderQueue, not before — the
+    // card's visible error label is ellipsis-clipped at 72px wide (see
+    // renderQueue below) and its only full-text channel used to be
+    // `errEl.title` (hover-only, reaches neither touch nor screen-reader
+    // users). renderQueue's own status-count summary is the last thing to
+    // touch the live region on every OTHER pass, so this must run after it
+    // (not from inside the catch block above) or it gets clobbered immediately.
+    if (item.status === 'error') {
+      this.#announce(
+        `${t('announceUploadFailedFile', this.#lang, { name: item.file.name })}: ${item.error}`,
+      );
+    }
     this.#flushAwaiters();
   }
 
@@ -383,8 +423,11 @@ export class AttachmentPicker {
         card.className = 'oxp-attachment-item';
         card.setAttribute('data-item-id', itemId);
         card.setAttribute('data-file-name', item.file.name);
+        // Review fix (LOW, PR #88): 72px is exactly --oxp-spacing-unit(8px) * 9
+        // — an exact multiple, so derive it from the token instead of a bare
+        // magic number rather than leaving a coincidental match undocumented.
         card.style.cssText =
-          'position:relative;flex:0 0 auto;width:72px;height:72px;overflow:hidden;border-radius:var(--oxp-radius);border:1px solid var(--oxp-border);background:var(--oxp-bg);display:flex;align-items:center;justify-content:center';
+          'position:relative;flex:0 0 auto;width:calc(var(--oxp-spacing-unit) * 9);height:calc(var(--oxp-spacing-unit) * 9);overflow:hidden;border-radius:var(--oxp-radius);border:1px solid var(--oxp-border);background:var(--oxp-bg);display:flex;align-items:center;justify-content:center';
 
         const preview = document.createElement('div');
         preview.className = 'oxp-attachment-preview';
@@ -401,8 +444,14 @@ export class AttachmentPicker {
 
         const errEl = document.createElement('span');
         errEl.className = 'oxp-attachment-error';
+        // Review fix (HIGH, PR #88): a realistic error string (network
+        // messages, server responses) overflows this 72px card — ellipsis it
+        // visually rather than letting it clip mid-character or overlay the
+        // cancel button; the full text still reaches the live region (#upload
+        // catch above) and `.title` (mouse-hover only, kept as a bonus, not
+        // the sole channel).
         errEl.style.cssText =
-          'position:absolute;bottom:4px;left:4px;right:4px;font-size:0.65rem;text-align:center;color:var(--oxp-danger);z-index:1';
+          'position:absolute;bottom:4px;left:4px;right:4px;font-size:0.65rem;text-align:center;color:var(--oxp-danger);z-index:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
         errEl.hidden = true;
         card.appendChild(errEl);
 
@@ -413,6 +462,7 @@ export class AttachmentPicker {
         retryBtn.style.cssText =
           'position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:0.65rem;z-index:1';
         retryBtn.hidden = true;
+        retryBtn.disabled = this.#sendLocked;
         retryBtn.addEventListener('click', () => {
           item.status = 'uploading';
           item.error = undefined;
@@ -430,8 +480,14 @@ export class AttachmentPicker {
         cancelBtn.className = 'oxp-attachment-cancel';
         cancelBtn.setAttribute('aria-label', t('cancelUploadOfAria', this.#lang, { name: safeName }));
         cancelBtn.textContent = '✕';
-        cancelBtn.style.cssText =
-          'position:absolute;top:2px;right:2px;min-width:20px;min-height:20px;padding:0;line-height:1;z-index:1';
+        // Review fix (CRITICAL, PR #88): min-width/min-height/padding used to be
+        // set INLINE here, which outranks .oxp-attachment-cancel's class rules —
+        // including the @media(hover:none),(pointer:coarse) 44px touch-target
+        // rule (theme.ts) added for exactly this file's DM1 requirement. Sizing
+        // now comes entirely from the class so both the >=24px desktop floor and
+        // the 44px touch floor actually apply.
+        cancelBtn.style.cssText = 'position:absolute;top:2px;right:2px;line-height:1;z-index:1';
+        cancelBtn.disabled = this.#sendLocked;
         cancelBtn.addEventListener('click', () => {
           item.abortController.abort();
           this.#revokeItemObjectURL(item);
@@ -445,8 +501,16 @@ export class AttachmentPicker {
         const uploadingOverlay = document.createElement('div');
         uploadingOverlay.className = 'oxp-attachment-uploading-overlay';
         uploadingOverlay.setAttribute('aria-hidden', 'true');
+        // Review fix (MEDIUM, PR #88): this used to pair a THEME-dependent
+        // --oxp-fg (dark in light mode) with a fixed, weak rgba(0,0,0,0.25)
+        // scrim over an ARBITRARY user photo — the photo's own luminance, not
+        // the theme, is what the glyph needs to contrast against, so a
+        // theme-token color guarantees nothing. Reuse this same file's
+        // already-proven scrim (oxp-composer-dragover::after in theme.ts:
+        // rgba(0,0,0,0.70) + fixed white) — theme-independent by design,
+        // sized for arbitrary underlying content.
         uploadingOverlay.style.cssText =
-          'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.25);color:var(--oxp-fg);font-size:1.2rem;z-index:2';
+          'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.70);color:#ffffff;font-size:1.2rem;z-index:2';
         uploadingOverlay.textContent = '⏳';
         uploadingOverlay.hidden = true;
         card.appendChild(uploadingOverlay);
@@ -473,18 +537,7 @@ export class AttachmentPicker {
             img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block';
             preview.appendChild(img);
           } else {
-            const icon = document.createElement('div');
-            icon.textContent = '📎';
-            icon.style.cssText = 'font-size:1.5rem;text-align:center';
-            preview.appendChild(icon);
-            const name = document.createElement('span');
-            name.className = 'oxp-attachment-name';
-            name.textContent = safeName;
-            name.style.cssText =
-              'font-size:0.65rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;padding:0 2px';
-            preview.appendChild(name);
-            preview.style.flexDirection = 'column';
-            preview.style.gap = '2px';
+            this.#renderNonImagePreview(preview, safeName);
           }
         } else if (item.status === 'error') {
           preview.innerHTML = '';
@@ -503,18 +556,7 @@ export class AttachmentPicker {
             img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;opacity:0.6';
             preview.appendChild(img);
           } else {
-            const icon = document.createElement('div');
-            icon.textContent = '📎';
-            icon.style.cssText = 'font-size:1.5rem;text-align:center';
-            preview.appendChild(icon);
-            const name = document.createElement('span');
-            name.className = 'oxp-attachment-name';
-            name.textContent = safeName;
-            name.style.cssText =
-              'font-size:0.65rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;padding:0 2px';
-            preview.appendChild(name);
-            preview.style.flexDirection = 'column';
-            preview.style.gap = '2px';
+            this.#renderNonImagePreview(preview, safeName);
           }
         }
       }
@@ -553,6 +595,27 @@ export class AttachmentPicker {
     }
 
     this.#onChange?.();
+  }
+
+  /**
+   * Review fix (MEDIUM, PR #88): the non-image preview (📎 icon + filename)
+   * used to be byte-identical duplicated code in the 'done' and 'uploading'
+   * branches above — only the image branch has a real per-status diff
+   * (opacity:0.6 while uploading), which stays inline at each call site.
+   */
+  #renderNonImagePreview(preview: HTMLElement, safeName: string): void {
+    const icon = document.createElement('div');
+    icon.textContent = '📎';
+    icon.style.cssText = 'font-size:1.5rem;text-align:center';
+    preview.appendChild(icon);
+    const name = document.createElement('span');
+    name.className = 'oxp-attachment-name';
+    name.textContent = safeName;
+    name.style.cssText =
+      'font-size:0.65rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;padding:0 2px';
+    preview.appendChild(name);
+    preview.style.flexDirection = 'column';
+    preview.style.gap = '2px';
   }
 
   #announce(msg: string): void {

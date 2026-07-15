@@ -867,6 +867,75 @@ describe('Composer', () => {
     composer.destroy();
   });
 
+  // ── Review fix (HIGH, PR #88): cancel-during-await empty-send race ─────────
+  //
+  // #send() snapshots hasStaged BEFORE awaiting awaitAllUploaded(). If every
+  // staged item is cancelled while that await is in flight, the staged list
+  // goes to zero and awaitAllUploaded() resolves vacuously ([].every === true)
+  // — without the re-check fix, that used to fall through to
+  // sendAttachmentMessage(text, []), broadcasting a sealed envelope with an
+  // empty attachments array (peers decode/render this as raw JSON text).
+  //
+  // The cancel button is disabled the instant #send() starts (setSendLocked),
+  // so a real user's .click() cannot reach this race anymore (jsdom mirrors
+  // real browsers: a disabled button's .click() no-ops, verified separately).
+  // These tests exercise the underlying JS guard directly via a synthetic
+  // dispatchEvent (bypasses the disabled-button activation gate, the same way
+  // this file already synthesizes paste/drop events that aren't real user
+  // gestures) — the guard must hold even for cancellation paths the UI-level
+  // lock doesn't cover.
+  it('cancelling_every_staged_item_during_send_with_no_caption_sends_nothing', async () => {
+    let resolveUpload!: (v: { attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number } }) => void;
+    const uploadAttachment = vi.fn(
+      () => new Promise((resolve) => { resolveUpload = resolve; }),
+    );
+    const sendAttachmentMessage = vi.fn().mockResolvedValue({ msgId: 'should-not-happen' });
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container); // upload never resolves — item stays 'uploading'
+
+    getSendBtn(container).click(); // enters #send(), awaits awaitAllUploaded()
+    await drain(5);
+
+    const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+    expect(cancelBtn).not.toBeNull();
+    expect(cancelBtn!.disabled).toBe(true); // UI-level defense-in-depth confirmed wired
+    cancelBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await drain(20);
+
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+    expect(client.sendText).not.toHaveBeenCalled();
+    void resolveUpload; // never invoked — the upload was aborted, not completed
+
+    composer.destroy();
+  });
+
+  it('cancelling_every_staged_item_during_send_with_a_caption_falls_back_to_a_plain_text_send', async () => {
+    const uploadAttachment = vi.fn(() => new Promise(() => {})); // never resolves
+    const sendAttachmentMessage = vi.fn().mockResolvedValue({ msgId: 'should-not-happen' });
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container);
+    setInputValue(getInput(container), 'caption survives');
+
+    getSendBtn(container).click();
+    await drain(5);
+
+    const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await drain(20);
+
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+    expect(client.sendText).toHaveBeenCalledWith('r1', 'caption survives', expect.anything());
+
+    composer.destroy();
+  });
+
   // ── 1A: Retry button aria-label (#1251) ──────────────────────────────────────
 
   it('retry_button_has_descriptive_aria_label', async () => {

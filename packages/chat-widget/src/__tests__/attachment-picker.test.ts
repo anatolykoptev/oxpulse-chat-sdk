@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AttachmentPicker } from '../ui/attachment-picker.js';
+import { THEME_CSS } from '../ui/theme.js';
 import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
 
 // ── Stub SDK client ───────────────────────────────────────────────────────────
@@ -180,6 +181,19 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
+  // ── Review fix (LOW, PR #88): tray group semantics ──────────────────────────
+  it('staging_tray_has_group_role_and_an_accessible_name', () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container, lang: 'ru' });
+    picker.mount();
+
+    const tray = container.querySelector('.oxp-attachment-queue');
+    expect(tray?.getAttribute('role')).toBe('group');
+    expect(tray?.getAttribute('aria-label')).toBe('Вложения для отправки');
+
+    picker.destroy();
+  });
+
   // ── Validation ──────────────────────────────────────────────────────────────
 
   it('validates_files_before_upload — over-size file rejected', () => {
@@ -314,6 +328,15 @@ describe('AttachmentPicker', () => {
     expect(argsArg.width).toBeUndefined();
     expect(argsArg.height).toBeUndefined();
 
+    // Review fix (MEDIUM, PR #88): non-image preview (📎 + filename) is
+    // shared between the 'uploading' and 'done' branches via
+    // #renderNonImagePreview — assert the rendered card actually shows it
+    // once uploaded, not just that upload args were correct.
+    const nameEl = container.querySelector('.oxp-attachment-name');
+    expect(nameEl?.textContent).toBe('doc.pdf');
+    const card = container.querySelector('.oxp-attachment-item[data-status="done"]');
+    expect(card?.textContent).toContain('📎');
+
     picker.destroy();
   });
 
@@ -398,6 +421,101 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
+  // ── Review fix (LOW, PR #88): non-image objectURL isn't consumed by the
+  // rendered preview (#renderNonImagePreview never reads item.objectURL —
+  // only the image branch does) but IS still created for every file
+  // regardless of mime type. Confirmed by reading every removal path
+  // (destroy/clearStaged/cancel all call #revokeAllObjectURLs or
+  // #revokeItemObjectURL unconditionally) that this is wasted-but-not-leaked;
+  // these tests make that a regression guard instead of a one-time read.
+  it('non_image_file_objectURL_is_revoked_on_cancel_even_though_the_preview_never_reads_it', async () => {
+    const client = makeStubClient();
+    const createSpy = vi.spyOn(URL, 'createObjectURL');
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    const pdfFile = new File(['%PDF-1.4'], 'doc.pdf', { type: 'application/pdf' });
+    picker.handleFiles([pdfFile]);
+    await drain(15);
+
+    expect(createSpy).toHaveBeenCalledWith(pdfFile);
+    const createdUrl = createSpy.mock.results[0]?.value as string;
+
+    const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn!.click();
+
+    expect(revokeSpy).toHaveBeenCalledWith(createdUrl);
+    expect(picker.hasStaged()).toBe(false);
+
+    picker.destroy();
+  });
+
+  it('non_image_file_objectURL_is_revoked_on_destroy', async () => {
+    const client = makeStubClient();
+    const createSpy = vi.spyOn(URL, 'createObjectURL');
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    const pdfFile = new File(['%PDF-1.4'], 'doc2.pdf', { type: 'application/pdf' });
+    picker.handleFiles([pdfFile]);
+    await drain(15);
+
+    const createdUrl = createSpy.mock.results[0]?.value as string;
+    picker.destroy();
+
+    expect(revokeSpy).toHaveBeenCalledWith(createdUrl);
+  });
+
+  // ── Review fix (CRITICAL, PR #88): computed style, not string-match ─────────
+  //
+  // theme.test.ts's cancel_retry_buttons_44px_on_mobile only string-matches the
+  // CSS source text — it would stay green even while cancelBtn's inline
+  // cssText hardcoded min-width/min-height:20px, because an inline style
+  // always outranks a class rule regardless of what the class rule says. This
+  // test renders the REAL THEME_CSS against a REAL staged cancelBtn and reads
+  // getComputedStyle, which DOES reflect inline-vs-class specificity.
+  //
+  // jsdom does not implement the hover/pointer media features (verified
+  // empirically: a @media(pointer:coarse) block never matches in jsdom), so
+  // the touch 44px floor can't be exercised here — that remains
+  // theme.test.ts's job. What IS fully verifiable in jsdom, and is exactly
+  // what broke: whether the inline style still hardcodes a min-width/
+  // min-height that would defeat ANY class rule, touch or not.
+  it('cancel_button_min_size_comes_from_the_class_not_an_inline_override', async () => {
+    const styleEl = document.createElement('style');
+    styleEl.textContent = THEME_CSS;
+    document.head.appendChild(styleEl);
+
+    try {
+      const client = makeStubClient();
+      const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+      picker.mount();
+      picker.handleFiles([makePngFile('cancel-size.png')]);
+      await drain(15);
+
+      const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+      expect(cancelBtn).not.toBeNull();
+
+      // The bug: an inline min-width/min-height here always wins, so the class
+      // rule (24px desktop, 44px touch) never gets a chance to apply.
+      expect(cancelBtn!.style.minWidth).toBe('');
+      expect(cancelBtn!.style.minHeight).toBe('');
+
+      const computed = getComputedStyle(cancelBtn!);
+      expect(computed.minWidth).toBe('24px');
+      expect(computed.minHeight).toBe('24px');
+
+      picker.destroy();
+    } finally {
+      styleEl.remove();
+    }
+  });
+
   it('clearStaged_revokes_all_remaining_objectURLs', async () => {
     const client = makeStubClient();
     const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
@@ -432,6 +550,33 @@ describe('AttachmentPicker', () => {
     const errEvt = errorEvents.find((e) => e.detail.kind === 'upload_failed');
     expect(errEvt).not.toBeUndefined();
     expect(errEvt!.detail.message).toContain('network error');
+
+    picker.destroy();
+  });
+
+  // ── Review fix (HIGH, PR #88): realistic error text ─────────────────────────
+  it('error_label_is_ellipsis_clipped_and_the_full_message_reaches_the_live_region', async () => {
+    // A realistic error string is much longer than the 72px card can show —
+    // the visible label must be safely clipped (not overflow the card or
+    // overlap the cancel button), and the FULL text must still reach a
+    // non-hover channel (the aria-live region), not just errEl.title.
+    const longError = 'Upload rejected: the storage backend returned HTTP 413 Payload Too Large for this file';
+    const client = makeStubClient({ rejectWith: new Error(longError) });
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('big-error.png')]);
+    await drain(15);
+
+    const errEl = container.querySelector('.oxp-attachment-error') as HTMLElement | null;
+    expect(errEl).not.toBeNull();
+    expect(errEl!.style.overflow).toBe('hidden');
+    expect(errEl!.style.textOverflow).toBe('ellipsis');
+    expect(errEl!.style.whiteSpace).toBe('nowrap');
+
+    const live = container.querySelector('[aria-live="polite"]') as HTMLElement | null;
+    expect(live).not.toBeNull();
+    expect(live!.textContent).toContain(longError);
 
     picker.destroy();
   });
@@ -602,6 +747,28 @@ describe('AttachmentPicker', () => {
     expect(progress!.getAttribute('role')).toBe('progressbar');
     expect(progress!.getAttribute('aria-valuetext')).toBeTruthy();
     expect(progress!.getAttribute('aria-valuenow')).toBeNull();
+
+    picker.destroy();
+  });
+
+  // ── Review fix (MEDIUM, PR #88): uploading overlay contrast ─────────────────
+  it('uploading_overlay_uses_a_theme_independent_scrim_not_a_theme_fg_token', async () => {
+    // The overlay sits on top of an ARBITRARY user photo — a theme token
+    // (dark in light mode) guarantees nothing about contrast against the
+    // photo's own luminance. Must use the same fixed, high-opacity
+    // dark-scrim + white-glyph pairing this file already uses for
+    // .oxp-composer-dragover::after (theme-independent by design).
+    const client = makeStubClient({ delayMs: 5000 });
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+    picker.handleFiles([makePngFile('overlay-contrast.png')]);
+    await drain(5);
+
+    const overlay = container.querySelector('.oxp-attachment-uploading-overlay') as HTMLElement | null;
+    expect(overlay).not.toBeNull();
+    expect(overlay!.style.color).not.toContain('var(');
+    expect(overlay!.style.color).toBe('rgb(255, 255, 255)');
+    expect(overlay!.style.background).toContain('0.7');
 
     picker.destroy();
   });

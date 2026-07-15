@@ -21,8 +21,13 @@ Staged attachment tray + multi-image collage; fixes duplicate paperclip button a
 - `element.ts`'s attachment pipeline is split into `uploadAttachment`
   (presign + PUT only) and `sendAttachmentMessage` (envelope-encode + send),
   so the attachment id is available before the message is sent. The old
-  `sendFile` single-shot adapter is kept as a thin wrapper composing both,
-  for backward compatibility.
+  single-shot `sendFile` composerClient field is **replaced**, not kept as a
+  compat wrapper — its only caller (`AttachmentPicker`) now calls
+  `uploadAttachment` + `sendAttachmentMessage` directly under the
+  stage-then-send model, so a `sendFile` adapter would be unreachable dead
+  code once this ships. This is internal to the widget's own composerClient
+  wiring, not a public export — chat-sdk's own unrelated `sendFile()`
+  convenience wrapper is untouched.
 - **Multi-image collage** (`message-list.ts`): a message whose attachments
   are all images and length > 1 renders as a collage grid instead of
   stacked bubbles — N=2 (two 1:1 columns), N=3 (2fr/1fr with a

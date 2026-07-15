@@ -12,6 +12,7 @@ import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { sanitizeFilename } from '../utils/attachments.js';
+import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -33,12 +34,12 @@ interface ComposerClient {
     roomId: string,
     blob: Blob,
     args: { mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
-  ): Promise<{ attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number } }>;
+  ): Promise<{ attachmentId: string; attachment: EnvelopeAttachment }>;
   /** Stage-then-send split (slice 4): send a message with the given caption + attachment envelope. */
   sendAttachmentMessage?(
     roomId: string,
     body: string,
-    attachments: readonly { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number }[],
+    attachments: readonly EnvelopeAttachment[],
     args?: SendTextArgs,
   ): Promise<{ msgId: string }>;
 }
@@ -446,6 +447,21 @@ export class Composer {
 
   // ── Send ────────────────────────────────────────────────────────────────────
 
+  /** Plain-text send (optimistic when e2ee is configured). Shared by the
+   *  no-attachment path and the every-staged-item-got-cancelled fallback. */
+  async #sendPlainText(text: string, sendArgs: SendTextArgs): Promise<void> {
+    // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path
+    const useOptimistic =
+      typeof this.#client.sendTextOptimistic === 'function' &&
+      Boolean(this.#client.e2ee);
+
+    if (useOptimistic) {
+      await this.#client.sendTextOptimistic!(this.#roomId, text, sendArgs);
+    } else {
+      await this.#client.sendText(this.#roomId, text, sendArgs);
+    }
+  }
+
   async #send(textOverride?: string): Promise<void> {
     if (!this.#textarea || !this.#sendBtn) return;
 
@@ -465,6 +481,12 @@ export class Composer {
     // the browser blocks keyboard input to disabled elements. The user's typed content
     // cannot be lost by clearing a textarea they cannot type into.
     if (this.#textarea) this.#textarea.disabled = true;
+    // Review fix (HIGH, PR #88): defense-in-depth — a real user can no longer
+    // click ✕ mid-send once this is wired (jsdom-verified: a disabled
+    // button's native .click() no-ops the activation, matching real browsers).
+    // The re-check below is the actual guard, since setSendLocked alone
+    // wouldn't cover every way #items could still empty out mid-await.
+    this.#attachmentPicker?.setSendLocked(true);
     // 1G: update hint to "Sending message…" while in-flight
     this.#updateState();
     // Clear any previous error chip
@@ -484,27 +506,34 @@ export class Composer {
         // Await any in-flight uploads; on error awaitAllUploaded rejects and the
         // tray stays visible with the failed item(s) so the user can retry/remove.
         await this.#attachmentPicker!.awaitAllUploaded();
+        // Review fix (HIGH, PR #88): re-read the staged list rather than
+        // trusting the `hasStaged` snapshot taken above — every item can be
+        // removed while this await is in flight, and awaitAllUploaded()
+        // resolves vacuously once the list is empty ([].every(...) === true).
+        // Without this re-check, sendAttachmentMessage(text, []) would
+        // broadcast a sealed envelope with zero attachments, which peers
+        // render as raw JSON text instead of decoding as an attachment message.
         const staged = this.#attachmentPicker!.getStaged();
-        const attachments = staged.map((item) => ({
-          id: item.attachmentId!,
-          mime: item.mime,
-          filename: sanitizeFilename(item.file.name),
-          sizeBytes: item.sizeBytes,
-          width: item.width,
-          height: item.height,
-        }));
-        await this.#client.sendAttachmentMessage!(this.#roomId, text, attachments, sendArgs);
-      } else {
-        // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path
-        const useOptimistic =
-          typeof this.#client.sendTextOptimistic === 'function' &&
-          Boolean(this.#client.e2ee);
-
-        if (useOptimistic) {
-          await this.#client.sendTextOptimistic!(this.#roomId, text, sendArgs);
-        } else {
-          await this.#client.sendText(this.#roomId, text, sendArgs);
+        if (staged.length === 0 && text.length === 0) {
+          return;
         }
+        if (staged.length === 0) {
+          // Every staged attachment was cancelled mid-send but the caption
+          // survives — send it as a plain text message instead of dropping it.
+          await this.#sendPlainText(text, sendArgs);
+        } else {
+          const attachments = staged.map((item) => ({
+            id: item.attachmentId!,
+            mime: item.mime,
+            filename: sanitizeFilename(item.file.name),
+            sizeBytes: item.sizeBytes,
+            width: item.width,
+            height: item.height,
+          }));
+          await this.#client.sendAttachmentMessage!(this.#roomId, text, attachments, sendArgs);
+        }
+      } else {
+        await this.#sendPlainText(text, sendArgs);
       }
 
       // 1E: Clear only if not destroyed during the send.
@@ -545,6 +574,7 @@ export class Composer {
       if (!this.#destroyed && this.#textarea && this.#textarea.disabled) {
         this.#textarea.disabled = false;
       }
+      if (!this.#destroyed) this.#attachmentPicker?.setSendLocked(false);
       if (!this.#destroyed) this.#updateState();
     }
   }

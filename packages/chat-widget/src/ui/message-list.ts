@@ -247,6 +247,46 @@ function allImageAttachments(attachments: AttachmentMeta[]): boolean {
 }
 
 /**
+ * Review fix (MEDIUM, PR #88): shared authenticated + safe image builder for
+ * both the single-attachment path (renderAttachment) and the collage path
+ * (renderAttachmentCollage) — these used to duplicate the isSafeAttachmentUrl
+ * guard + hydrateMediaSrc call + alt/loading/aria-label + click->window.open
+ * wiring independently. Sizing stays caller-specific (each context's own
+ * theme.ts class selector — `.oxp-attachment-image img` vs
+ * `.oxp-attachment-collage-tile img` — already scopes width/height/object-fit,
+ * so callers only need to set layout concerns the CSS class can't express,
+ * e.g. the single-image path's CLS-reservation width/height attributes).
+ * Returns null when the URL fails the safety guard; the caller renders its
+ * own unsafe-placeholder into its own wrapper element.
+ */
+function buildAttachmentImg(
+  att: AttachmentMeta,
+  lang: Locale,
+  hydrate?: (url: string, signal?: AbortSignal) => Promise<Blob>,
+  trackObjectUrl?: (url: string) => void,
+  signal?: AbortSignal,
+): HTMLImageElement | null {
+  if (!isSafeAttachmentUrl(att.url)) return null;
+
+  const img = document.createElement('img');
+  hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal);
+  // CM1: alt is a DOM property — text-safe, no escaping needed
+  img.alt = att.filename;
+  img.setAttribute('loading', 'lazy');
+  // CM1: setAttribute for aria-label (HTML attribute context) — use escapeHtml
+  img.setAttribute(
+    'aria-label',
+    t('imageAria', lang, { name: escapeHtml(att.filename), size: formatSizeKb(att.sizeBytes) }),
+  );
+  img.style.cursor = 'pointer';
+  img.addEventListener('click', () => {
+    // CB1: URL already validated above — safe to use
+    window.open(att.url, '_blank', 'noopener,noreferrer');
+  });
+  return img;
+}
+
+/**
  * Render a grid of image attachments as a collage.
  * Triggered when a message has >1 image attachment.
  * Layouts: N=2 (1x1 side-by-side), N=3 (2x1 hero + two 1x1 tiles),
@@ -274,11 +314,6 @@ function renderAttachmentCollage(
     grid.style.gridTemplateColumns = '1fr 1fr';
   }
 
-  const isMobile =
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(max-width: 640px)').matches;
-
   const tileCount = Math.min(count, 4);
   for (let i = 0; i < tileCount; i++) {
     const att = attachments[i];
@@ -290,32 +325,25 @@ function renderAttachmentCollage(
       // Hero tile spans both rows; no explicit aspect-ratio so it fills the grid.
       tile.style.gridRow = '1 / 3';
     } else {
-      // Mobile forces every tile to square; otherwise N=2 and N=3 side tiles are square, N=4/N>=5 are 3:2.
-      tile.style.aspectRatio = isMobile ? '1 / 1' : (count === 2 || count === 3 ? '1 / 1' : '3 / 2');
+      // Review fix (HIGH, PR #88): ratio comes from a CSS class + the
+      // @media(max-width:640px) rule in theme.ts, not a one-time JS
+      // matchMedia() snapshot baked into an inline style at row-build time —
+      // every other responsive rule in this file is a plain CSS media query,
+      // and an inline value can't react to the widget iframe/container being
+      // resized across the breakpoint after this row already rendered.
+      tile.classList.add(
+        count === 2 || count === 3
+          ? 'oxp-attachment-collage-tile--square'
+          : 'oxp-attachment-collage-tile--wide',
+      );
     }
 
-    if (!isSafeAttachmentUrl(att.url)) {
+    const img = buildAttachmentImg(att, lang, hydrate, trackObjectUrl, signal);
+    if (!img) {
       renderUnsafePlaceholder(att, tile, lang);
       grid.appendChild(tile);
       continue;
     }
-
-    const img = document.createElement('img');
-    hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal);
-    img.alt = att.filename;
-    img.setAttribute('loading', 'lazy');
-    img.setAttribute(
-      'aria-label',
-      t('imageAria', lang, { name: escapeHtml(att.filename), size: formatSizeKb(att.sizeBytes) }),
-    );
-    img.style.width = '100%';
-    img.style.height = '100%';
-    img.style.objectFit = 'cover';
-    img.style.display = 'block';
-    img.style.cursor = 'pointer';
-    img.addEventListener('click', () => {
-      window.open(att.url, '_blank', 'noopener,noreferrer');
-    });
 
     if (count >= 5 && i === 3) {
       img.style.filter = 'blur(4px)';
@@ -354,22 +382,12 @@ function renderAttachment(
     const wrap = document.createElement('div');
     wrap.className = 'oxp-attachment-image';
 
-    // CB1: reject non-safe URL schemes before setting img.src
-    if (!isSafeAttachmentUrl(att.url)) {
+    const img = buildAttachmentImg(att, lang, hydrate, trackObjectUrl, signal);
+    if (!img) {
       renderUnsafePlaceholder(att, wrap, lang);
       return wrap;
     }
 
-    const img = document.createElement('img');
-    hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal);
-    // CM1: alt is a DOM property — text-safe, no escaping needed
-    img.alt = filename;
-    img.setAttribute('loading', 'lazy');
-    // CM1: setAttribute for aria-label (HTML attribute context) — use escapeHtml for safety
-    img.setAttribute(
-      'aria-label',
-      t('imageAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
-    );
     // DM4: set width/height when available to prevent CLS.
     // F4 fix: only set minHeight when dimensions are unknown — otherwise the explicit
     // dimensions already reserve space and an 80px minHeight creates a grey bar overshoot
@@ -382,12 +400,6 @@ function renderAttachment(
       img.style.minHeight = '80px';
       img.style.background = 'var(--oxp-border)';
     }
-    // click-to-open in new tab (lightbox deferred to future slice)
-    img.style.cursor = 'pointer';
-    img.addEventListener('click', () => {
-      // CB1: URL already validated above — safe to use
-      window.open(att.url, '_blank', 'noopener,noreferrer');
-    });
     wrap.appendChild(img);
     return wrap;
   }

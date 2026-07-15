@@ -57,6 +57,7 @@ export type LocaleKey =
   | 'attachFilesAria'
   // Attachment picker
   | 'chooseFilesToAttachAria'
+  | 'attachmentTrayAria'
   | 'cancelUploadOfAria'
   | 'uploadingProgressAria'
   | 'announceUploadingFile'
@@ -127,6 +128,7 @@ const en: LocaleTable = {
   attachFilesAria: 'Attach files',
 
   chooseFilesToAttachAria: 'Choose files to attach',
+  attachmentTrayAria: 'Attachments to send',
   cancelUploadOfAria: 'Cancel upload of {name}',
   uploadingProgressAria: 'Uploading…',
   announceUploadingFile: 'Uploading {name}',
@@ -194,6 +196,7 @@ const ru: LocaleTable = {
   attachFilesAria: 'Прикрепить файлы',
 
   chooseFilesToAttachAria: 'Выбрать файлы для прикрепления',
+  attachmentTrayAria: 'Вложения для отправки',
   cancelUploadOfAria: 'Отменить загрузку {name}',
   uploadingProgressAria: 'Загрузка…',
   announceUploadingFile: 'Загрузка {name}',

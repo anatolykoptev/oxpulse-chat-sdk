@@ -89,7 +89,10 @@ function readBlobAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
 }
 
 /**
- * issue #67: read-side inverse of composerClient.sendFile's envelope encode.
+ * issue #67: read-side inverse of composerClient.sendAttachmentMessage's
+ * envelope encode (composerClient.uploadAttachment + sendAttachmentMessage
+ * below — the old single-shot sendFile field was replaced, not kept, once
+ * AttachmentPicker moved to stage-then-send; see PR #88's changeset).
  *
  * chat-sdk's MessageRow has no attachments field at all (verified: types.ts,
  * client.ts's rowToMessageRow) — a stored attachment blob is structurally
@@ -533,9 +536,10 @@ export class OxpulseChatElement extends HTMLElement {
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         /**
-         * issue #67: optional — enables attachment upload. composerClient.sendFile
-         * (below) drives presignAttachment() + PUT + send() directly rather than
-         * chat-sdk's sendFile() convenience wrapper, because that wrapper discards
+         * issue #67: optional — enables attachment upload. composerClient's
+         * uploadAttachment + sendAttachmentMessage (below) drive
+         * presignAttachment() + PUT + send() directly rather than chat-sdk's
+         * own sendFile() convenience wrapper, because that wrapper discards
          * the presigned attachmentId when it calls send() (attachments.ts:163-167) —
          * see the "attachments (issue #67)" comment block near composerClient below.
          * Feature-detected like sendReaction?/getReactions? above; a real
@@ -842,7 +846,8 @@ export class OxpulseChatElement extends HTMLElement {
         // issue #67: narrow ONCE to a client that can drive the presign/PUT/send
         // attachment flow (send/baseUrl/jwt all present — a real SDKChatClient
         // always has all three together; test mocks opt in explicitly). Typed
-        // here so composerClient.sendFile below needs no per-call-site casts.
+        // here so uploadAttachment/sendAttachmentMessage below need no
+        // per-call-site casts.
         const attachmentClient: (RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string }) | null =
           capturedSendClient.send && capturedSendClient.baseUrl !== undefined && capturedSendClient.jwt !== undefined
             ? (capturedSendClient as RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string })
@@ -851,7 +856,11 @@ export class OxpulseChatElement extends HTMLElement {
         // issue #67: split presign/PUT from send so the attachmentId is available
         // before the message is sent (stage-then-send).
         async function uploadAttachment(
-          roomId: string,
+          // Review fix (LOW, PR #88): unused here — presign/PUT aren't room-scoped
+          // (the catch path below uses the outer config!.roomId instead) — but the
+          // param stays in the signature to satisfy AttachmentPickerClient's
+          // uploadAttachment(roomId, blob, args) interface contract.
+          _roomId: string,
           blob: Blob,
           args: { mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
         ): Promise<{ attachmentId: string; attachment: EnvelopeAttachment }> {
@@ -904,10 +913,17 @@ export class OxpulseChatElement extends HTMLElement {
             const sealed = encodeAttachmentEnvelope(body, attachments);
             let result: { seq: number; msgId: string };
             try {
+              // Review fix (LOW, PR #88): spread caller-supplied args FIRST so
+              // senderUid/sealed — the authoritative identity + payload —
+              // always win, rather than a caller-supplied object being able
+              // to silently override them (defense-in-depth; SendTextArgs
+              // doesn't declare these keys today, but nothing enforces that
+              // at the call site since args flows through a variable, not a
+              // literal TS can excess-property-check).
               result = await attachmentClient!.send(roomId, {
+                ...args,
                 senderUid: resolvedSelfUid ?? '',
                 sealed,
-                ...args,
               });
             } catch (sendErr) {
               const ids = attachments.map((a) => a.id).join(', ');
@@ -937,7 +953,9 @@ export class OxpulseChatElement extends HTMLElement {
 
         const composerClient = {
           sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> =>
-            capturedSendClient.sendText(roomId, { senderUid: resolvedSelfUid ?? '', text, ...args }).then((res) => {
+            // Noted (PR #88 review, same class as sendAttachmentMessage below):
+            // spread args first so senderUid/text can't be silently overridden.
+            capturedSendClient.sendText(roomId, { ...args, senderUid: resolvedSelfUid ?? '', text }).then((res) => {
               // Dispatch message-sent event on success
               self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                 bubbles: true,
