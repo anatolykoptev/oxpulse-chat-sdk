@@ -111,7 +111,11 @@ export function createVoicePlayer(options: VoicePlayerOptions): VoicePlayer {
   } else {
     sourceType = 'load';
     loadPromise = source.load().then((url) => {
-      if (!destroyed) audio.src = url;
+      if (destroyed) {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+        return;
+      }
+      audio.src = url;
     }).catch(() => {
       if (!destroyed) setPhase('error');
     });
@@ -212,8 +216,10 @@ export function createVoicePlayer(options: VoicePlayerOptions): VoicePlayer {
     }
     const targetSec = targetMs / 1000;
     if (Number.isFinite(targetSec)) {
-      audio.currentTime = targetSec;
-      notify();
+      try {
+        audio.currentTime = targetSec;
+        notify();
+      } catch { /* pre-metadata: readyState 0 */ }
     }
   }
 

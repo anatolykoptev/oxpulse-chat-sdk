@@ -126,6 +126,7 @@ export async function createVoiceRecorder(
 
   let resolved = false;
   let cancelFlag = false;
+  let stopping = false;
 
   function stopStream(): void {
     for (const track of stream.getTracks()) {
@@ -177,6 +178,7 @@ export async function createVoiceRecorder(
 
   return {
     stop(): Promise<VoiceRecorderResult> {
+      stopping = true;
       if (!resolved && !cancelFlag && recorder.state !== 'inactive') {
         try {
           recorder.requestData();
@@ -189,7 +191,7 @@ export async function createVoiceRecorder(
     },
 
     cancel(): void {
-      if (resolved || cancelFlag) return;
+      if (resolved || cancelFlag || stopping) return;
       cancelFlag = true;
       clearTimeout(autoStopTimer);
       if (recorder.state !== 'inactive') {

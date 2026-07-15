@@ -260,7 +260,7 @@ describe('createVoicePlayer', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock');
   });
 
-  it('destroyed player ignores pending load resolution', async () => {
+  it('destroyed player revokes pending load resolution', async () => {
     const audio = new MockAudio();
     const load = vi.fn().mockResolvedValue('blob:mock');
     const player = createVoicePlayer({
@@ -272,6 +272,6 @@ describe('createVoicePlayer', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(audio.src).toBe('');
-    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock');
   });
 });

@@ -119,4 +119,34 @@ describe("sampleLiveBars", () => {
     // RMS ≈ ~127/128 → tail clamped to 1.
     expect(bars[3]).toBeCloseTo(1, 2);
   });
+
+  it("computes RMS over the actual filled length, not stale scratch tail", () => {
+    const bars = new Float32Array([0, 0, 0, 0]);
+    // Non-power-of-two, larger than the current analyser fftSize.
+    // Setting fftSize to this value throws, so only 32 bytes are filled.
+    const scratch = new Uint8Array(100);
+    scratch.fill(128); // stale silent bytes
+    const signal = new Uint8Array(32);
+    // 64/192 → ±0.5 deflection, RMS = 0.5, boosted target = 0.9.
+    for (let i = 0; i < signal.length; i++) {
+      signal[i] = i % 2 === 0 ? 64 : 192;
+    }
+    const fakeAnalyser = {
+      _fftSize: 32,
+      get fftSize() {
+        return this._fftSize;
+      },
+      set fftSize(v: number) {
+        if (!Number.isInteger(v) || v < 32 || v > 32768 || (v & (v - 1)) !== 0) {
+          throw new Error("Invalid fftSize");
+        }
+        this._fftSize = v;
+      },
+      getByteTimeDomainData(buf: Uint8Array) {
+        buf.set(signal);
+      },
+    } as unknown as AnalyserNode;
+    sampleLiveBars(fakeAnalyser, bars, scratch, 0.7);
+    expect(bars[3]).toBeCloseTo(0.9, 2);
+  });
 });

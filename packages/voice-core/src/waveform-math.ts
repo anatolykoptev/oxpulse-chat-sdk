@@ -71,14 +71,17 @@ export function sampleLiveBars(
   // Cast: lib.dom typings narrow to Uint8Array<ArrayBuffer> in newer
   // TS releases; the runtime accepts any Uint8Array view.
   analyser.getByteTimeDomainData(scratch as unknown as Uint8Array<ArrayBuffer>);
-  // RMS over the buffer → single envelope sample per frame.
+  // RMS over the actually filled portion of the buffer → single envelope
+  // sample per frame. If fftSize could not be set to scratch.length, only
+  // min(fftSize, scratch.length) bytes are written.
+  const n = Math.min(analyser.fftSize, scratch.length);
   let sumSq = 0;
-  for (let i = 0; i < scratch.length; i++) {
+  for (let i = 0; i < n; i++) {
     const raw = scratch[i] ?? 0;
     const v = (raw - 128) / 128;
     sumSq += v * v;
   }
-  const rms = Math.sqrt(sumSq / scratch.length);
+  const rms = n > 0 ? Math.sqrt(sumSq / n) : 0;
   // Boost a touch — speech RMS sits low.
   const target = Math.min(1, rms * 1.8);
   // Shift left: bars[N-1] is "now".

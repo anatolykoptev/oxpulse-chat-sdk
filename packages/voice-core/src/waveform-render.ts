@@ -58,24 +58,14 @@ export interface WaveformTheme {
   readonly background?: string;
 }
 
-/** Default theme — pulled at render time so theme switches just work
- *  without a re-import. Kept as a function so unit tests can inject.
- *
- *  `inactive` is hand-tuned to ≈ 0.28 alpha against the bubble
- *  surface — Telegram-grade contrast that lets the played gold bars
- *  pop. Don't reuse --paper-faint here: that token is set for body
- *  text WCAG and reads too loud against the brand-primary sweep. */
+/** Default theme — app-neutral. The core package does not read app-
+ *  specific CSS variables; shells pass their own theme built from
+ *  their own tokens (widget: --oxp-accent; web: --brand-primary). */
 export function defaultWaveformTheme(): WaveformTheme {
   return {
-    active: getCssVar('--brand-primary', '#e0a560'),
-    inactive: 'rgba(231,227,214,0.28)',
+    active: 'currentColor',
+    inactive: 'rgba(128,128,128,0.28)',
   };
-}
-
-function getCssVar(name: string, fallback: string): string {
-  if (typeof document === 'undefined') return fallback;
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return v.length > 0 ? v : fallback;
 }
 
 /** Render an array of peaks (or live amplitude bars) into the canvas.
