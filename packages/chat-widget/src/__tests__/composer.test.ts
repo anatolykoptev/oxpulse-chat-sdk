@@ -1164,6 +1164,113 @@ describe('Composer', () => {
     composer.destroy();
   });
 
+  // ── #113: Product card attached chip ────────────────────────────────────────
+
+  it('setProductCard_renders_dismissible_chip_in_composer', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    // Before staging: chip exists but is hidden (mirrors reply-preview pattern).
+    const chipBefore = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chipBefore).not.toBeNull();
+    expect(chipBefore.hidden).toBe(true);
+
+    composer.setProductCard('sku-1', productMeta);
+
+    // After staging: chip visible with the product title.
+    const chip = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chip).not.toBeNull();
+    expect(chip.hidden).toBe(false);
+    expect(chip.textContent).toContain('Widget Pro');
+
+    composer.destroy();
+  });
+
+  it('clearProductCard_hides_the_chip', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    composer.setProductCard('sku-1', productMeta);
+    const chip = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chip.hidden).toBe(false);
+
+    composer.clearProductCard();
+    expect(chip.hidden).toBe(true);
+
+    composer.destroy();
+  });
+
+  it('product_card_chip_dismiss_button_calls_clearProductCard', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    composer.setProductCard('sku-1', productMeta);
+    const chip = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chip.hidden).toBe(false);
+
+    const dismissBtn = chip.querySelector('.oxp-composer-product-chip-cancel') as HTMLButtonElement;
+    expect(dismissBtn).not.toBeNull();
+    dismissBtn.click();
+
+    expect(chip.hidden).toBe(true);
+
+    composer.destroy();
+  });
+
+  it('product_card_chip_cleared_after_successful_send', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    };
+
+    composer.setProductCard('sku-1', productMeta);
+    const chip = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chip.hidden).toBe(false);
+
+    setInputValue(getInput(container), 'buy this');
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).toHaveBeenCalledOnce();
+    expect(chip.hidden).toBe(true);
+
+    composer.destroy();
+  });
+
   it('setReplyTarget_renders_preview_and_send_includes_threadRootMsgId', async () => {
     const client = makeStubClient({});
     const composer = new Composer({ client, roomId: 'r1', container });

@@ -94,6 +94,8 @@ export class Composer {
   #replyTarget: ReplySnapshot | null = null;
   /** W7: reply preview bar container — created in mount(), populated by setReplyTarget(). */
   #replyEl: HTMLDivElement | null = null;
+  /** #113: product-card attached chip container — created in mount(), populated by setProductCard(). */
+  #productCardEl: HTMLDivElement | null = null;
 
   // P0: voice recording
   #main: HTMLElement | null = null;
@@ -170,12 +172,14 @@ export class Composer {
   setProductCard(productRef: string, productMeta: ProductMeta): void {
     this.#productRef = productRef;
     this.#productMeta = productMeta;
+    this.#renderProductCardChip();
   }
 
   /** Clear a previously set product card without sending. */
   clearProductCard(): void {
     this.#productRef = null;
     this.#productMeta = null;
+    this.#renderProductCardChip();
   }
 
   /**
@@ -243,6 +247,28 @@ export class Composer {
     replyEl.appendChild(replyCancel);
 
     this.#replyEl = replyEl;
+
+    // #113: product-card attached chip — hidden until setProductCard() is called.
+    // Mirrors the reply-preview bar pattern (role="status", dismiss × button).
+    const productCardEl = document.createElement('div');
+    productCardEl.className = 'oxp-composer-product-chip';
+    productCardEl.setAttribute('role', 'status');
+    productCardEl.setAttribute('aria-label', t('productCardAttached', this.#lang, { title: '' }));
+    productCardEl.hidden = true;
+
+    const productCardLabel = document.createElement('span');
+    productCardLabel.className = 'oxp-composer-product-chip-label';
+    productCardEl.appendChild(productCardLabel);
+
+    const productCardCancel = document.createElement('button');
+    productCardCancel.type = 'button';
+    productCardCancel.className = 'oxp-composer-product-chip-cancel';
+    productCardCancel.setAttribute('aria-label', t('removeProductCard', this.#lang));
+    productCardCancel.textContent = '×';
+    productCardCancel.addEventListener('click', () => this.clearProductCard());
+    productCardEl.appendChild(productCardCancel);
+
+    this.#productCardEl = productCardEl;
 
     const sendBtn = document.createElement('button');
     sendBtn.className = 'oxp-composer-send';
@@ -407,6 +433,7 @@ export class Composer {
 
     root.appendChild(sendHint);
     root.appendChild(replyEl);
+    root.appendChild(productCardEl);
     root.appendChild(main);
     root.insertBefore(recordingEl, main);
     root.insertBefore(voicePreviewEl, main);
@@ -1012,6 +1039,7 @@ export class Composer {
         this.#lastText = '';
         this.#productRef = null;
         this.#productMeta = null;
+        this.#renderProductCardChip();
         this.#clearReplyTarget();
         this.#clearVoicePreview();
       }
@@ -1184,6 +1212,7 @@ export class Composer {
         this.#lastText = '';
         this.#productRef = null;
         this.#productMeta = null;
+        this.#renderProductCardChip();
         this.#clearReplyTarget();
         this.#attachmentPicker?.clearStaged();
         this.#updateState();
@@ -1279,5 +1308,25 @@ export class Composer {
   #clearReplyTarget(): void {
     this.#replyTarget = null;
     this.#renderReplyTarget();
+  }
+
+  // ── Product card chip (#113) ────────────────────────────────────────────────
+
+  /** Render or clear the product-card attached chip based on #productMeta. */
+  #renderProductCardChip(): void {
+    if (!this.#productCardEl) return;
+    if (!this.#productMeta) {
+      this.#productCardEl.hidden = true;
+      return;
+    }
+    const label = this.#productCardEl.querySelector('.oxp-composer-product-chip-label');
+    if (label) {
+      label.textContent = t('productCardAttached', this.#lang, { title: this.#productMeta.title });
+    }
+    this.#productCardEl.setAttribute(
+      'aria-label',
+      t('productCardAttached', this.#lang, { title: this.#productMeta.title }),
+    );
+    this.#productCardEl.hidden = false;
   }
 }
