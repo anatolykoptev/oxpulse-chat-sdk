@@ -654,11 +654,11 @@ describe('Composer', () => {
     const composer = new Composer({ client, roomId: 'r1', container });
     composer.mount();
 
-    const paperclipButtons = Array.from(container.querySelectorAll('button')).filter(
-      (b) => b.textContent === '📎',
-    );
+    const paperclipButtons = container.querySelectorAll('.oxp-composer-attachment-btn');
     expect(paperclipButtons.length).toBe(1);
-    expect(container.querySelector('.oxp-composer-attachment-btn')).not.toBeNull();
+    // The trigger is an SVG image icon (not the old 📎 emoji text).
+    expect(paperclipButtons[0].querySelector('svg')).not.toBeNull();
+    expect(paperclipButtons[0].textContent).toBe('');
     // The picker's own (removed) trigger class must never appear.
     expect(container.querySelector('.oxp-attachment-btn')).toBeNull();
 
