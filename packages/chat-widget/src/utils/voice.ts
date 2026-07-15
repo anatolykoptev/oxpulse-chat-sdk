@@ -8,7 +8,6 @@
  *   • 60 s hard cap + 4 MB blob validation.
  *   • MediaRecorder timeslice 100 ms.
  *   • requestData() flush before recorder.stop() (Android/WebKit quirk).
- *   • iOS webkitAudioContext fallback.
  */
 
 export const MAX_VOICE_MS = 60_000;
