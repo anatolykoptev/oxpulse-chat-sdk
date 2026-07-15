@@ -56,9 +56,14 @@ export type LocaleKey =
   | 'retrySendingMessageAria'
   | 'attachFilesAria'
   | 'recordVoiceMessageAria'
+  | 'recordVoiceMessageTitle'
   | 'stopRecordingAria'
   | 'cancelRecordingAria'
   | 'recordingLabel'
+  | 'voicePreviewLabel'
+  | 'sendVoiceMessageAria'
+  | 'discardVoiceMessageAria'
+  | 'attachFilesTitle'
   // Attachment picker
   | 'chooseFilesToAttachAria'
   | 'attachmentTrayAria'
@@ -130,10 +135,15 @@ const en: LocaleTable = {
   charactersRemaining: '{remaining} characters remaining',
   retrySendingMessageAria: 'Retry sending message',
   attachFilesAria: 'Attach files',
+  attachFilesTitle: 'Attach file',
   recordVoiceMessageAria: 'Record voice message',
+  recordVoiceMessageTitle: 'Record voice message',
   stopRecordingAria: 'Stop recording',
   cancelRecordingAria: 'Cancel recording',
   recordingLabel: 'Recording {duration}',
+  voicePreviewLabel: 'Voice preview',
+  sendVoiceMessageAria: 'Send voice message',
+  discardVoiceMessageAria: 'Discard voice message',
 
   chooseFilesToAttachAria: 'Choose files to attach',
   attachmentTrayAria: 'Attachments to send',
@@ -202,10 +212,15 @@ const ru: LocaleTable = {
   charactersRemaining: 'Осталось символов: {remaining}',
   retrySendingMessageAria: 'Повторить отправку сообщения',
   attachFilesAria: 'Прикрепить файлы',
+  attachFilesTitle: 'Прикрепить файл',
   recordVoiceMessageAria: 'Записать голосовое',
+  recordVoiceMessageTitle: 'Записать голосовое',
   stopRecordingAria: 'Остановить запись',
   cancelRecordingAria: 'Отменить запись',
   recordingLabel: 'Запись {duration}',
+  voicePreviewLabel: 'Предпросмотр голосового',
+  sendVoiceMessageAria: 'Отправить голосовое',
+  discardVoiceMessageAria: 'Отменить голосовое',
 
   chooseFilesToAttachAria: 'Выбрать файлы для прикрепления',
   attachmentTrayAria: 'Вложения для отправки',

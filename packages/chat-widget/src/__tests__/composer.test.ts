@@ -1274,7 +1274,7 @@ describe('Composer', () => {
     composer.destroy();
   });
 
-  it('record_and_stop_uploads_voice_then_sends_with_durationMs', async () => {
+  it('record_and_stop_opens_voice_preview_no_auto_upload', async () => {
     const blob = new Blob(['voice'], { type: 'audio/mp4' });
     vi.mocked(createVoiceRecorder).mockResolvedValue(
       makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 12_300, blob }) as any,
@@ -1297,6 +1297,57 @@ describe('Composer', () => {
     stopBtn.click();
     await drain(15);
 
+    // Stop finalizes the blob and enters the pre-send preview, not upload.
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+
+    const preview = container.querySelector('.oxp-composer-voice-preview') as HTMLElement;
+    expect(preview).not.toBeNull();
+    expect(preview.hidden).toBe(false);
+
+    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    expect(audio).not.toBeNull();
+    expect(audio.getAttribute('src')).toBeTruthy();
+
+    expect(container.querySelector('.oxp-composer-recording')?.hidden).toBe(true);
+    expect(container.querySelector('.oxp-composer-main')?.hidden).toBe(false);
+
+    composer.destroy();
+  });
+
+  it('preview_send_uploads_voice_and_sends_with_caption_and_durationMs', async () => {
+    const blob = new Blob(['voice'], { type: 'audio/mp4' });
+    vi.mocked(createVoiceRecorder).mockResolvedValue(
+      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 12_300, blob }) as any,
+    );
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
+    stopBtn.click();
+    await drain(15);
+
+    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    const objectURL = audio.getAttribute('src')!;
+
+    const textarea = getInput(container);
+    setInputValue(textarea, 'voice caption');
+
+    const revokeSpy = vi.spyOn(globalThis.URL, 'revokeObjectURL');
+
+    const previewSend = container.querySelector('.oxp-voice-preview-send') as HTMLButtonElement;
+    expect(previewSend).not.toBeNull();
+    expect(previewSend.disabled).toBe(false);
+    previewSend.click();
+    await drain(20);
+
     expect(uploadAttachment).toHaveBeenCalledOnce();
     expect(uploadAttachment).toHaveBeenCalledWith('r1', blob, { mimeType: 'audio/mp4', filename: 'voice.mp4' });
 
@@ -1307,14 +1358,176 @@ describe('Composer', () => {
       readonly { id: string; durationMs?: number }[],
     ];
     expect(roomIdArg).toBe('r1');
-    expect(bodyArg).toBe('');
+    expect(bodyArg).toBe('voice caption');
     expect(attachmentsArg).toHaveLength(1);
     expect(attachmentsArg[0]).toMatchObject({ id: 'att-1', mime: 'image/png', durationMs: 12_300 });
 
-    expect(container.querySelector('.oxp-composer-recording')?.hidden).toBe(true);
-    expect(container.querySelector('.oxp-composer-main')?.hidden).toBe(false);
+    // Success clears textarea, preview, and revokes the object URL.
+    expect(textarea.value).toBe('');
+    expect(container.querySelector('.oxp-composer-voice-preview')?.hidden).toBe(true);
+    expect(revokeSpy).toHaveBeenCalledWith(objectURL);
+
+    revokeSpy.mockRestore();
+    composer.destroy();
+  });
+
+  it('preview_send_works_without_caption', async () => {
+    const blob = new Blob(['voice'], { type: 'audio/mp4' });
+    vi.mocked(createVoiceRecorder).mockResolvedValue(
+      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 5_000, blob }) as any,
+    );
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
+    stopBtn.click();
+    await drain(15);
+
+    const previewSend = container.querySelector('.oxp-voice-preview-send') as HTMLButtonElement;
+    expect(previewSend.disabled).toBe(false);
+    previewSend.click();
+    await drain(20);
+
+    expect(uploadAttachment).toHaveBeenCalledOnce();
+    expect(sendAttachmentMessage).toHaveBeenCalledOnce();
+    const [, bodyArg] = (sendAttachmentMessage as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    expect(bodyArg).toBe('');
 
     composer.destroy();
+  });
+
+  it('preview_discard_revokes_objectURL_and_sends_nothing', async () => {
+    const blob = new Blob(['voice'], { type: 'audio/mp4' });
+    vi.mocked(createVoiceRecorder).mockResolvedValue(
+      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 8_000, blob }) as any,
+    );
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
+    stopBtn.click();
+    await drain(15);
+
+    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    const objectURL = audio.getAttribute('src')!;
+
+    const revokeSpy = vi.spyOn(globalThis.URL, 'revokeObjectURL');
+
+    const previewDiscard = container.querySelector('.oxp-voice-preview-discard') as HTMLButtonElement;
+    expect(previewDiscard).not.toBeNull();
+    previewDiscard.click();
+    await drain(10);
+
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+    expect(container.querySelector('.oxp-composer-voice-preview')?.hidden).toBe(true);
+    expect(revokeSpy).toHaveBeenCalledWith(objectURL);
+
+    revokeSpy.mockRestore();
+    composer.destroy();
+  });
+
+  it('auto_stop_at_60s_enters_preview_not_send', async () => {
+    vi.useFakeTimers();
+    const blob = new Blob(['voice'], { type: 'audio/mp4' });
+    vi.mocked(createVoiceRecorder).mockResolvedValue(
+      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 60_000, blob }) as any,
+    );
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    try {
+      const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+      micBtn.click();
+      // let the async getUserMedia/createVoiceRecorder resolve
+      await vi.advanceTimersByTimeAsync(1);
+
+      // hit the 60 s auto-cap
+      await vi.advanceTimersByTimeAsync(60_000);
+      await drain(10);
+
+      expect(uploadAttachment).not.toHaveBeenCalled();
+      expect(sendAttachmentMessage).not.toHaveBeenCalled();
+
+      const preview = container.querySelector('.oxp-composer-voice-preview') as HTMLElement;
+      expect(preview).not.toBeNull();
+      expect(preview.hidden).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    composer.destroy();
+  });
+
+  it('destroy_during_preview_revokes_objectURL', async () => {
+    const blob = new Blob(['voice'], { type: 'audio/mp4' });
+    vi.mocked(createVoiceRecorder).mockResolvedValue(
+      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 10_000, blob }) as any,
+    );
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
+    stopBtn.click();
+    await drain(15);
+
+    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    const objectURL = audio.getAttribute('src')!;
+
+    const revokeSpy = vi.spyOn(globalThis.URL, 'revokeObjectURL');
+    composer.destroy();
+    await drain(5);
+
+    expect(revokeSpy).toHaveBeenCalledWith(objectURL);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+
+    revokeSpy.mockRestore();
+  });
+
+  it('mic_and_paperclip_title_attrs_in_both_languages', () => {
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
+
+    const composerEn = new Composer({ client, roomId: 'r1', container, lang: 'en' });
+    composerEn.mount();
+    const micBtnEn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    const paperclipEn = container.querySelector('.oxp-composer-attachment-btn') as HTMLButtonElement;
+    expect(micBtnEn.getAttribute('title')).toBe('Record voice message');
+    expect(paperclipEn.getAttribute('title')).toBe('Attach file');
+    composerEn.destroy();
+
+    container.innerHTML = '';
+    const composerRu = new Composer({ client, roomId: 'r1', container, lang: 'ru' });
+    composerRu.mount();
+    const micBtnRu = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    const paperclipRu = container.querySelector('.oxp-composer-attachment-btn') as HTMLButtonElement;
+    expect(micBtnRu.getAttribute('title')).toBe('Записать голосовое');
+    expect(paperclipRu.getAttribute('title')).toBe('Прикрепить файл');
+    composerRu.destroy();
   });
 
   it('cancel_voice_recording_sends_nothing', async () => {

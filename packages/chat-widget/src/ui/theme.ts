@@ -1089,6 +1089,83 @@ export const THEME_CSS = `
   outline-offset: 2px;
 }
 
+/* Voice pre-send preview (P0 follow-up): card above the input row,
+ * reusing attachment-tray/card tokens. */
+.oxp-composer-voice-preview {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--oxp-spacing-unit);
+  padding: var(--oxp-spacing-unit);
+  background: var(--oxp-bg);
+  border: 1px solid var(--oxp-border);
+  border-radius: var(--oxp-radius);
+  flex-wrap: wrap;
+}
+
+.oxp-voice-preview-audio {
+  flex: 1;
+  min-width: 120px;
+  display: block;
+}
+
+.oxp-voice-preview-duration {
+  font-size: 0.75rem;
+  color: var(--oxp-fg-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: right;
+}
+
+.oxp-voice-preview-send {
+  width: 40px;
+  height: 40px;
+  background: var(--oxp-accent);
+  color: var(--oxp-on-accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.oxp-voice-preview-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.oxp-voice-preview-send:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-voice-preview-discard {
+  width: 40px;
+  height: 40px;
+  background: none;
+  border: none;
+  color: var(--oxp-fg-secondary);
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.oxp-voice-preview-discard:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .oxp-voice-preview-send,
+  .oxp-voice-preview-discard { min-width: 44px; min-height: 44px; }
+}
+
 /* Drag-over visual indicator — DM2: color-only outline fails WCAG 1.4.1.
  * Add ::after overlay with text label for non-color signal. */
 .oxp-composer-dragover {

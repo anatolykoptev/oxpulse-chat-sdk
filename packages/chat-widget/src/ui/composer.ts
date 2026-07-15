@@ -104,6 +104,18 @@ export class Composer {
   #recordingAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
   #isRecording = false;
 
+  // P0 follow-up: voice pre-send preview
+  #voicePreviewEl: HTMLElement | null = null;
+  #voicePreviewAudio: HTMLAudioElement | null = null;
+  #voicePreviewSend: HTMLButtonElement | null = null;
+  #voicePreviewDiscard: HTMLButtonElement | null = null;
+  #voicePreviewDurationEl: HTMLElement | null = null;
+  #voicePreviewObjectURL: string | null = null;
+  #voicePreviewBlob: Blob | null = null;
+  #voicePreviewDuration = 0;
+  #voicePreviewMime = '';
+  #voicePreviewFilename = '';
+
   constructor(opts: ComposerOptions) {
     this.#container = opts.container;
     this.#client = opts.client;
@@ -238,6 +250,7 @@ export class Composer {
       attachBtn.type = 'button';
       attachBtn.className = 'oxp-composer-attachment-btn';
       attachBtn.setAttribute('aria-label', t('attachFilesAria', this.#lang));
+      attachBtn.setAttribute('title', t('attachFilesTitle', this.#lang));
       attachBtn.textContent = '📎';
       attachBtn.addEventListener('click', () => {
         this.#attachmentPicker?.openFileDialog();
@@ -252,6 +265,7 @@ export class Composer {
       micBtn.type = 'button';
       micBtn.className = 'oxp-composer-mic-btn';
       micBtn.setAttribute('aria-label', t('recordVoiceMessageAria', this.#lang));
+      micBtn.setAttribute('title', t('recordVoiceMessageTitle', this.#lang));
       micBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
       micBtn.addEventListener('click', this.#onMicClick);
       main.appendChild(micBtn);
@@ -315,10 +329,45 @@ export class Composer {
     recordingEl.appendChild(recordingTimerEl);
     recordingEl.appendChild(recordingControls);
 
+    // P0 follow-up: voice pre-send preview — hidden until recording stops.
+    const voicePreviewEl = document.createElement('div');
+    voicePreviewEl.className = 'oxp-composer-voice-preview';
+    voicePreviewEl.setAttribute('role', 'status');
+    voicePreviewEl.setAttribute('aria-label', t('voicePreviewLabel', this.#lang));
+    voicePreviewEl.hidden = true;
+
+    const voicePreviewAudio = document.createElement('audio');
+    voicePreviewAudio.className = 'oxp-voice-preview-audio';
+    voicePreviewAudio.controls = true;
+    voicePreviewAudio.setAttribute('aria-label', t('voicePreviewLabel', this.#lang));
+
+    const voicePreviewDuration = document.createElement('span');
+    voicePreviewDuration.className = 'oxp-voice-preview-duration';
+
+    const voicePreviewSend = document.createElement('button');
+    voicePreviewSend.type = 'button';
+    voicePreviewSend.className = 'oxp-voice-preview-send';
+    voicePreviewSend.setAttribute('aria-label', t('sendVoiceMessageAria', this.#lang));
+    voicePreviewSend.textContent = t('send', this.#lang);
+    voicePreviewSend.addEventListener('click', () => this.#sendVoicePreview());
+
+    const voicePreviewDiscard = document.createElement('button');
+    voicePreviewDiscard.type = 'button';
+    voicePreviewDiscard.className = 'oxp-voice-preview-discard';
+    voicePreviewDiscard.setAttribute('aria-label', t('discardVoiceMessageAria', this.#lang));
+    voicePreviewDiscard.textContent = '×';
+    voicePreviewDiscard.addEventListener('click', () => this.#discardVoicePreview());
+
+    voicePreviewEl.appendChild(voicePreviewAudio);
+    voicePreviewEl.appendChild(voicePreviewDuration);
+    voicePreviewEl.appendChild(voicePreviewSend);
+    voicePreviewEl.appendChild(voicePreviewDiscard);
+
     root.appendChild(sendHint);
     root.appendChild(replyEl);
     root.appendChild(main);
     root.insertBefore(recordingEl, main);
+    root.insertBefore(voicePreviewEl, main);
     root.appendChild(footer);
     this.#container.appendChild(root);
 
@@ -331,6 +380,11 @@ export class Composer {
     this.#micBtn = micBtn;
     this.#recordingEl = recordingEl;
     this.#recordingTimerEl = recordingTimerEl;
+    this.#voicePreviewEl = voicePreviewEl;
+    this.#voicePreviewAudio = voicePreviewAudio;
+    this.#voicePreviewSend = voicePreviewSend;
+    this.#voicePreviewDiscard = voicePreviewDiscard;
+    this.#voicePreviewDurationEl = voicePreviewDuration;
 
     // Event listeners
     textarea.addEventListener('input', this.#onInput);
@@ -391,6 +445,9 @@ export class Composer {
     this.#voiceRecorder?.cancel();
     this.#voiceRecorder = null;
 
+    // Revoke any dangling voice preview objectURL before the root is removed.
+    this.#clearVoicePreview();
+
     if (this.#textarea) {
       this.#textarea.removeEventListener('input', this.#onInput);
       this.#textarea.removeEventListener('keydown', this.#onKeydown);
@@ -426,6 +483,11 @@ export class Composer {
     this.#micBtn = null;
     this.#recordingEl = null;
     this.#recordingTimerEl = null;
+    this.#voicePreviewEl = null;
+    this.#voicePreviewAudio = null;
+    this.#voicePreviewSend = null;
+    this.#voicePreviewDiscard = null;
+    this.#voicePreviewDurationEl = null;
   }
 
   // ── Private handlers ────────────────────────────────────────────────────────
@@ -518,6 +580,12 @@ export class Composer {
       return;
     }
 
+    // If a previous voice preview is still open, discard it (and revoke its objectURL)
+    // before starting a new recording.
+    if (this.#voicePreviewObjectURL) {
+      this.#clearVoicePreview();
+    }
+
     // Guard mic re-entrancy BEFORE the async getUserMedia call so a second
     // synchronous click cannot acquire a second stream and orphan the first.
     this.#isRecording = true;
@@ -584,32 +652,16 @@ export class Composer {
       return;
     }
 
-    this.#sending = true;
+    // Finalize: enter the pre-send preview state. Upload + send happen only
+    // when the user explicitly clicks the preview Send button.
+    this.#voicePreviewBlob = result.blob;
+    this.#voicePreviewDuration = result.durationMs;
+    this.#voicePreviewMime = result.mime;
+    this.#voicePreviewFilename = sanitizeFilename(this.#voiceFilenameForMime(result.mime));
+    this.#voicePreviewObjectURL = URL.createObjectURL(result.blob);
+
     this.#resetRecordingUI();
-    this.#updateState();
-
-    try {
-      const { attachment } = await this.#client.uploadAttachment!(this.#roomId, result.blob, {
-        mimeType: result.mime,
-        filename: sanitizeFilename(this.#voiceFilenameForMime(result.mime)),
-      });
-      const voiceAttachment = { ...attachment, durationMs: result.durationMs };
-      await this.#client.sendAttachmentMessage!(this.#roomId, '', [voiceAttachment]);
-
-      if (!this.#destroyed) {
-        this.#clearReplyTarget();
-        this.#clearErrorChip();
-        if (this.#textarea) this.#textarea.value = '';
-        this.#lastText = '';
-        this.#productRef = null;
-        this.#productMeta = null;
-      }
-    } catch (err) {
-      this.#handleRecordingError(err);
-    } finally {
-      this.#sending = false;
-      if (!this.#destroyed) this.#updateState();
-    }
+    this.#showVoicePreview();
   }
 
   #cancelRecording(): void {
@@ -665,6 +717,105 @@ export class Composer {
     return mime.includes('mp4') ? 'voice.mp4' : 'voice.webm';
   }
 
+  // P0 follow-up: voice pre-send preview
+
+  #showVoicePreview(): void {
+    if (!this.#voicePreviewEl || !this.#voicePreviewAudio || !this.#voicePreviewDurationEl) return;
+
+    this.#voicePreviewAudio.src = this.#voicePreviewObjectURL ?? '';
+    this.#voicePreviewDurationEl.textContent = formatDuration(this.#voicePreviewDuration);
+    if (this.#voicePreviewSend) {
+      this.#voicePreviewSend.disabled = false;
+    }
+    if (this.#voicePreviewDiscard) {
+      this.#voicePreviewDiscard.disabled = false;
+    }
+    // Keep the reply target out of the way while preview is visible; it will be
+    // restored on discard or cleared on successful send.
+    if (this.#replyEl) this.#replyEl.hidden = true;
+    this.#voicePreviewEl.hidden = false;
+  }
+
+  #clearVoicePreview(): void {
+    if (this.#voicePreviewObjectURL) {
+      URL.revokeObjectURL(this.#voicePreviewObjectURL);
+      this.#voicePreviewObjectURL = null;
+    }
+    this.#voicePreviewBlob = null;
+    this.#voicePreviewDuration = 0;
+    this.#voicePreviewMime = '';
+    this.#voicePreviewFilename = '';
+
+    if (this.#voicePreviewAudio) {
+      this.#voicePreviewAudio.src = '';
+    }
+    if (this.#voicePreviewEl) this.#voicePreviewEl.hidden = true;
+    if (this.#voicePreviewSend) this.#voicePreviewSend.disabled = false;
+    if (this.#voicePreviewDiscard) this.#voicePreviewDiscard.disabled = false;
+
+    if (!this.#destroyed) {
+      this.#updateState();
+      this.#renderReplyTarget();
+    }
+  }
+
+  async #sendVoicePreview(): Promise<void> {
+    if (
+      this.#sending ||
+      !this.#voicePreviewObjectURL ||
+      !this.#voicePreviewBlob ||
+      !this.#client.uploadAttachment ||
+      !this.#client.sendAttachmentMessage
+    ) {
+      return;
+    }
+
+    const caption = this.#textarea?.value.trim() ?? '';
+    if (caption.length > MAX_BODY_CHARS) return;
+
+    this.#lastText = caption;
+    this.#sending = true;
+    if (this.#voicePreviewSend) this.#voicePreviewSend.disabled = true;
+    if (this.#voicePreviewDiscard) this.#voicePreviewDiscard.disabled = true;
+    if (this.#textarea) this.#textarea.disabled = true;
+    this.#clearErrorChip();
+
+    try {
+      const { attachment } = await this.#client.uploadAttachment(this.#roomId, this.#voicePreviewBlob, {
+        mimeType: this.#voicePreviewMime,
+        filename: this.#voicePreviewFilename,
+      });
+      const voiceAttachment = { ...attachment, durationMs: this.#voicePreviewDuration };
+      await this.#client.sendAttachmentMessage(this.#roomId, caption, [voiceAttachment]);
+
+      if (!this.#destroyed) {
+        if (this.#textarea) this.#textarea.value = '';
+        this.#lastText = '';
+        this.#productRef = null;
+        this.#productMeta = null;
+        this.#clearReplyTarget();
+        this.#clearVoicePreview();
+      }
+    } catch (err) {
+      this.#handleRecordingError(err);
+    } finally {
+      this.#sending = false;
+      if (!this.#destroyed) {
+        if (this.#textarea && this.#textarea.disabled) {
+          this.#textarea.disabled = false;
+        }
+        if (this.#voicePreviewSend) this.#voicePreviewSend.disabled = false;
+        if (this.#voicePreviewDiscard) this.#voicePreviewDiscard.disabled = false;
+        this.#updateState();
+      }
+    }
+  }
+
+  #discardVoicePreview(): void {
+    if (!this.#voicePreviewObjectURL) return;
+    this.#clearVoicePreview();
+  }
+
   // ── State updates ───────────────────────────────────────────────────────────
 
   #updateState(): void {
@@ -678,6 +829,8 @@ export class Composer {
     const overLimit = len > MAX_BODY_CHARS;
     const empty = trimmed.length === 0 && !hasStaged;
     this.#sendBtn.disabled = empty || overLimit || this.#sending;
+    // Voice preview carries its own Send button; hide the main input-row send button.
+    this.#sendBtn.hidden = this.#voicePreviewObjectURL !== null;
 
     // M10 / 1G: update send-hint text for screen readers.
     // During #sending=true, hint reads "Sending message…" so SR announces correct state.
@@ -727,8 +880,15 @@ export class Composer {
 
     const text = textOverride ?? this.#textarea.value.trim();
     const hasStaged = this.#attachmentPicker?.hasStaged() ?? false;
-    if (text.length === 0 && !hasStaged) return;
     if (text.length > MAX_BODY_CHARS) return;
+
+    // Voice pre-send preview: the main send path (Ctrl+Enter / Send button when visible)
+    // routes to the dedicated preview send, which uses the current textarea text as caption.
+    if (this.#voicePreviewObjectURL) {
+      return this.#sendVoicePreview();
+    }
+
+    if (text.length === 0 && !hasStaged) return;
 
     // Save for retry before the send attempt
     this.#lastText = text;
