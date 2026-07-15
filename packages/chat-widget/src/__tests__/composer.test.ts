@@ -37,6 +37,36 @@ function makeStubClient(opts: {
   };
 }
 
+/**
+ * Slice 4/5: stage-then-send attachment stubs. uploadAttachment resolves
+ * eagerly (UPLOAD-ON-STAGE) independent of any explicit send; sendAttachmentMessage
+ * is the separate call the Composer fires only when the user hits send.
+ */
+function makeAttachmentStubs(opts: {
+  uploadResolve?: { attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number } };
+  uploadReject?: Error;
+  sendResolve?: { msgId: string };
+  sendReject?: Error;
+} = {}) {
+  return {
+    uploadAttachment: vi.fn(() =>
+      opts.uploadReject
+        ? Promise.reject(opts.uploadReject)
+        : Promise.resolve(
+            opts.uploadResolve ?? {
+              attachmentId: 'att-1',
+              attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },
+            },
+          ),
+    ),
+    sendAttachmentMessage: vi.fn(() =>
+      opts.sendReject
+        ? Promise.reject(opts.sendReject)
+        : Promise.resolve(opts.sendResolve ?? { msgId: 'msg-att' }),
+    ),
+  };
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 // B1: helpers query the observable DOM container, NOT internal private fields
 
@@ -591,11 +621,8 @@ describe('Composer', () => {
   // ── Slice 4: Attachment integration ─────────────────────────────────────────
 
   it('paperclip_button_opens_file_dialog', () => {
-    // sendFile must be present for paperclip to render
-    const client = {
-      ...makeStubClient({}),
-      sendFile: vi.fn().mockResolvedValue({ msgId: 'm', attachmentId: 'a' }),
-    };
+    // uploadAttachment + sendAttachmentMessage must both be present for paperclip to render
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
     const composer = new Composer({ client, roomId: 'r1', container });
     composer.mount();
 
@@ -603,12 +630,34 @@ describe('Composer', () => {
     expect(btn).not.toBeNull();
     expect(btn?.getAttribute('aria-label')).toBe('Attach files');
 
+    const clickSpy = vi.spyOn(HTMLInputElement.prototype, 'click');
+    btn!.click();
+    expect(clickSpy).toHaveBeenCalled();
+
     composer.destroy();
   });
 
-  it('paste_with_image_triggers_upload', async () => {
-    const sendFile = vi.fn().mockResolvedValue({ msgId: 'msg-paste', attachmentId: 'att-paste' });
-    const client = { ...makeStubClient({}), sendFile };
+  // BUG-1 (spec 2026-07-14): AttachmentPicker used to render its OWN visible
+  // 📎 button above the reply block, duplicating composer.ts's trigger.
+  it('bug1_renders_exactly_one_paperclip_trigger_no_picker_owned_button', () => {
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const paperclipButtons = Array.from(container.querySelectorAll('button')).filter(
+      (b) => b.textContent === '📎',
+    );
+    expect(paperclipButtons.length).toBe(1);
+    expect(container.querySelector('.oxp-composer-attachment-btn')).not.toBeNull();
+    // The picker's own (removed) trigger class must never appear.
+    expect(container.querySelector('.oxp-attachment-btn')).toBeNull();
+
+    composer.destroy();
+  });
+
+  it('paste_with_image_stages_it_without_sending_a_message', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
     const composer = new Composer({ client, roomId: 'r1', container });
     composer.mount();
 
@@ -629,20 +678,25 @@ describe('Composer', () => {
     });
 
     textarea.dispatchEvent(pasteEvent);
-    await drain(10);
+    await drain(15);
 
-    expect(sendFile).toHaveBeenCalledWith(
-      'r1',
-      expect.any(Blob),
-      expect.any(Object),
-    );
+    // UPLOAD-ON-STAGE: the eager background upload fires immediately on paste...
+    expect(uploadAttachment).toHaveBeenCalledWith('r1', expect.any(Blob), expect.any(Object));
+    // ...but no message is sent until the user explicitly hits send.
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+
+    const tray = container.querySelector('.oxp-attachment-queue') as HTMLElement | null;
+    expect(tray).not.toBeNull();
+    expect(tray!.hidden).toBe(false);
+    // Send becomes enabled with a staged attachment even though text is empty.
+    expect(getSendBtn(container).disabled).toBe(false);
 
     composer.destroy();
   });
 
-  it('drag_drop_triggers_upload', async () => {
-    const sendFile = vi.fn().mockResolvedValue({ msgId: 'msg-drop', attachmentId: 'att-drop' });
-    const client = { ...makeStubClient({}), sendFile };
+  it('drag_drop_stages_it_without_sending_a_message', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
     const composer = new Composer({ client, roomId: 'r1', container });
     composer.mount();
 
@@ -659,22 +713,44 @@ describe('Composer', () => {
     });
 
     root.dispatchEvent(dropEvent);
-    await drain(10);
+    await drain(15);
 
-    expect(sendFile).toHaveBeenCalledWith(
-      'r1',
-      expect.any(Blob),
-      expect.any(Object),
-    );
+    expect(uploadAttachment).toHaveBeenCalledWith('r1', expect.any(Blob), expect.any(Object));
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+    expect(getSendBtn(container).disabled).toBe(false);
+
+    composer.destroy();
+  });
+
+  it('multi_add_across_paste_and_drop_appends_to_the_same_tray', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const textarea = getInput(container);
+    const root = container.querySelector('.oxp-composer') as HTMLElement;
+
+    const pasted = new File([new Uint8Array(10)], 'pasted.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pasted] }, configurable: true });
+    textarea.dispatchEvent(pasteEvent);
+    await drain(15);
+
+    const dropped = new File([new Uint8Array(10)], 'dropped.png', { type: 'image/png' });
+    const dropEvent = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(dropEvent, 'dataTransfer', { value: { files: [dropped] }, configurable: true });
+    root.dispatchEvent(dropEvent);
+    await drain(15);
+
+    expect(uploadAttachment).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll('.oxp-attachment-item').length).toBe(2);
 
     composer.destroy();
   });
 
   it('composer_root_has_dragover_class_during_drag', () => {
-    const client = {
-      ...makeStubClient({}),
-      sendFile: vi.fn().mockResolvedValue({ msgId: 'm', attachmentId: 'a' }),
-    };
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
     const composer = new Composer({ client, roomId: 'r1', container });
     composer.mount();
 
@@ -687,6 +763,106 @@ describe('Composer', () => {
 
     root.dispatchEvent(new Event('dragleave', { bubbles: true }));
     expect(root.classList.contains('oxp-composer-dragover')).toBe(false);
+
+    composer.destroy();
+  });
+
+  // ── Slice 4/5: combined text + staged-attachment send ────────────────────────
+
+  async function stageOnePastedImage(container: HTMLElement): Promise<void> {
+    const textarea = getInput(container);
+    const file = new File([new Uint8Array(100)], 'photo.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [file] }, configurable: true });
+    textarea.dispatchEvent(pasteEvent);
+    await drain(15);
+  }
+
+  it('combined_send_fires_one_sendAttachmentMessage_with_caption_and_staged_attachments', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs({
+      uploadResolve: {
+        attachmentId: 'att-9',
+        attachment: { id: 'att-9', mime: 'image/png', filename: 'photo.png', sizeBytes: 500, width: 10, height: 10 },
+      },
+    });
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container);
+
+    const textarea = getInput(container);
+    setInputValue(textarea, 'caption text');
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).not.toHaveBeenCalled();
+    expect(sendAttachmentMessage).toHaveBeenCalledTimes(1);
+    const [roomIdArg, bodyArg, attachmentsArg] = (sendAttachmentMessage as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      string,
+      readonly { id: string; mime: string }[],
+    ];
+    expect(roomIdArg).toBe('r1');
+    expect(bodyArg).toBe('caption text');
+    expect(attachmentsArg).toHaveLength(1);
+    expect(attachmentsArg[0]).toMatchObject({ id: 'att-9', mime: 'image/png' });
+
+    // Tray + input clear on success; objectURL revoked with the staged item.
+    expect(textarea.value).toBe('');
+    expect(container.querySelector('.oxp-attachment-item')).toBeNull();
+
+    composer.destroy();
+  });
+
+  it('combined_send_allows_staged_attachments_with_no_caption_text', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container);
+    expect(getSendBtn(container).disabled).toBe(false);
+
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(sendAttachmentMessage).toHaveBeenCalledTimes(1);
+    const [, bodyArg] = (sendAttachmentMessage as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    expect(bodyArg).toBe('');
+
+    composer.destroy();
+  });
+
+  it('send_stays_disabled_with_no_text_and_no_staged_attachments', () => {
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    expect(getSendBtn(container).disabled).toBe(true);
+
+    composer.destroy();
+  });
+
+  it('upload_failure_blocks_send_and_keeps_the_tray_for_retry', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs({
+      uploadReject: new Error('upload boom'),
+    });
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container);
+
+    // Send is still enabled (a staged item exists) — clicking it must await
+    // the (failed) upload, never call sendAttachmentMessage, and leave the
+    // failed item in the tray so the user can retry or remove it.
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+    expect(container.querySelector('.oxp-attachment-item')).not.toBeNull();
+    expect(container.querySelector('.oxp-composer-error')).not.toBeNull();
 
     composer.destroy();
   });

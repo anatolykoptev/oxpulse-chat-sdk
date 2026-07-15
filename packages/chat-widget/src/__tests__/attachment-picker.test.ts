@@ -141,29 +141,29 @@ describe('AttachmentPicker', () => {
 
   // ── Rendering ───────────────────────────────────────────────────────────────
 
-  it('renders_hidden_file_input_and_visible_button', () => {
+  it('renders_hidden_file_input_and_staging_tray', () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
+    // BUG-1: picker must not render its own visible button; composer.ts supplies the trigger.
     const btn = container.querySelector('.oxp-attachment-btn');
-    expect(btn).not.toBeNull();
-    expect(btn?.getAttribute('aria-label')).toBe('Attach files');
+    expect(btn).toBeNull();
+    const tray = container.querySelector('.oxp-attachment-queue');
+    expect(tray).not.toBeNull();
 
     picker.destroy();
   });
 
-  it('localizes_button_aria_labels_for_lang_ru', () => {
+  it('localizes_input_aria_label_for_lang_ru', () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container, lang: 'ru' });
     picker.mount();
 
     const input = container.querySelector('input[type="file"]');
-    const btn = container.querySelector('.oxp-attachment-btn');
     expect(input?.getAttribute('aria-label')).toBe('Выбрать файлы для прикрепления');
-    expect(btn?.getAttribute('aria-label')).toBe('Прикрепить файлы');
 
     picker.destroy();
   });

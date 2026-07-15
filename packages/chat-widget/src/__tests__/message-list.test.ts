@@ -1034,6 +1034,24 @@ describe('MessageList', () => {
     ml.destroy();
   });
 
+  it('mobile_viewport_forces_every_collage_tile_to_1_1_aspect_ratio_even_at_N=4', async () => {
+    // Universal rule (spec): mobile <=640px forces every tile to a 1/1 square,
+    // overriding the desktop 3:2 ratio N=4/N>=5 otherwise use.
+    stubMatchMedia(true);
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2), makeImageAttachment('a3', 3), makeImageAttachment('a4', 4)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(4);
+    for (const tile of tiles) {
+      expect((tile as HTMLElement).style.aspectRatio).toBe('1 / 1');
+    }
+
+    ml.destroy();
+  });
+
   it('N=1_image_keeps_single_attachment_path_no_collage', async () => {
     stubMatchMedia(false);
     const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1)] })];
