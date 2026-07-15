@@ -63,6 +63,12 @@ export type LocaleKey =
   | 'voicePreviewLabel'
   | 'sendVoiceMessageAria'
   | 'discardVoiceMessageAria'
+  | 'voiceBubbleGroupAria'
+  | 'voicePlayAria'
+  | 'voicePauseAria'
+  | 'voiceSpeedAria'
+  | 'voiceWaveformSeekAria'
+  | 'voicePlaybackErrorAria'
   | 'attachFilesTitle'
   // Attachment picker
   | 'chooseFilesToAttachAria'
@@ -144,6 +150,12 @@ const en: LocaleTable = {
   voicePreviewLabel: 'Voice preview',
   sendVoiceMessageAria: 'Send voice message',
   discardVoiceMessageAria: 'Discard voice message',
+  voiceBubbleGroupAria: 'Voice message',
+  voicePlayAria: 'Play voice message',
+  voicePauseAria: 'Pause voice message',
+  voiceSpeedAria: 'Playback speed',
+  voiceWaveformSeekAria: 'Voice waveform — click or arrow keys to seek',
+  voicePlaybackErrorAria: 'Voice playback failed',
 
   chooseFilesToAttachAria: 'Choose files to attach',
   attachmentTrayAria: 'Attachments to send',
@@ -221,6 +233,12 @@ const ru: LocaleTable = {
   voicePreviewLabel: 'Предпросмотр голосового',
   sendVoiceMessageAria: 'Отправить голосовое',
   discardVoiceMessageAria: 'Отменить голосовое',
+  voiceBubbleGroupAria: 'Голосовое сообщение',
+  voicePlayAria: 'Воспроизвести голосовое',
+  voicePauseAria: 'Пауза',
+  voiceSpeedAria: 'Скорость воспроизведения',
+  voiceWaveformSeekAria: 'Волна — клик или стрелки для перемотки',
+  voicePlaybackErrorAria: 'Ошибка воспроизведения голосового',
 
   chooseFilesToAttachAria: 'Выбрать файлы для прикрепления',
   attachmentTrayAria: 'Вложения для отправки',

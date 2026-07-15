@@ -60,11 +60,20 @@ export interface WaveformTheme {
 
 /** Default theme — app-neutral. The core package does not read app-
  *  specific CSS variables; shells pass their own theme built from
- *  their own tokens (widget: --oxp-accent; web: --brand-primary). */
+ *  their own tokens (widget: --oxp-accent; web: --brand-primary).
+ *
+ *  inactive WCAG 1.4.11: the prior rgba(128,128,128,0.28) blended to
+ *  ~#bdbdbd on white → 1.38:1 FAIL (non-text needs ≥3:1). Raised to
+ *  rgba(0,0,0,0.55) — models the chat-widget --oxp-spinner-track light
+ *  token; blends to #737373 on white → 3.15:1 PASS, and to ~#637059 on
+ *  a #dcf8c6 self-bubble → 4.58:1 PASS. Apps with dark bubble bgs MUST
+ *  supply their own themed inactive (the widget does, via
+ *  --oxp-waveform-inactive) — a single app-neutral value cannot clear
+ *  3:1 on both light and dark backgrounds. */
 export function defaultWaveformTheme(): WaveformTheme {
   return {
     active: 'currentColor',
-    inactive: 'rgba(128,128,128,0.28)',
+    inactive: 'rgba(0,0,0,0.55)',
   };
 }
 

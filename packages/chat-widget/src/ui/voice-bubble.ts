@@ -13,7 +13,8 @@
  * which sets `audio.src` and revokes it on `destroy()`.
  *
  * The widget supplies its OWN WaveformTheme built from its tokens (active from
- * `--oxp-accent`, inactive a low-alpha neutral) — voice-core's app-neutral
+ * `--oxp-accent`, inactive from `--oxp-waveform-inactive` — a WCAG 1.4.11
+ * audited token with separate light/dark values) — voice-core's app-neutral
  * defaultWaveformTheme is deliberately NOT used so the waveform matches the
  * brand accent, not a generic currentColor.
  *
@@ -31,6 +32,7 @@ import {
   xToProgress,
   nextSpeed,
   VOICE_SPEEDS,
+  FLAT_FALLBACK_PEAKS,
   type VoicePlayer,
   type VoicePlayerState,
   type WaveformTheme,
@@ -38,15 +40,8 @@ import {
   type VoiceSource,
 } from '@oxpulse/voice-core';
 import { formatDuration } from '../utils/list-helpers.js';
+import { t, type Locale } from '../utils/i18n.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
-
-/** Low-alpha neutral for unplayed waveform bars — independent of brand accent. */
-const INACTIVE_BAR = 'rgba(128,128,128,0.28)';
-/** Fallback accent when --oxp-accent cannot be resolved from computed style
- *  (e.g. jsdom test environment, or a host that overrode the theme tokens). */
-const FALLBACK_ACCENT = '#0088cc';
-/** Flat fallback waveform — a uniform low amplitude when no peaks are present. */
-const FLAT_FALLBACK_PEAKS = new Array<number>(48).fill(0.12);
 
 export interface VoiceBubbleOptions {
   /** The attachment metadata (url, mime, durationMs, peaks). */
@@ -66,8 +61,8 @@ export interface VoiceBubbleOptions {
   readonly trackObjectUrl?: (url: string) => void;
   /** Abort signal — aborts an in-flight hydrate before .src is set. */
   readonly signal?: AbortSignal;
-  /** Optional aria-label override for the play/pause button. */
-  readonly ariaLabel?: string;
+  /** Locale for i18n ARIA strings (play/pause/speed/waveform/error). */
+  readonly lang: Locale;
 }
 
 export interface VoiceBubble {
@@ -78,20 +73,28 @@ export interface VoiceBubble {
   destroy(): void;
 }
 
-/** Resolve the brand accent color from the widget's --oxp-accent token.
- *  Canvas2D fillStyle does not resolve CSS custom properties, so the live
- *  computed value is read here. Falls back to FALLBACK_ACCENT when resolution
- *  yields nothing (jsdom / overridden tokens). */
-function resolveAccent(el: HTMLElement): string {
+/** Resolve a CSS custom property from the canvas's computed style, falling
+ *  back to the shadow host's computed style (the token is defined on :host).
+ *  Returns '' when unavailable (jsdom / overridden tokens). Canvas2D fillStyle
+ *  does not resolve CSS custom properties, so the live computed value is read
+ *  here. */
+function resolveToken(el: HTMLElement, token: string): string {
   if (typeof window === 'undefined' || typeof getComputedStyle === 'undefined') {
-    return FALLBACK_ACCENT;
+    return '';
   }
   try {
-    const v = getComputedStyle(el).getPropertyValue('--oxp-accent').trim();
-    return v || FALLBACK_ACCENT;
+    const v = getComputedStyle(el).getPropertyValue(token).trim();
+    if (v) return v;
+    // Fall back to the shadow host — :host is where the widget defines tokens.
+    const root = el.getRootNode();
+    if (root instanceof ShadowRoot && root.host) {
+      const hv = getComputedStyle(root.host).getPropertyValue(token).trim();
+      if (hv) return hv;
+    }
   } catch {
-    return FALLBACK_ACCENT;
+    /* jsdom / overridden tokens — return '' */
   }
+  return '';
 }
 
 /** Build a vanilla VoiceBubble over the headless player + static waveform. */
@@ -99,10 +102,12 @@ export function createVoiceBubble(opts: VoiceBubbleOptions): VoiceBubble {
   const att = opts.att;
   const hydrate = opts.hydrate;
   const signal = opts.signal;
+  const lang = opts.lang;
 
   const wrap = document.createElement('div');
   wrap.className = 'oxp-voice-bubble';
   wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', t('voiceBubbleGroupAria', lang));
 
   const audio = document.createElement('audio');
   audio.preload = 'metadata';
@@ -114,34 +119,45 @@ export function createVoiceBubble(opts: VoiceBubbleOptions): VoiceBubble {
   const playBtn = document.createElement('button');
   playBtn.type = 'button';
   playBtn.className = 'oxp-voice-bubble-play';
-  playBtn.setAttribute('aria-label', opts.ariaLabel ?? 'Play voice message');
+  playBtn.setAttribute('aria-label', t('voicePlayAria', lang));
   playBtn.textContent = '▶';
 
   const canvas = document.createElement('canvas');
   canvas.className = 'oxp-voice-bubble-waveform';
   canvas.setAttribute('role', 'slider');
-  canvas.setAttribute('aria-label', 'Voice waveform — click to seek');
+  canvas.setAttribute('aria-label', t('voiceWaveformSeekAria', lang));
   canvas.setAttribute('aria-valuemin', '0');
   canvas.setAttribute('aria-valuemax', '100');
-  // Sized via CSS classes in theme.ts; give a concrete fallback so jsdom +
-  // pre-layout paint don't degenerate to 0×0.
+  canvas.setAttribute('aria-valuenow', '0');
+  // Keyboard-operable slider — Canvas2D has no native keyboard interaction.
+  canvas.tabIndex = 0;
+  // CSS controls the rendered size (width:100%, max-width:220px, height:36px);
+  // renderStaticWaveform sets the backing-store from clientWidth × DPR. Give a
+  // concrete fallback so jsdom + pre-layout paint don't degenerate to 0×0.
   canvas.width = 220;
   canvas.height = 36;
 
   const speedBtn = document.createElement('button');
   speedBtn.type = 'button';
   speedBtn.className = 'oxp-voice-bubble-speed';
-  speedBtn.setAttribute('aria-label', 'Playback speed');
+  speedBtn.setAttribute('aria-label', t('voiceSpeedAria', lang));
   speedBtn.textContent = '1×';
 
   const durEl = document.createElement('span');
   durEl.className = 'oxp-attachment-audio-duration';
   durEl.textContent = formatDuration(att.durationMs ?? 0);
 
+  // aria-live region for error announcements (screen-reader-only).
+  const errorEl = document.createElement('span');
+  errorEl.className = 'oxp-voice-bubble-error';
+  errorEl.setAttribute('aria-live', 'assertive');
+  errorEl.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);';
+
   wrap.appendChild(playBtn);
   wrap.appendChild(canvas);
   wrap.appendChild(speedBtn);
   wrap.appendChild(durEl);
+  wrap.appendChild(errorEl);
   wrap.appendChild(audio);
 
   // ── Source: Blob (composer preview) > authed loader > direct URL fallback ──
@@ -175,17 +191,31 @@ export function createVoiceBubble(opts: VoiceBubbleOptions): VoiceBubble {
   const peaks: ReadonlyArray<number> =
     att.peaks && att.peaks.length > 0 ? att.peaks : FLAT_FALLBACK_PEAKS;
 
-  let accent = resolveAccent(canvas);
-  let theme: WaveformTheme = { active: accent, inactive: INACTIVE_BAR };
+  // Resolve theme tokens from the widget's CSS custom properties. Active from
+  // --oxp-accent, inactive from --oxp-waveform-inactive (WCAG 1.4.11 audited).
+  // Fallbacks: active → 'currentColor' (Canvas2D resolves it to the inherited
+  //   color); inactive → 'rgba(0,0,0,0.55)' (the widget's light default for
+  //   --oxp-waveform-inactive, used only in jsdom / pre-CSS-layout).
+  const INACTIVE_FALLBACK = 'rgba(0,0,0,0.55)';
+  let accent = resolveToken(canvas, '--oxp-accent') || 'currentColor';
+  let inactive = resolveToken(canvas, '--oxp-waveform-inactive') || INACTIVE_FALLBACK;
+  let theme: WaveformTheme = { active: accent, inactive };
 
   function paint(state: VoicePlayerState): void {
-    // Re-resolve accent lazily on first paint in case the canvas wasn't laid
+    // Re-resolve tokens lazily on first paint in case the canvas wasn't laid
     // out at construction (shadow root CSS applied after mount).
-    if (accent === FALLBACK_ACCENT) {
-      const resolved = resolveAccent(canvas);
-      if (resolved !== FALLBACK_ACCENT) {
+    if (accent === 'currentColor') {
+      const resolved = resolveToken(canvas, '--oxp-accent');
+      if (resolved) {
         accent = resolved;
-        theme = { active: accent, inactive: INACTIVE_BAR };
+        theme = { active: accent, inactive };
+      }
+    }
+    if (inactive === INACTIVE_FALLBACK) {
+      const resolved = resolveToken(canvas, '--oxp-waveform-inactive');
+      if (resolved) {
+        inactive = resolved;
+        theme = { active: accent, inactive };
       }
     }
     renderStaticWaveform(canvas, peaks, state.progress01, theme);
@@ -199,11 +229,31 @@ export function createVoiceBubble(opts: VoiceBubbleOptions): VoiceBubble {
   // Track the latest state so the speed button can read the current speed
   // without re-subscribing (the player exposes no getState()).
   let lastSpeed: VoiceSpeed = 1;
+  let lastPhase: VoicePlayerState['phase'] = 'idle';
 
   const unsubscribe = player.subscribe((state) => {
     lastSpeed = state.speed;
-    playBtn.textContent = state.phase === 'playing' ? '⏸' : '▶';
-    playBtn.setAttribute('aria-pressed', String(state.phase === 'playing'));
+    lastPhase = state.phase;
+    if (state.phase === 'error') {
+      // Distinct error affordance: disable play, announce via aria-live.
+      playBtn.disabled = true;
+      playBtn.setAttribute('aria-label', t('voicePlaybackErrorAria', lang));
+      playBtn.textContent = '⚠';
+      speedBtn.disabled = true;
+      errorEl.textContent = t('voicePlaybackErrorAria', lang);
+    } else {
+      playBtn.disabled = false;
+      speedBtn.disabled = false;
+      errorEl.textContent = '';
+      playBtn.textContent = state.phase === 'playing' ? '⏸' : '▶';
+      playBtn.setAttribute('aria-pressed', String(state.phase === 'playing'));
+      playBtn.setAttribute(
+        'aria-label',
+        state.phase === 'playing'
+          ? t('voicePauseAria', lang)
+          : t('voicePlayAria', lang),
+      );
+    }
     speedBtn.textContent = speedLabel(state.speed);
     if (state.durationMs > 0) {
       durEl.textContent = formatDuration(state.durationMs);
@@ -220,8 +270,36 @@ export function createVoiceBubble(opts: VoiceBubbleOptions): VoiceBubble {
   };
   const onSpeed = (): void => { player.setSpeed(nextSpeed(lastSpeed)); };
 
+  // Keyboard seek — role="slider" MUST be keyboard-operable (WCAG 2.1.1).
+  // ArrowLeft/Right = ±5%, PageUp/Down = ±10%, Home/End = 0/100%.
+  const onKeydown = (ev: KeyboardEvent): void => {
+    if (lastPhase === 'error') return;
+    const step = 0.05;
+    const bigStep = 0.10;
+    let next: number | null = null;
+    switch (ev.key) {
+      case 'ArrowLeft':  next = Math.max(0, currentProgress() - step); break;
+      case 'ArrowRight': next = Math.min(1, currentProgress() + step); break;
+      case 'PageDown':   next = Math.max(0, currentProgress() - bigStep); break;
+      case 'PageUp':     next = Math.min(1, currentProgress() + bigStep); break;
+      case 'Home':       next = 0; break;
+      case 'End':        next = 1; break;
+      default: return; // don't preventDefault for unrelated keys
+    }
+    ev.preventDefault();
+    player.seek(next);
+  };
+
+  /** Read the current progress from the slider's aria-valuenow (set by paint). */
+  function currentProgress(): number {
+    const raw = canvas.getAttribute('aria-valuenow');
+    const n = raw ? Number(raw) : 0;
+    return Number.isFinite(n) ? n / 100 : 0;
+  }
+
   playBtn.addEventListener('click', onPlay);
   canvas.addEventListener('click', onSeek);
+  canvas.addEventListener('keydown', onKeydown);
   speedBtn.addEventListener('click', onSpeed);
 
   let destroyed = false;
@@ -232,6 +310,7 @@ export function createVoiceBubble(opts: VoiceBubbleOptions): VoiceBubble {
     player.destroy();
     playBtn.removeEventListener('click', onPlay);
     canvas.removeEventListener('click', onSeek);
+    canvas.removeEventListener('keydown', onKeydown);
     speedBtn.removeEventListener('click', onSpeed);
   }
 

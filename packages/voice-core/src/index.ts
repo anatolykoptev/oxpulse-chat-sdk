@@ -19,6 +19,7 @@ export type { AnalyserTap } from './attach-analyser-tap.ts';
 
 export {
   DEFAULT_PEAK_BARS,
+  FLAT_FALLBACK_PEAKS,
   MAX_VOICE_PEAKS,
   downsamplePeaks,
   envelopeStep,

@@ -426,7 +426,7 @@ function renderAttachment(
       hydrate,
       trackObjectUrl,
       signal,
-      ariaLabel: t('audioAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
+      lang,
     });
     trackVoiceBubble?.(bubble);
     wrap.appendChild(bubble.el);
@@ -817,6 +817,20 @@ export class MessageList {
     if (existing) existing.push(bubble);
     else this.#voiceBubbles.set(msgId, [bubble]);
   };
+
+  /** Phase 2 review-fix: destroy + untrack any VoiceBubbles previously rendered
+   *  for this msgId. Called from #populateBubble BEFORE the innerHTML wipe so a
+   *  live re-render (mutation SSE, dedupe/reclassify upsert) doesn't orphan the
+   *  prior bubble's headless player — which would leak its objectURL + fire a
+   *  redundant authed audio fetch on every re-render. Same lifecycle as
+   *  #teardownReactionTrigger (called before the footer rebuild). */
+  #destroyVoiceBubblesForMsg(msgId: string): void {
+    const bubbles = this.#voiceBubbles.get(msgId);
+    if (bubbles) {
+      for (const b of bubbles) b.destroy();
+      this.#voiceBubbles.delete(msgId);
+    }
+  }
 
   // ── Private ────────────────────────────────────────────────────────────────
 
@@ -1664,6 +1678,12 @@ export class MessageList {
 
     // Preserve existing reaction cluster if present (reactions are managed separately)
     const existingCluster = el.querySelector('.oxp-bubble-reactions');
+
+    // Phase 2 review-fix: destroy any VoiceBubble players previously rendered
+    // for this msgId BEFORE the innerHTML wipe orphans them. Without this, a
+    // live re-render (mutation/dedupe) leaves the prior headless player alive
+    // → leaked objectURL + redundant authed audio fetch on every re-render.
+    this.#destroyVoiceBubblesForMsg(row.msgId);
 
     el.innerHTML = '';
 

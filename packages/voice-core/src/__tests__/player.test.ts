@@ -274,4 +274,46 @@ describe('createVoicePlayer', () => {
     expect(audio.src).toBe('');
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock');
   });
+
+  it('rejected load sets phase=error and repeated toggles do not re-reject (no unhandled rejection loop)', async () => {
+    const audio = new MockAudio();
+    audio.duration = 10;
+    const load = vi.fn().mockRejectedValue(new Error('401 unauthorized'));
+    const player = createVoicePlayer({
+      audio: audio as unknown as HTMLAudioElement,
+      source: { load },
+    });
+    const states: MockAudioState[] = [];
+    player.subscribe((s) => states.push({
+      phase: s.phase,
+      currentMs: s.currentMs,
+      progress01: s.progress01,
+      durationMs: s.durationMs,
+      speed: s.speed,
+    }));
+
+    // Track any unhandled rejections during this test — the bug was that
+    // each toggle re-awaited the already-rejected loadPromise OUTSIDE the
+    // try/catch, surfacing an unhandled rejection on every toggle.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // First toggle: load rejects → play() catches → phase=error.
+      await player.toggle();
+      expect(lastState(states).phase).toBe('error');
+
+      // Second toggle: the bug re-awaited the rejected loadPromise outside
+      // the try/catch → unhandled rejection. With the fix, play() awaits it
+      // inside its own try/catch → caught again, no throw, phase stays error.
+      await player.toggle();
+      expect(lastState(states).phase).toBe('error');
+
+      // Drain microtasks so any stray rejection would have surfaced.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

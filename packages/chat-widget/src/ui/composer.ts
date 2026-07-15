@@ -751,7 +751,7 @@ export class Composer {
         peaks: this.#voicePreviewPeaks,
       },
       blob: this.#voicePreviewBlob,
-      ariaLabel: t('voicePreviewLabel', this.#lang),
+      lang: this.#lang,
     });
     this.#voicePreviewBubble = bubble;
     this.#voicePreviewBubbleHost.appendChild(bubble.el);

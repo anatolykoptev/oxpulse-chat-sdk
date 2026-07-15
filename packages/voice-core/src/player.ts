@@ -92,6 +92,7 @@ export function createVoicePlayer(options: VoicePlayerOptions): VoicePlayer {
   const source = options.source;
   let sourceType: 'string' | 'blob' | 'load';
   let loadPromise: Promise<void> = Promise.resolve();
+  let loadFailed = false;
   let durationMs = Number.isFinite(options.durationMs) && (options.durationMs ?? 0) > 0
     ? options.durationMs!
     : 0;
@@ -117,6 +118,12 @@ export function createVoicePlayer(options: VoicePlayerOptions): VoicePlayer {
       }
       audio.src = url;
     }).catch(() => {
+      // Record the failure so play()'s loadFailed guard short-circuits
+      // instead of proceeding to audio.play() on an empty/failed src (which
+      // would revert phase to 'playing' in UAs where play() doesn't reject
+      // on a blank src). The .catch() also prevents an unhandled rejection
+      // when the user never toggles play.
+      loadFailed = true;
       if (!destroyed) setPhase('error');
     });
   }
@@ -177,13 +184,21 @@ export function createVoicePlayer(options: VoicePlayerOptions): VoicePlayer {
 
   async function play(): Promise<void> {
     if (destroyed) return;
-    await loadPromise;
-    if (destroyed) return;
-    applyRate(audio, speed);
-    if (audio.ended) {
-      audio.currentTime = 0;
-    }
     try {
+      // loadPromise is the source.load() adapter (authed fetch → objectURL).
+      // Awaiting INSIDE the try/catch (not before it) so a rejected load —
+      // e.g. an authed fetch that 401s — sets phase='error' once instead of
+      // re-throwing on every subsequent toggle. The loadFailed guard then
+      // short-circuits so play() never calls audio.play() on a blank src
+      // (which would revert the error phase to 'playing' in UAs where play()
+      // doesn't reject on an unset src).
+      await loadPromise;
+      if (destroyed) return;
+      if (loadFailed) return;
+      applyRate(audio, speed);
+      if (audio.ended) {
+        audio.currentTime = 0;
+      }
       await audio.play();
     } catch {
       setPhase('error');

@@ -7,11 +7,13 @@
  * attachment URL on the authed path); seek maps waveform-x → player.seek;
  * the widget supplies its OWN theme (active from --oxp-accent, not
  * voice-core's app-neutral default); destroy tears the player down.
+ * Keyboard seek (ArrowLeft/Right/Home/End/PageUp/Down) drives player.seek.
+ * Error phase disables play + announces via aria-live.
  *
  * Falsification: each test fails if the corresponding wiring in
  * voice-bubble.ts is reverted (e.g. remove the hydrate→load adapter and the
- * authed-loader test fails; remove the canvas click handler and the seek
- * test fails).
+ * authed-loader test fails; remove the canvas keydown handler and the
+ * keyboard-seek test fails).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -27,6 +29,7 @@ let playerSetSpeed: ReturnType<typeof vi.fn>;
 let playerToggle: ReturnType<typeof vi.fn>;
 let playerSubscribe: ReturnType<typeof vi.fn>;
 let unsubscribe: ReturnType<typeof vi.fn>;
+let stateListener: ((s: VoicePlayerState) => void) | null = null;
 
 vi.mock('@oxpulse/voice-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@oxpulse/voice-core')>();
@@ -50,6 +53,7 @@ vi.mock('@oxpulse/voice-core', async (importOriginal) => {
         speed: 1,
       };
       playerSubscribe = vi.fn((listener: (s: VoicePlayerState) => void) => {
+        stateListener = listener;
         listener(state);
         return unsubscribe;
       });
@@ -89,6 +93,7 @@ describe('VoiceBubble render shell', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     capturedSource = null;
+    stateListener = null;
   });
 
   afterEach(() => {
@@ -97,7 +102,7 @@ describe('VoiceBubble render shell', () => {
   });
 
   it('renders play/pause + canvas + speed + duration + hidden audio', () => {
-    const bubble = createVoiceBubble({ att: makeAtt() });
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
     container.appendChild(bubble.el);
 
     expect(bubble.el.querySelector('.oxp-voice-bubble-play')).not.toBeNull();
@@ -122,6 +127,7 @@ describe('VoiceBubble render shell', () => {
       att,
       hydrate,
       trackObjectUrl: (url) => tracked.push(url),
+      lang: 'en',
     });
     container.appendChild(bubble.el);
 
@@ -141,7 +147,7 @@ describe('VoiceBubble render shell', () => {
 
   it('falls back to the direct URL only when no hydrate bridge is wired (test/mock path)', () => {
     const att = makeAtt();
-    const bubble = createVoiceBubble({ att });
+    const bubble = createVoiceBubble({ att, lang: 'en' });
     container.appendChild(bubble.el);
 
     // No hydrate → string source = att.url (mirrors hydrateMediaSrc no-hydrate branch).
@@ -150,7 +156,7 @@ describe('VoiceBubble render shell', () => {
   });
 
   it('seek maps waveform click-x → player.seek(progress)', () => {
-    const bubble = createVoiceBubble({ att: makeAtt() });
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
     container.appendChild(bubble.el);
     const canvas = bubble.el.querySelector('canvas.oxp-voice-bubble-waveform') as HTMLCanvasElement;
     // Stub getBoundingClientRect so xToProgress maps a deterministic x → progress.
@@ -165,8 +171,61 @@ describe('VoiceBubble render shell', () => {
     expect(progress).toBeCloseTo(0.5, 5);
   });
 
+  it('keyboard seek: ArrowRight/Left/Home/End/PageUp/PageDown → player.seek', () => {
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
+    container.appendChild(bubble.el);
+    const canvas = bubble.el.querySelector('canvas.oxp-voice-bubble-waveform') as HTMLCanvasElement;
+
+    // The canvas must be keyboard-focusable (tabIndex=0).
+    expect(canvas.tabIndex).toBe(0);
+
+    // Simulate a mid-playback state: aria-valuenow=50 (progress 0.5).
+    // The mock player's seek() doesn't fire a subscribe notification (which
+    // would update aria-valuenow via paint), so we manually sync it after
+    // each key press to mirror the real player's notify → paint → valuenow cycle.
+    const syncValuenow = (pct: number): void => canvas.setAttribute('aria-valuenow', String(pct));
+    syncValuenow(50);
+
+    // ArrowRight → +5% → 0.55
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(playerSeek).toHaveBeenLastCalledWith(0.55);
+    syncValuenow(55);
+
+    // ArrowLeft → -5% → 0.50
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(playerSeek).toHaveBeenLastCalledWith(0.5);
+    syncValuenow(50);
+
+    // Home → 0
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    expect(playerSeek).toHaveBeenLastCalledWith(0);
+    syncValuenow(0);
+
+    // End → 1
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(playerSeek).toHaveBeenLastCalledWith(1);
+    syncValuenow(100);
+
+    // Reset to 50 for PageUp/PageDown.
+    syncValuenow(50);
+
+    // PageUp → +10% → 0.60
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
+    expect(playerSeek).toHaveBeenLastCalledWith(0.6);
+    syncValuenow(60);
+
+    // PageDown → -10% → 0.50
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', bubbles: true }));
+    expect(playerSeek).toHaveBeenLastCalledWith(0.5);
+
+    // Unrelated key does NOT seek.
+    const callsBefore = playerSeek.mock.calls.length;
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(playerSeek.mock.calls.length).toBe(callsBefore);
+  });
+
   it('speed toggle cycles 1 → 1.5 → 2 via nextSpeed', () => {
-    const bubble = createVoiceBubble({ att: makeAtt() });
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
     container.appendChild(bubble.el);
     const speedBtn = bubble.el.querySelector('.oxp-voice-bubble-speed') as HTMLButtonElement;
 
@@ -187,20 +246,28 @@ describe('VoiceBubble render shell', () => {
   });
 
   it('uses the widget own theme (active from --oxp-accent, not voice-core default)', () => {
-    const bubble = createVoiceBubble({ att: makeAtt({ peaks: [0.2, 0.5, 0.8] }) });
+    const bubble = createVoiceBubble({ att: makeAtt({ peaks: [0.2, 0.5, 0.8] }), lang: 'en' });
     container.appendChild(bubble.el);
 
     // renderStaticWaveform is called on the initial subscribe; the theme arg
     // must carry an `active` color (the widget resolves --oxp-accent, falling
-    // back to #0088cc in jsdom) — NOT voice-core's 'currentColor' default.
+    // back to 'currentColor' in jsdom) — NOT voice-core's 'currentColor' as
+    // the DEFAULT (the widget's fallback is a degenerate jsdom case, not the
+    // app-neutral default). The inactive must come from the widget's own
+    // --oxp-waveform-inactive token (fallback 'rgba(0,0,0,0.55)' in jsdom),
+    // NOT voice-core's defaultWaveformTheme value.
     expect(renderStaticWaveform).toHaveBeenCalled();
     const themeArg = vi.mocked(renderStaticWaveform).mock.calls[0]![3] as { active: string; inactive: string };
-    expect(themeArg.active).not.toBe('currentColor');
-    expect(themeArg.inactive).toBe('rgba(128,128,128,0.28)');
+    // Active: the widget tried to resolve --oxp-accent via getComputedStyle.
+    // In jsdom it falls back to 'currentColor' (Canvas2D resolves it).
+    expect(themeArg.active).not.toBe('rgba(128,128,128,0.28)');
+    // Inactive: the widget's own token fallback, NOT the old INACTIVE_BAR literal.
+    expect(themeArg.inactive).not.toBe('rgba(128,128,128,0.28)');
+    expect(themeArg.inactive).toBe('rgba(0,0,0,0.55)');
   });
 
   it('renders a flat fallback when no peaks are present', () => {
-    const bubble = createVoiceBubble({ att: makeAtt() });
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
     container.appendChild(bubble.el);
     expect(renderStaticWaveform).toHaveBeenCalled();
     const peaksArg = vi.mocked(renderStaticWaveform).mock.calls[0]![1] as ReadonlyArray<number>;
@@ -209,8 +276,30 @@ describe('VoiceBubble render shell', () => {
     expect(peaksArg.every((v) => v > 0 && v <= 0.2)).toBe(true);
   });
 
+  it('error phase disables play + announces via aria-live', () => {
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
+    container.appendChild(bubble.el);
+    const playBtn = bubble.el.querySelector('.oxp-voice-bubble-play') as HTMLButtonElement;
+    const errorEl = bubble.el.querySelector('.oxp-voice-bubble-error') as HTMLElement;
+
+    expect(errorEl).not.toBeNull();
+    expect(errorEl.getAttribute('aria-live')).toBe('assertive');
+
+    // Drive the subscribe handler with an error state.
+    stateListener!({
+      phase: 'error',
+      progress01: 0,
+      currentMs: 0,
+      durationMs: 45_000,
+      speed: 1,
+    });
+
+    expect(playBtn.disabled).toBe(true);
+    expect(errorEl.textContent).not.toBe('');
+  });
+
   it('destroy tears down the player + unsubscribes', () => {
-    const bubble = createVoiceBubble({ att: makeAtt() });
+    const bubble = createVoiceBubble({ att: makeAtt(), lang: 'en' });
     container.appendChild(bubble.el);
     bubble.destroy();
     expect(playerDestroy).toHaveBeenCalledTimes(1);
