@@ -28,7 +28,13 @@ import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
 import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
+import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
+import {
+  encodeAttachmentEnvelope,
+  decodeAttachmentEnvelope,
+  attachmentUrl,
+} from './utils/attachment-envelope.js';
 
 const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
 const ELEMENT_TAG = 'oxpulse-chat';
@@ -52,6 +58,72 @@ export function selfUidFromJwt(jwt: string | null): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Hex-encode a digest buffer (crypto.subtle.digest output) — used for the SHA-256 sent to presign. */
+function bytesToHex(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
+ * Read a Blob into an ArrayBuffer via FileReader — Blob.prototype.arrayBuffer()
+ * is unimplemented in some embed/test environments (jsdom has no arrayBuffer/
+ * text/stream on Blob, only slice); FileReader.readAsArrayBuffer is the
+ * portable primitive, matching utils/attachments.ts's compress() which
+ * already reads a Blob via FileReader (readAsDataURL) for the same reason.
+ */
+function readBlobAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));
+    reader.onload = () => {
+      const result = reader.result;
+      if (result instanceof ArrayBuffer) resolve(result);
+      else reject(new Error('FileReader: expected ArrayBuffer result'));
+    };
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+/**
+ * issue #67: read-side inverse of composerClient.sendFile's envelope encode.
+ *
+ * chat-sdk's MessageRow has no attachments field at all (verified: types.ts,
+ * client.ts's rowToMessageRow) — a stored attachment blob is structurally
+ * unlinked from any message on the wire. This widget links them itself: since
+ * cryptoMode is always 'plaintext' here, row.plaintext is UTF-8 bytes fully
+ * controlled by the widget. When those bytes decode as our attachment
+ * envelope (attachment-envelope.ts), unwrap it into row.text (caption) +
+ * row.attachments (AttachmentMeta[], url built from the already-documented
+ * GET /api/sdk/attachments/{id} route). Any other plaintext — every
+ * pre-existing plain-text message — fails the shape check and passes through
+ * unchanged, so this never touches the ordinary text path.
+ */
+function decodeRowAttachments(row: MessageRow, baseUrl: string): MessageRow {
+  if (!row.plaintext) return row;
+  let text: string;
+  try {
+    text = new TextDecoder().decode(row.plaintext);
+  } catch {
+    return row;
+  }
+  const envelope = decodeAttachmentEnvelope(text);
+  if (!envelope) return row;
+  return {
+    ...row,
+    text: envelope.body,
+    attachments: envelope.attachments.map((a) => ({
+      id: a.id,
+      url: attachmentUrl(baseUrl, a.id),
+      mime: a.mime,
+      filename: a.filename,
+      sizeBytes: a.sizeBytes,
+      width: a.width,
+      height: a.height,
+    })),
+  };
 }
 
 // ── OxpulseChatElement ────────────────────────────────────────────────────────
@@ -459,6 +531,18 @@ export class OxpulseChatElement extends HTMLElement {
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
+        /**
+         * issue #67: optional — enables attachment upload. composerClient.sendFile
+         * (below) drives presignAttachment() + PUT + send() directly rather than
+         * chat-sdk's sendFile() convenience wrapper, because that wrapper discards
+         * the presigned attachmentId when it calls send() (attachments.ts:163-167) —
+         * see the "attachments (issue #67)" comment block near composerClient below.
+         * Feature-detected like sendReaction?/getReactions? above; a real
+         * SDKChatClient always has all three together.
+         */
+        send?(roomId: string, args: { senderUid: string; sealed: ArrayBuffer }): Promise<{ seq: number; msgId: string }>;
+        readonly baseUrl?: string;
+        readonly jwt?: string;
       }
 
       // ── Anon-read mode: mint token when allow-anon-read is set and no jwt provided ──
@@ -641,7 +725,10 @@ export class OxpulseChatElement extends HTMLElement {
       // subscribe() bridges onError into the reconnect flow and maps event shapes.
       const widgetClient: MessageListClient = {
         list: (roomId: string, args: { limit: number }) =>
-          sdkClient.list(roomId, { limit: args.limit }),
+          sdkClient.list(roomId, { limit: args.limit }).then((result) => ({
+            ...result,
+            items: result.items.map((row) => decodeRowAttachments(row, resolvedBaseUrl)),
+          })),
 
         subscribe: (roomId: string, args: {
           onMessage: (row: MessageRow) => void;
@@ -650,7 +737,7 @@ export class OxpulseChatElement extends HTMLElement {
           onRosterSignal?: () => void;
         }) => {
           return sdkClient.subscribe(roomId, {
-            onMessage: args.onMessage,
+            onMessage: (row) => args.onMessage(decodeRowAttachments(row, resolvedBaseUrl)),
             onError: handleSubscribeError,
             onRosterSignal: args.onRosterSignal,
             onMutation: args.onMutation
@@ -695,6 +782,22 @@ export class OxpulseChatElement extends HTMLElement {
           ? (roomId: string, msgId: string, emoji: string) => effectiveSendClient!.removeReaction!(roomId, msgId, emoji)
           : undefined,
 
+        // issue #67: GET /api/sdk/attachments/{id} is JWT-authenticated (Authorization:
+        // Bearer only — no signed query-token fallback like the PUT upload URL has), so a
+        // bare `<img src>` 401s for every viewer. resolvedJwt is this widget's own read
+        // token (named or anon-minted) — the same credential list()/subscribe() already
+        // use — so any viewer who can read the room can read its attachments too.
+        fetchAttachmentBlob: async (url: string, signal?: AbortSignal): Promise<Blob> => {
+          const resp = await fetch(url, {
+            headers: { Authorization: `Bearer ${resolvedJwt ?? ''}` },
+            signal,
+          });
+          if (!resp.ok) {
+            throw new Error(`attachment fetch failed: HTTP ${resp.status}`);
+          }
+          return resp.blob();
+        },
+
         // T18: roster — fetch names for OTHER writers via the same JWT.
         getRoster: (roomId: string) => fetchRoster({
           baseUrl: resolvedBaseUrl,
@@ -735,6 +838,14 @@ export class OxpulseChatElement extends HTMLElement {
         // anon-read + named-write combo this fix targets.
         const capturedSendClient = effectiveSendClient;
         const self = this;
+        // issue #67: narrow ONCE to a client that can drive the presign/PUT/send
+        // attachment flow (send/baseUrl/jwt all present — a real SDKChatClient
+        // always has all three together; test mocks opt in explicitly). Typed
+        // here so composerClient.sendFile below needs no per-call-site casts.
+        const attachmentClient: (RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string }) | null =
+          capturedSendClient.send && capturedSendClient.baseUrl !== undefined && capturedSendClient.jwt !== undefined
+            ? (capturedSendClient as RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string })
+            : null;
         const composerClient = {
           sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> =>
             capturedSendClient.sendText(roomId, { senderUid: resolvedSelfUid ?? '', text, ...args }).then((res) => {
@@ -762,6 +873,88 @@ export class OxpulseChatElement extends HTMLElement {
               // Re-throw so the Composer's catch path fires (renders error chip + generic error event).
               throw err;
             }),
+          // issue #67: attachments wired end-to-end. Deliberately bypasses chat-sdk's
+          // sendFile() convenience wrapper (attachments.ts:120-176) — that wrapper's
+          // own SendFileArgs.sealed is a REQUIRED caller-supplied argument, so it must
+          // be built BEFORE presign runs, but presign is the only place attachmentId
+          // is minted. There is no way for a caller of that wrapper to embed
+          // attachmentId into the sealed payload it sends. Driving presign → PUT →
+          // send() directly here removes that ordering constraint. Only exposed when
+          // the underlying client is upload-capable (send/baseUrl/jwt present — mirrors
+          // sendReaction?/getReactions? above); paperclip/paste/drag-drop in composer.ts
+          // stay gated closed otherwise (composer.ts:206/249 feature-detect this field).
+          sendFile: attachmentClient
+            ? async (
+                roomId: string,
+                blob: Blob,
+                args: { senderUid?: string; sha256?: string; mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
+              ): Promise<{ msgId: string; attachmentId: string }> => {
+                try {
+                  const mimeType = args.mimeType ?? blob.type;
+                  const digest = await crypto.subtle.digest('SHA-256', await readBlobAsArrayBuffer(blob));
+                  const sha256 = bytesToHex(digest);
+                  const { attachmentId, uploadUrl } = await presignAttachment(attachmentClient, {
+                    mimeType,
+                    byteSize: blob.size,
+                    sha256,
+                  });
+                  const putUrl = uploadUrl.startsWith('/') ? `${attachmentClient.baseUrl}${uploadUrl}` : uploadUrl;
+                  const putResp = await fetch(putUrl, {
+                    method: 'PUT',
+                    body: blob,
+                    headers: { 'Content-Type': mimeType },
+                    signal: args.signal,
+                  });
+                  if (!putResp.ok) {
+                    throw new Error(`attachment upload failed: HTTP ${putResp.status}`);
+                  }
+                  const sealed = encodeAttachmentEnvelope('', [{
+                    id: attachmentId,
+                    mime: mimeType,
+                    filename: args.filename ?? 'file',
+                    sizeBytes: blob.size,
+                    width: args.width,
+                    height: args.height,
+                  }]);
+                  // Same orphaned-attachment convention as chat-sdk's own sendFile()
+                  // (attachments.ts:161-167): if send() fails AFTER a successful PUT,
+                  // the blob is already stored with no message pointing at it — warn
+                  // with the attachmentId so an operator can find/sweep it later.
+                  let result: { seq: number; msgId: string };
+                  try {
+                    result = await attachmentClient.send(roomId, {
+                      senderUid: args.senderUid ?? resolvedSelfUid ?? '',
+                      sealed,
+                    });
+                  } catch (sendErr) {
+                    console.warn(
+                      `[oxpulse/chat-widget] composerClient.sendFile: attachment ${attachmentId} ` +
+                        'uploaded but client.send failed (orphaned attachment may exist).',
+                      sendErr,
+                    );
+                    throw sendErr;
+                  }
+                  self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
+                    bubbles: true,
+                    composed: true,
+                    detail: { roomId, msgId: result.msgId },
+                  }));
+                  return { msgId: result.msgId, attachmentId };
+                } catch (err) {
+                  // Same write-failure telemetry contract as sendText's catch above —
+                  // an attachment send failure IS a send failure (WriteFailureOp has no
+                  // separate 'send_file' variant; reusing 'send' avoids growing that
+                  // enum for a failure surface that is identical to a text send).
+                  const reason = classifyWriteFailureReason(err);
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  self.#notifyWriteFailure('send', reason, errMsg);
+                  if (reason === 'auth_expired') {
+                    self.#notifyTokenExpired(config.roomId);
+                  }
+                  throw err;
+                }
+              }
+            : undefined,
         };
         this.#composer = new Composer({
           client: composerClient,
@@ -822,7 +1015,7 @@ export class OxpulseChatElement extends HTMLElement {
       // to the existing MessageList via its public handleMessage()/handleReaction() methods.
       const subscribeFn: SubscribeFn = (roomId, onError) => {
         return sdkClient.subscribe(roomId, {
-          onMessage: (row) => { this.#messageList?.handleMessage(row); },
+          onMessage: (row) => { this.#messageList?.handleMessage(decodeRowAttachments(row, resolvedBaseUrl)); },
           onError,
           onMutation: undefined,
           onReaction: (sdkEv) => {

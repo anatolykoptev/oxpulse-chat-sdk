@@ -69,6 +69,40 @@ async function drain(n = 5): Promise<void> {
   for (let i = 0; i < n; i++) await Promise.resolve();
 }
 
+/**
+ * Compression wiring (issue #67): AttachmentPicker.#upload() now runs the real
+ * compress() for every image/* file before calling client.sendFile — jsdom
+ * implements none of createImageBitmap/canvas/FileReader natively, so any
+ * test that pastes/drops a real image File through the REAL Composer ->
+ * AttachmentPicker chain needs this stub (matches the pattern already proven
+ * in attachment-picker.test.ts). FakeReader resolves via microtask (not
+ * setTimeout) so this file's `drain()` (a bounded Promise.resolve() loop)
+ * actually flushes it.
+ */
+function stubImageCompression(): void {
+  vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 400, height: 300, close: vi.fn() }));
+  const mockCtx = { imageSmoothingEnabled: false, imageSmoothingQuality: 'high', drawImage: vi.fn() };
+  const compressedBlob = new Blob(['compressed'], { type: 'image/webp' });
+  const mockCanvas = {
+    width: 0,
+    height: 0,
+    getContext: vi.fn().mockReturnValue(mockCtx),
+    toBlob: vi.fn().mockImplementation((cb: (b: Blob | null) => void) => cb(compressedBlob)),
+  };
+  const origCreate = globalThis.document.createElement.bind(globalThis.document);
+  vi.spyOn(globalThis.document, 'createElement').mockImplementation((tag: string) => {
+    if (tag === 'canvas') return mockCanvas as unknown as HTMLElement;
+    return origCreate(tag);
+  });
+  class FakeReader {
+    onerror: (() => void) | null = null;
+    onload: (() => void) | null = null;
+    result = 'data:image/webp;base64,AA==';
+    readAsDataURL() { void Promise.resolve().then(() => this.onload?.()); }
+  }
+  vi.stubGlobal('FileReader', FakeReader);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 describe('Composer', () => {
@@ -77,10 +111,13 @@ describe('Composer', () => {
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
+    stubImageCompression();
   });
 
   afterEach(() => {
     if (container.parentNode) container.parentNode.removeChild(container);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it('renders_textarea_and_send_button', () => {
