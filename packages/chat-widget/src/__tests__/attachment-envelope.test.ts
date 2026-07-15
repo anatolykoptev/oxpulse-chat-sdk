@@ -45,6 +45,64 @@ describe('encodeAttachmentEnvelope / decodeAttachmentEnvelope', () => {
     expect(decoded?.attachments[0]?.durationMs).toBe(45_000);
   });
 
+  it('round-trips an audio attachment with peaks (sender computes, receiver renders)', () => {
+    const peaks = [0, 0.25, 0.5, 0.75, 1];
+    const buf = encodeAttachmentEnvelope('', [
+      { id: 'att-voice', mime: 'audio/mp4', filename: 'voice.mp4', sizeBytes: 1234, durationMs: 45_000, peaks },
+    ]);
+    const decoded = decodeAttachmentEnvelope(new TextDecoder().decode(buf));
+    expect(decoded?.attachments[0]?.peaks).toEqual(peaks);
+  });
+
+  it('tolerates absence of peaks (legacy envelope → undefined, flat fallback)', () => {
+    const buf = encodeAttachmentEnvelope('', [
+      { id: 'att-voice', mime: 'audio/mp4', filename: 'voice.mp4', sizeBytes: 1234, durationMs: 45_000 },
+    ]);
+    const decoded = decodeAttachmentEnvelope(new TextDecoder().decode(buf));
+    expect(decoded?.attachments[0]?.peaks).toBeUndefined();
+  });
+
+  it('drops non-finite/out-of-range peaks values from a hostile room peer', () => {
+    const decoded = decodeAttachmentEnvelope(JSON.stringify({
+      v: 1,
+      t: 'att',
+      body: '',
+      attachments: [{
+        id: 'hostile', mime: 'audio/mp4', filename: 'v.mp4', sizeBytes: 1,
+        peaks: [0.5, NaN, -0.1, 1.5, 0.2, Infinity, 'x' as unknown as number],
+      }],
+    }));
+    // Only the valid float[0,1] values survive; the field is kept (valid remain).
+    expect(decoded?.attachments[0]?.peaks).toEqual([0.5, 0.2]);
+  });
+
+  it('drops the peaks field entirely when no valid values remain', () => {
+    const decoded = decodeAttachmentEnvelope(JSON.stringify({
+      v: 1,
+      t: 'att',
+      body: '',
+      attachments: [{
+        id: 'hostile', mime: 'audio/mp4', filename: 'v.mp4', sizeBytes: 1,
+        peaks: [NaN, -1, 2, Infinity],
+      }],
+    }));
+    expect(decoded?.attachments[0]?.peaks).toBeUndefined();
+  });
+
+  it('clamps peaks length to MAX_VOICE_PEAKS=64', () => {
+    const huge = Array.from({ length: 100 }, (_, i) => (i % 101) / 100);
+    const decoded = decodeAttachmentEnvelope(JSON.stringify({
+      v: 1,
+      t: 'att',
+      body: '',
+      attachments: [{
+        id: 'big', mime: 'audio/mp4', filename: 'v.mp4', sizeBytes: 1,
+        peaks: huge,
+      }],
+    }));
+    expect(decoded?.attachments[0]?.peaks).toHaveLength(64);
+  });
+
   it('drops_negative_or_nonfinite_durationMs', () => {
     const decoded = decodeAttachmentEnvelope(JSON.stringify({
       v: 1,

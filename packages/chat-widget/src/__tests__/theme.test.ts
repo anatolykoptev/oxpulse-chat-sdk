@@ -314,6 +314,10 @@ describe('theme foundation', () => {
     el.setAttribute('app-id', 'app1');
     el.setAttribute('jwt', LOCALHOST_JWT);
     el.setAttribute('room-id', 'room1');
+    // #102: inject the mock client so mount's #fetchAndRender resolves instead
+    // of hitting a nonexistent backend — without this the eventual rejection
+    // landed in a LATER test's window as an unhandled rejection (CI #77/#100).
+    el._setCallbacks({ _createClient: () => makeMockClient() });
     container.appendChild(el);
     await new Promise((r) => setTimeout(r, 20));
     const css = el.shadowRoot!.querySelector('style')!.textContent ?? '';

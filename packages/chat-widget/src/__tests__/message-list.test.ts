@@ -521,9 +521,16 @@ describe('MessageList', () => {
     const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
     await ml.mount();
 
+    // Phase 2: audio attachments render as a VoiceBubble shell (headless
+    // player + waveform) — the shell owns a hidden <audio> (no native
+    // controls; play/pause/seek/speed are the shell's own affordances).
     const audio = container.querySelector('.oxp-attachment-audio audio') as HTMLAudioElement | null;
     expect(audio).not.toBeNull();
-    expect(audio!.hasAttribute('controls')).toBe(true);
+    expect(audio!.hasAttribute('controls')).toBe(false);
+    // The shell's play/pause + waveform + speed buttons are present.
+    expect(container.querySelector('.oxp-voice-bubble-play')).not.toBeNull();
+    expect(container.querySelector('canvas.oxp-voice-bubble-waveform')).not.toBeNull();
+    expect(container.querySelector('.oxp-voice-bubble-speed')).not.toBeNull();
 
     ml.destroy();
   });
@@ -1625,5 +1632,45 @@ describe('MessageList — P2 scroll re-pin on composer resize', () => {
     expect(durationEl).not.toBeNull();
     expect(durationEl!.textContent).toBe('01:05');
     ml.destroy();
+  });
+
+  // #102 flake guard: a post-teardown #dispatchError (an in-flight
+  // #fetchAndRender whose list() rejected AFTER destroy() aborted the
+  // signal) must NOT fire oxpulse-chat:error on the torn-down container.
+  // This red-flaked CI twice (#77, #100) as an unhandled rejection landing
+  // in a LATER test's window. Falsifiable: remove the `#signal.aborted`
+  // guard in #dispatchError and this test fails (the event fires + the
+  // unhandled rejection surfaces).
+  it('does_not_dispatch_error_after_teardown (#102 flake guard)', async () => {
+    // list() resolves on a microtask so destroy() races it — the rejection
+    // path is exercised by a rejecting list() that settles AFTER destroy().
+    const slowRejectClient: MessageListClient = {
+      list: vi.fn().mockImplementation(() => new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('boom')), 5);
+      })),
+      subscribe: vi.fn().mockReturnValue(() => {}),
+    };
+    const errors: string[] = [];
+    container.addEventListener('oxpulse-chat:error', (e) => {
+      errors.push((e as CustomEvent).detail?.message ?? '');
+    });
+
+    const ml = new MessageList({
+      client: slowRejectClient,
+      roomId: 'r1',
+      container,
+      lang: 'en',
+      selfUid: 'u1',
+    });
+    // Fire mount() without awaiting — destroy() mid-flight mirrors the
+    // theme.test.ts cases that remove the container in afterEach while
+    // mount is still in-flight.
+    void ml.mount();
+    ml.destroy();
+
+    // Let the slow rejection settle AFTER teardown.
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(errors).toEqual([]);
   });
 });

@@ -128,6 +128,7 @@ export function decodeRowAttachments(row: MessageRow, baseUrl: string): MessageR
       width: a.width,
       height: a.height,
       durationMs: a.durationMs,
+      peaks: a.peaks,
     })),
   };
 }

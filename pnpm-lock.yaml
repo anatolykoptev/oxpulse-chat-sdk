@@ -51,6 +51,9 @@ importers:
       '@oxpulse/chat-sdk':
         specifier: workspace:^
         version: link:../chat-sdk
+      '@oxpulse/voice-core':
+        specifier: workspace:*
+        version: link:../voice-core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
