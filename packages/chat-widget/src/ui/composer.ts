@@ -94,6 +94,8 @@ export class Composer {
   #replyTarget: ReplySnapshot | null = null;
   /** W7: reply preview bar container — created in mount(), populated by setReplyTarget(). */
   #replyEl: HTMLDivElement | null = null;
+  /** #113: product-card attached chip container — created in mount(), populated by setProductCard(). */
+  #productCardEl: HTMLDivElement | null = null;
 
   // P0: voice recording
   #main: HTMLElement | null = null;
@@ -166,16 +168,33 @@ export class Composer {
    * by design, mirroring the sendProductCard contract to enable marketplace
    * search. Only `productRef` is opaque. Do not put sensitive data in
    * `productMeta`.
+   *
+   * Routing (#114): the widget sends cards through `sendText()` with
+   * `productRef`/`productMeta` args rather than the SDK's standalone
+   * `sendProductCard()` convenience API — see the doc-comment on
+   * `SDKChatClient.sendProductCard` in packages/chat-sdk/src/client.ts for
+   * the rationale. Both paths produce the same wire payload.
    */
   setProductCard(productRef: string, productMeta: ProductMeta): void {
     this.#productRef = productRef;
     this.#productMeta = productMeta;
+    this.#renderProductCardChip();
+    // A staged card makes the message sendable even with an empty textarea
+    // (bare marketplace card) — refresh the send-button enabled state.
+    this.#updateState();
   }
 
   /** Clear a previously set product card without sending. */
   clearProductCard(): void {
     this.#productRef = null;
     this.#productMeta = null;
+    this.#renderProductCardChip();
+    this.#updateState();
+  }
+
+  /** True when a product card is staged to ride the next send. */
+  #hasPendingProductCard(): boolean {
+    return this.#productRef !== null && this.#productMeta !== null;
   }
 
   /**
@@ -243,6 +262,28 @@ export class Composer {
     replyEl.appendChild(replyCancel);
 
     this.#replyEl = replyEl;
+
+    // #113: product-card attached chip — hidden until setProductCard() is called.
+    // Mirrors the reply-preview bar pattern (role="status", dismiss × button).
+    const productCardEl = document.createElement('div');
+    productCardEl.className = 'oxp-composer-product-chip';
+    productCardEl.setAttribute('role', 'status');
+    productCardEl.setAttribute('aria-label', t('productCardAttached', this.#lang, { title: '' }));
+    productCardEl.hidden = true;
+
+    const productCardLabel = document.createElement('span');
+    productCardLabel.className = 'oxp-composer-product-chip-label';
+    productCardEl.appendChild(productCardLabel);
+
+    const productCardCancel = document.createElement('button');
+    productCardCancel.type = 'button';
+    productCardCancel.className = 'oxp-composer-product-chip-cancel';
+    productCardCancel.setAttribute('aria-label', t('removeProductCard', this.#lang));
+    productCardCancel.textContent = '×';
+    productCardCancel.addEventListener('click', () => this.clearProductCard());
+    productCardEl.appendChild(productCardCancel);
+
+    this.#productCardEl = productCardEl;
 
     const sendBtn = document.createElement('button');
     sendBtn.className = 'oxp-composer-send';
@@ -407,6 +448,7 @@ export class Composer {
 
     root.appendChild(sendHint);
     root.appendChild(replyEl);
+    root.appendChild(productCardEl);
     root.appendChild(main);
     root.insertBefore(recordingEl, main);
     root.insertBefore(voicePreviewEl, main);
@@ -543,6 +585,7 @@ export class Composer {
     this.#counter = null;
     this.#errorChip = null;
     this.#replyEl = null;
+    this.#productCardEl = null;
     this.#micBtn = null;
     this.#recordingEl = null;
     this.#recordingTimerEl = null;
@@ -1012,6 +1055,7 @@ export class Composer {
         this.#lastText = '';
         this.#productRef = null;
         this.#productMeta = null;
+        this.#renderProductCardChip();
         this.#clearReplyTarget();
         this.#clearVoicePreview();
       }
@@ -1046,7 +1090,7 @@ export class Composer {
     const hasStaged = this.#attachmentPicker?.hasStaged() ?? false;
 
     const overLimit = len > MAX_BODY_CHARS;
-    const empty = trimmed.length === 0 && !hasStaged;
+    const empty = trimmed.length === 0 && !hasStaged && !this.#hasPendingProductCard();
     this.#sendBtn.disabled = empty || overLimit || this.#sending;
     // Voice preview carries its own Send button; hide the main input-row send button.
     this.#sendBtn.hidden = this.#voicePreviewObjectURL !== null;
@@ -1107,7 +1151,7 @@ export class Composer {
       return this.#sendVoicePreview();
     }
 
-    if (text.length === 0 && !hasStaged) return;
+    if (text.length === 0 && !hasStaged && !this.#hasPendingProductCard()) return;
 
     // Save for retry before the send attempt
     this.#lastText = text;
@@ -1184,6 +1228,7 @@ export class Composer {
         this.#lastText = '';
         this.#productRef = null;
         this.#productMeta = null;
+        this.#renderProductCardChip();
         this.#clearReplyTarget();
         this.#attachmentPicker?.clearStaged();
         this.#updateState();
@@ -1279,5 +1324,25 @@ export class Composer {
   #clearReplyTarget(): void {
     this.#replyTarget = null;
     this.#renderReplyTarget();
+  }
+
+  // ── Product card chip (#113) ────────────────────────────────────────────────
+
+  /** Render or clear the product-card attached chip based on #productMeta. */
+  #renderProductCardChip(): void {
+    if (!this.#productCardEl) return;
+    if (!this.#productMeta) {
+      this.#productCardEl.hidden = true;
+      return;
+    }
+    const label = this.#productCardEl.querySelector('.oxp-composer-product-chip-label');
+    if (label) {
+      label.textContent = t('productCardAttached', this.#lang, { title: this.#productMeta.title });
+    }
+    this.#productCardEl.setAttribute(
+      'aria-label',
+      t('productCardAttached', this.#lang, { title: this.#productMeta.title }),
+    );
+    this.#productCardEl.hidden = false;
   }
 }

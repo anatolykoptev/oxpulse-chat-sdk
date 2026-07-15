@@ -594,6 +594,46 @@ export const THEME_CSS = `
   outline-offset: 2px;
 }
 
+/* #113: product-card attached chip — mirrors the reply-preview bar pattern. */
+.oxp-composer-product-chip {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  padding: calc(var(--oxp-spacing-unit) * 0.5) var(--oxp-spacing-unit);
+  border-left: 3px solid var(--oxp-accent);
+  border-radius: calc(var(--oxp-radius) * 0.5);
+  background: color-mix(in srgb, var(--oxp-bubble-other-bg) 60%, transparent);
+  color: var(--oxp-fg);
+}
+
+.oxp-composer-product-chip-label {
+  font-size: 0.85rem;
+  color: var(--oxp-fg-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.oxp-composer-product-chip-cancel {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--oxp-fg-secondary);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.oxp-composer-product-chip-cancel:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
 /* M10: visually-hidden for screen-reader-only text */
 .oxp-sr-only {
   position: absolute;

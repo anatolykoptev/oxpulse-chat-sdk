@@ -119,9 +119,48 @@ function dtoToMember(dto: MemberDTO): Member {
 // ─── Shared row mapper (M5 DRY fix) ──────────────────────────────────────────
 
 /**
+ * #117: Validate + normalize a raw `product_meta` payload at the SDK receive
+ * boundary. Mirrors the widget's `normalizeProductMeta` render-gate guard so
+ * `MessageRow.productMeta: ProductMeta | null` is honest for all SDK consumers.
+ *
+ * Rules:
+ *   - Non-object → null.
+ *   - Core fields (title, price, currency) must be non-empty strings → else null.
+ *   - Length caps: title 200, price 40, currency 16, urls 2048 (truncated).
+ *   - Non-string / oversized URLs coerced to '' (never garbage).
+ */
+function normalizeProductMeta(raw: unknown): ProductMeta | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+
+  const title = typeof obj['title'] === 'string' ? obj['title'] : '';
+  const price = typeof obj['price'] === 'string' ? obj['price'] : '';
+  const currency = typeof obj['currency'] === 'string' ? obj['currency'] : '';
+
+  // Core fields must be non-empty strings.
+  if (title.length === 0 || price.length === 0 || currency.length === 0) return null;
+
+  const capUrl = (v: unknown): string => {
+    // Non-string or over-cap → '' (render-safe: the isSafeAttachmentUrl gate
+    // then omits the image/link) — never a truncated, broken-but-clickable URL.
+    if (typeof v !== 'string' || v.length > 2048) return '';
+    return v;
+  };
+
+  return {
+    title: title.length > 200 ? title.slice(0, 200) : title,
+    price: price.length > 40 ? price.slice(0, 40) : price,
+    currency: currency.length > 16 ? currency.slice(0, 16) : currency,
+    imageUrl: capUrl(obj['imageUrl']),
+    productUrl: capUrl(obj['productUrl']),
+  };
+}
+
+/**
  * Map a raw wire-DTO row (snake_case) to a `MessageRow` (camelCase).
  * Used by list(), thread list, and the SSE onmessage handler.
  * M5 fix: extracted from two duplicated sites to prevent mapper drift.
+ * #117: product_meta is normalized at this receive boundary — never garbage.
  */
 function rowToMessageRow(row: {
   seq: number;
@@ -144,7 +183,7 @@ function rowToMessageRow(row: {
     createdAt: row.created_at,
     threadRootMsgId: row.thread_root_msg_id ?? null,
     productRef: row.product_ref ?? null,
-    productMeta: row.product_meta ?? null,
+    productMeta: normalizeProductMeta(row.product_meta),
     editedAt: row.edited_at ?? undefined,
     deletedAt: row.deleted_at ?? undefined,
     editCount: row.edit_count ?? 0,
@@ -2610,6 +2649,18 @@ export class SDKChatClient {
    * (plaintext productMeta only, no E2EE content).
    *
    * Wire-contract: POST /api/sdk/messages with `product_ref` + `product_meta`.
+   *
+   * API role (#114): this is the PUBLIC external-integrator convenience API for
+   * sending a product-card message in a single call. The in-house
+   * `@oxpulse/chat-widget` composer deliberately does NOT call this method —
+   * it routes cards through `sendText()` with `productRef`/`productMeta` args
+   * (see Composer.setProductCard in packages/chat-widget/src/ui/composer.ts)
+   * so the card travels the same send path as the caption text. Both paths
+   * produce the same wire payload; the split is an integrator-convenience vs.
+   * in-house-routing decision, not a behavioral difference. Do NOT reroute the
+   * widget to use this method — the composer's send-enable logic, error-chip
+   * retry, and attachment-fallback paths all depend on the shared `sendText`
+   * entrypoint.
    */
   async sendProductCard(
     roomId: string,
