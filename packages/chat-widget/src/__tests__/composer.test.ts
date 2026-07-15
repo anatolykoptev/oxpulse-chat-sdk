@@ -1111,6 +1111,35 @@ describe('Composer', () => {
     composer.destroy();
   });
 
+  it('sends_bare_product_card_with_empty_text', async () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const productMeta = {
+      title: 'Palatka',
+      price: '8400',
+      currency: 'RUB',
+      imageUrl: 'https://example.com/t.png',
+      productUrl: 'https://example.com/p/9',
+    };
+
+    // A staged card with NO typed text must enable the send button and ride an
+    // empty-text send (the bare "drop the product in" marketplace flow).
+    composer.setProductCard('sku-bare', productMeta);
+    expect(getSendBtn(container).disabled).toBe(false);
+    getSendBtn(container).click();
+    await drain(20);
+
+    expect(client.sendText).toHaveBeenCalledOnce();
+    expect(client.sendText).toHaveBeenCalledWith('r1', '', {
+      productRef: 'sku-bare',
+      productMeta,
+    });
+
+    composer.destroy();
+  });
+
   it('forwards_productRef_and_productMeta_to_sendTextOptimistic_when_e2ee', async () => {
     const client = makeStubClient({ hasE2ee: true });
     const composer = new Composer({ client, roomId: 'r1', container });

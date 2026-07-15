@@ -170,12 +170,21 @@ export class Composer {
   setProductCard(productRef: string, productMeta: ProductMeta): void {
     this.#productRef = productRef;
     this.#productMeta = productMeta;
+    // A staged card makes the message sendable even with an empty textarea
+    // (bare marketplace card) — refresh the send-button enabled state.
+    this.#updateState();
   }
 
   /** Clear a previously set product card without sending. */
   clearProductCard(): void {
     this.#productRef = null;
     this.#productMeta = null;
+    this.#updateState();
+  }
+
+  /** True when a product card is staged to ride the next send. */
+  #hasPendingProductCard(): boolean {
+    return this.#productRef !== null && this.#productMeta !== null;
   }
 
   /**
@@ -1046,7 +1055,7 @@ export class Composer {
     const hasStaged = this.#attachmentPicker?.hasStaged() ?? false;
 
     const overLimit = len > MAX_BODY_CHARS;
-    const empty = trimmed.length === 0 && !hasStaged;
+    const empty = trimmed.length === 0 && !hasStaged && !this.#hasPendingProductCard();
     this.#sendBtn.disabled = empty || overLimit || this.#sending;
     // Voice preview carries its own Send button; hide the main input-row send button.
     this.#sendBtn.hidden = this.#voicePreviewObjectURL !== null;
@@ -1107,7 +1116,7 @@ export class Composer {
       return this.#sendVoicePreview();
     }
 
-    if (text.length === 0 && !hasStaged) return;
+    if (text.length === 0 && !hasStaged && !this.#hasPendingProductCard()) return;
 
     // Save for retry before the send attempt
     this.#lastText = text;

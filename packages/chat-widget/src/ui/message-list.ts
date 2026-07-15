@@ -461,6 +461,41 @@ function renderAttachment(
   return wrap;
 }
 
+const PRODUCT_TITLE_MAX = 200;
+const PRODUCT_PRICE_MAX = 40;
+const PRODUCT_CURRENCY_MAX = 16;
+const PRODUCT_URL_MAX = 2048;
+
+/**
+ * W9 hardening: validate + cap server-supplied `product_meta` before render.
+ * `product_meta` is unsealed opaque JSON any room peer can POST (the SDK types
+ * it `ProductMeta` but the wire is `unknown`), so a partial, non-object, or
+ * oversized value must degrade to "no card" — never render "undefined" or a
+ * multi-MB title (layout DoS-lite; body text is char-capped, product_meta is
+ * not). Returns a safe ProductMeta, or null when the always-shown display
+ * fields are unusable (→ the card is skipped, the message still renders).
+ */
+function normalizeProductMeta(raw: unknown): ProductMeta | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const m = raw as Record<string, unknown>;
+  // Core display fields (title + price + currency are always shown) must be
+  // non-empty strings, else there's no sensible card to draw.
+  if (typeof m.title !== 'string' || m.title.length === 0) return null;
+  if (typeof m.price !== 'string' || m.price.length === 0) return null;
+  if (typeof m.currency !== 'string' || m.currency.length === 0) return null;
+  // URLs are optional; a non-string or over-cap value degrades to '' so the
+  // isSafeAttachmentUrl gate in renderProduct simply omits the image/link.
+  const cappedUrl = (v: unknown): string =>
+    typeof v === 'string' && v.length <= PRODUCT_URL_MAX ? v : '';
+  return {
+    title: m.title.slice(0, PRODUCT_TITLE_MAX),
+    price: m.price.slice(0, PRODUCT_PRICE_MAX),
+    currency: m.currency.slice(0, PRODUCT_CURRENCY_MAX),
+    imageUrl: cappedUrl(m.imageUrl),
+    productUrl: cappedUrl(m.productUrl),
+  };
+}
+
 /** W9: Render a marketplace product card as a clickable preview. */
 function renderProduct(meta: ProductMeta, lang: Locale): HTMLElement {
   const safeImage = isSafeAttachmentUrl(meta.imageUrl);
@@ -475,6 +510,9 @@ function renderProduct(meta: ProductMeta, lang: Locale): HTMLElement {
     img.src = meta.imageUrl;
     img.alt = meta.title;
     img.setAttribute('loading', 'lazy');
+    // Passive-leak guard: imageUrl is peer-controlled (unsealed product_meta),
+    // so don't leak the viewer's page URL as a referrer on image load.
+    img.referrerPolicy = 'no-referrer';
     card.appendChild(img);
   }
 
@@ -1747,7 +1785,8 @@ export class MessageList {
     // review-fix LOW: gate on !deletedAt && !unsealError so product card never
     // replaces or leaks alongside tombstone / failed-decrypt placeholders.
     if (!row.deletedAt && !row.unsealError && row.productRef && row.productMeta) {
-      el.appendChild(renderProduct(row.productMeta, this.#lang));
+      const meta = normalizeProductMeta(row.productMeta);
+      if (meta) el.appendChild(renderProduct(meta, this.#lang));
     }
 
     // W2.2 slice 4: Render attachment bubbles.

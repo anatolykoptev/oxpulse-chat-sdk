@@ -1384,6 +1384,80 @@ describe('MessageList — W9 product card', () => {
     ml.destroy();
   });
 
+  it('skips_product_card_for_partial_productMeta_missing_core_field', async () => {
+    // Server product_meta is unsealed opaque JSON; a missing core field
+    // (currency) must degrade to no card, never render "undefined".
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-1',
+        productMeta: { title: 'X', price: '10', imageUrl: '', productUrl: '' } as unknown as MessageRow['productMeta'],
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble!.querySelector('.oxp-bubble-product')).toBeNull();
+    expect(bubble!.textContent).not.toContain('undefined');
+
+    ml.destroy();
+  });
+
+  it('skips_product_card_for_non_object_productMeta', async () => {
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-1',
+        productMeta: 'garbage' as unknown as MessageRow['productMeta'],
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble!.querySelector('.oxp-bubble-product')).toBeNull();
+
+    ml.destroy();
+  });
+
+  it('caps_oversized_product_title', async () => {
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        productRef: 'sku-1',
+        productMeta: { ...makeProductMeta(), title: 'A'.repeat(500) },
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const title = container.querySelector('.oxp-product-title') as HTMLElement | null;
+    expect(title).not.toBeNull();
+    expect(title!.textContent!.length).toBe(200);
+
+    ml.destroy();
+  });
+
+  it('sets_no_referrer_on_product_image', async () => {
+    const rows = [makeRow({ senderUid: 'u2', seq: 1, productRef: 'sku-1', productMeta: makeProductMeta() })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const img = container.querySelector('.oxp-product-image') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img!.referrerPolicy).toBe('no-referrer');
+
+    ml.destroy();
+  });
+
   it('renders_product_card_on_live_message', async () => {
     const client = makeMockClient([]);
     const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
