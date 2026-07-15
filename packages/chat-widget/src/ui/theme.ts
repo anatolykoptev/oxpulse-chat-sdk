@@ -993,7 +993,7 @@ export const THEME_CSS = `
   z-index: 1;
 }
 
-/* Upload queue popover — DM3: position:absolute so it doesn't displace composer flex layout.
+/* Staged attachment tray — DM3: position:absolute so it doesn't displace composer flex layout.
  * DB2: box-shadow 0 0 0 1px discrete ring (same pattern as reaction picker — F1 WCAG 1.4.11).
  *   Light: rgba(0,0,0,0.50) on #fff → rgb(128,128,128) → 3.95:1 PASS.
  *   Dark:  rgba(255,255,255,0.50) on #1c1c1e → rgb(141,141,142) → 4.39:1 PASS. */
@@ -1004,10 +1004,11 @@ export const THEME_CSS = `
   border-radius: var(--oxp-radius);
   padding: calc(var(--oxp-spacing-unit) * 0.5);
   display: flex;
-  flex-direction: column;
-  gap: calc(var(--oxp-spacing-unit) * 0.5);
-  max-height: 200px;
-  overflow-y: auto;
+  flex-direction: row;
+  gap: 4px;
+  max-height: 92px;
+  overflow-x: auto;
+  overflow-y: hidden;
   position: absolute;
   bottom: 100%;
   left: 0;

@@ -38,6 +38,8 @@ export interface AttachmentPickerOptions {
   signal?: AbortSignal;
   /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
   lang?: string;
+  /** Optional callback fired whenever the staged list changes. */
+  onChange?: () => void;
 }
 
 /** Per-file staged attachment state. */
@@ -87,12 +89,16 @@ export class AttachmentPicker {
   /** Pending awaiters for awaitAllUploaded(). */
   #awaiters: Awaiter[] = [];
 
+  /** Optional callback fired whenever the staged list changes. */
+  readonly #onChange: (() => void) | undefined;
+
   constructor(opts: AttachmentPickerOptions) {
     this.#container = opts.container;
     this.#client = opts.client;
     this.#roomId = opts.roomId;
     this.#signal = opts.signal;
     this.#lang = resolveLocale(opts.lang);
+    this.#onChange = opts.onChange;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -104,7 +110,7 @@ export class AttachmentPicker {
     const root = document.createElement('div');
     root.className = 'oxp-attachment-picker';
 
-    // Hidden file input
+    // Hidden file input — the visible trigger lives in composer.ts (BUG-1 fix).
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
@@ -113,14 +119,7 @@ export class AttachmentPicker {
     input.setAttribute('aria-label', t('chooseFilesToAttachAria', this.#lang));
     input.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0';
 
-    // Visible paperclip button (BUG-1 removed in slice 4; composer.ts:207 attachBtn stays the sole trigger).
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'oxp-attachment-btn';
-    btn.setAttribute('aria-label', t('attachFilesAria', this.#lang));
-    btn.textContent = '📎';
-
-    // Queue list (replaced by horizontal tray in slice 4)
+    // Staging tray (horizontal thumbnail strip in slice 4)
     const queueEl = document.createElement('div');
     queueEl.className = 'oxp-attachment-queue';
     queueEl.hidden = true;
@@ -133,7 +132,6 @@ export class AttachmentPicker {
     live.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap';
 
     root.appendChild(input);
-    root.appendChild(btn);
     root.appendChild(queueEl);
     root.appendChild(live);
     this.#container.appendChild(root);
@@ -143,7 +141,6 @@ export class AttachmentPicker {
     this.#liveRegion = live;
     this.#queueEl = queueEl;
 
-    btn.addEventListener('click', this.#onBtnClick);
     input.addEventListener('change', this.#onInputChange);
 
     this.#signal?.addEventListener('abort', () => this.destroy(), { once: true });
@@ -243,10 +240,6 @@ export class AttachmentPicker {
   }
 
   // ── Private ─────────────────────────────────────────────────────────────────
-
-  readonly #onBtnClick = (): void => {
-    this.openFileDialog();
-  };
 
   readonly #onInputChange = (): void => {
     if (this.#input?.files) {
@@ -355,7 +348,7 @@ export class AttachmentPicker {
   }
 
   /**
-   * CM6: Diff-patch queue — mutate existing row nodes in-place rather than
+   * CM6: Diff-patch tray — mutate existing card nodes in-place rather than
    * wiping innerHTML=''. This preserves focus when a progress update fires while
    * the user has a cancel/retry button focused.
    */
@@ -366,51 +359,59 @@ export class AttachmentPicker {
     const visible = this.#items;
     queueEl.hidden = visible.length === 0;
 
-    const existingRows = new Map<string, HTMLElement>();
+    const existingCards = new Map<string, HTMLElement>();
     for (const el of Array.from(queueEl.querySelectorAll<HTMLElement>('.oxp-attachment-item'))) {
       const key = el.getAttribute('data-item-id');
-      if (key) existingRows.set(key, el);
+      if (key) existingCards.set(key, el);
     }
 
     const visibleIds = new Set(visible.map((i) => i.id));
-    for (const [key, el] of existingRows) {
+    for (const [key, el] of existingCards) {
       if (!visibleIds.has(key)) {
         queueEl.removeChild(el);
-        existingRows.delete(key);
+        existingCards.delete(key);
       }
     }
 
     for (const item of visible) {
       const safeName = sanitizeFilename(item.file.name);
       const itemId = item.id;
-      let row = existingRows.get(itemId);
+      let card = existingCards.get(itemId);
 
-      if (!row) {
-        row = document.createElement('div');
-        row.className = 'oxp-attachment-item';
-        row.setAttribute('data-item-id', itemId);
-        row.setAttribute('data-file-name', item.file.name);
+      if (!card) {
+        card = document.createElement('div');
+        card.className = 'oxp-attachment-item';
+        card.setAttribute('data-item-id', itemId);
+        card.setAttribute('data-file-name', item.file.name);
+        card.style.cssText =
+          'position:relative;flex:0 0 auto;width:72px;height:72px;overflow:hidden;border-radius:var(--oxp-radius);border:1px solid var(--oxp-border);background:var(--oxp-bg);display:flex;align-items:center;justify-content:center';
 
-        const nameEl = document.createElement('span');
-        nameEl.className = 'oxp-attachment-name';
-        nameEl.textContent = safeName;
-        row.appendChild(nameEl);
+        const preview = document.createElement('div');
+        preview.className = 'oxp-attachment-preview';
+        preview.style.cssText =
+          'width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden';
+        card.appendChild(preview);
 
         const bar = document.createElement('div');
         bar.className = 'oxp-attachment-progress';
         bar.setAttribute('role', 'progressbar');
         bar.setAttribute('aria-valuetext', t('uploadingProgressAria', this.#lang));
-        row.appendChild(bar);
+        bar.style.cssText = 'position:absolute;bottom:4px;left:4px;right:4px;height:4px;z-index:1';
+        card.appendChild(bar);
 
         const errEl = document.createElement('span');
         errEl.className = 'oxp-attachment-error';
+        errEl.style.cssText =
+          'position:absolute;bottom:4px;left:4px;right:4px;font-size:0.65rem;text-align:center;color:var(--oxp-danger);z-index:1';
         errEl.hidden = true;
-        row.appendChild(errEl);
+        card.appendChild(errEl);
 
         const retryBtn = document.createElement('button');
         retryBtn.type = 'button';
         retryBtn.className = 'oxp-attachment-retry';
         retryBtn.textContent = t('retry', this.#lang);
+        retryBtn.style.cssText =
+          'position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:0.65rem;z-index:1';
         retryBtn.hidden = true;
         retryBtn.addEventListener('click', () => {
           item.status = 'uploading';
@@ -422,13 +423,15 @@ export class AttachmentPicker {
           this.#renderQueue();
           void this.#upload(item);
         });
-        row.appendChild(retryBtn);
+        card.appendChild(retryBtn);
 
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'oxp-attachment-cancel';
         cancelBtn.setAttribute('aria-label', t('cancelUploadOfAria', this.#lang, { name: safeName }));
         cancelBtn.textContent = '✕';
+        cancelBtn.style.cssText =
+          'position:absolute;top:2px;right:2px;min-width:20px;min-height:20px;padding:0;line-height:1;z-index:1';
         cancelBtn.addEventListener('click', () => {
           item.abortController.abort();
           this.#revokeItemObjectURL(item);
@@ -437,31 +440,104 @@ export class AttachmentPicker {
           this.#renderQueue();
           this.#flushAwaiters();
         });
-        row.appendChild(cancelBtn);
+        card.appendChild(cancelBtn);
 
-        queueEl.appendChild(row);
+        const uploadingOverlay = document.createElement('div');
+        uploadingOverlay.className = 'oxp-attachment-uploading-overlay';
+        uploadingOverlay.setAttribute('aria-hidden', 'true');
+        uploadingOverlay.style.cssText =
+          'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.25);color:var(--oxp-fg);font-size:1.2rem;z-index:2';
+        uploadingOverlay.textContent = '⏳';
+        uploadingOverlay.hidden = true;
+        card.appendChild(uploadingOverlay);
+
+        queueEl.appendChild(card);
       }
 
-      row.setAttribute('data-status', item.status);
+      card.setAttribute('data-status', item.status);
 
-      const bar = row.querySelector('.oxp-attachment-progress') as HTMLElement | null;
-      const errEl = row.querySelector('.oxp-attachment-error') as HTMLElement | null;
-      const retryBtn = row.querySelector('.oxp-attachment-retry') as HTMLElement | null;
+      const preview = card.querySelector('.oxp-attachment-preview') as HTMLElement | null;
+      const bar = card.querySelector('.oxp-attachment-progress') as HTMLElement | null;
+      const errEl = card.querySelector('.oxp-attachment-error') as HTMLElement | null;
+      const retryBtn = card.querySelector('.oxp-attachment-retry') as HTMLButtonElement | null;
+      const overlay = card.querySelector('.oxp-attachment-uploading-overlay') as HTMLElement | null;
+
+      if (preview) {
+        if (item.status === 'done') {
+          preview.innerHTML = '';
+          preview.style.flexDirection = 'row';
+          if (item.mime.startsWith('image/')) {
+            const img = document.createElement('img');
+            img.src = item.objectURL;
+            img.alt = safeName;
+            img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block';
+            preview.appendChild(img);
+          } else {
+            const icon = document.createElement('div');
+            icon.textContent = '📎';
+            icon.style.cssText = 'font-size:1.5rem;text-align:center';
+            preview.appendChild(icon);
+            const name = document.createElement('span');
+            name.className = 'oxp-attachment-name';
+            name.textContent = safeName;
+            name.style.cssText =
+              'font-size:0.65rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;padding:0 2px';
+            preview.appendChild(name);
+            preview.style.flexDirection = 'column';
+            preview.style.gap = '2px';
+          }
+        } else if (item.status === 'error') {
+          preview.innerHTML = '';
+          preview.style.flexDirection = 'row';
+          const icon = document.createElement('div');
+          icon.textContent = '⚠';
+          icon.style.cssText = 'color:var(--oxp-danger);font-size:1.2rem;text-align:center';
+          preview.appendChild(icon);
+        } else {
+          preview.innerHTML = '';
+          preview.style.flexDirection = 'row';
+          if (item.mime.startsWith('image/')) {
+            const img = document.createElement('img');
+            img.src = item.objectURL;
+            img.alt = safeName;
+            img.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;opacity:0.6';
+            preview.appendChild(img);
+          } else {
+            const icon = document.createElement('div');
+            icon.textContent = '📎';
+            icon.style.cssText = 'font-size:1.5rem;text-align:center';
+            preview.appendChild(icon);
+            const name = document.createElement('span');
+            name.className = 'oxp-attachment-name';
+            name.textContent = safeName;
+            name.style.cssText =
+              'font-size:0.65rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;padding:0 2px';
+            preview.appendChild(name);
+            preview.style.flexDirection = 'column';
+            preview.style.gap = '2px';
+          }
+        }
+      }
 
       if (item.status === 'done') {
-        const nameEl = row.querySelector('.oxp-attachment-name') as HTMLElement | null;
-        if (nameEl) nameEl.textContent = `✓ ${safeName}`;
         if (bar) bar.hidden = true;
         if (errEl) errEl.hidden = true;
         if (retryBtn) retryBtn.hidden = true;
+        if (overlay) overlay.hidden = true;
       } else if (item.status === 'error') {
         if (bar) bar.hidden = true;
-        if (errEl) { errEl.hidden = false; errEl.textContent = item.error ?? t('uploadFailed', this.#lang); }
+        if (errEl) {
+          errEl.hidden = false;
+          errEl.textContent = item.error ?? t('uploadFailed', this.#lang);
+          errEl.title = item.error ?? t('uploadFailed', this.#lang);
+        }
         if (retryBtn) retryBtn.hidden = false;
+        if (overlay) overlay.hidden = true;
       } else {
         if (bar) { bar.hidden = false; bar.style.width = `${item.progress}%`; }
         if (errEl) errEl.hidden = true;
         if (retryBtn) retryBtn.hidden = true;
+        if (overlay) overlay.hidden = false;
       }
     }
 
@@ -475,6 +551,8 @@ export class AttachmentPicker {
       if (errors > 0) parts.push(t('queueFailedCount', this.#lang, { n: errors }));
       this.#liveRegion.textContent = parts.join(', ');
     }
+
+    this.#onChange?.();
   }
 
   #announce(msg: string): void {

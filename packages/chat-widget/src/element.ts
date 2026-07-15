@@ -898,6 +898,7 @@ export class OxpulseChatElement extends HTMLElement {
           roomId: string,
           body: string,
           attachments: readonly EnvelopeAttachment[],
+          args?: SendTextArgs,
         ): Promise<{ msgId: string }> {
           try {
             const sealed = encodeAttachmentEnvelope(body, attachments);
@@ -906,6 +907,7 @@ export class OxpulseChatElement extends HTMLElement {
               result = await attachmentClient!.send(roomId, {
                 senderUid: resolvedSelfUid ?? '',
                 sealed,
+                ...args,
               });
             } catch (sendErr) {
               const ids = attachments.map((a) => a.id).join(', ');
@@ -967,19 +969,6 @@ export class OxpulseChatElement extends HTMLElement {
           // present); paperclip/paste/drag-drop in composer.ts feature-detect this.
           uploadAttachment: attachmentClient ? uploadAttachment : undefined,
           sendAttachmentMessage: attachmentClient ? sendAttachmentMessage : undefined,
-          // Thin adapter preserving the old sendFile caller surface until slice 4
-          // rewires AttachmentPicker to stage-then-send.
-          sendFile: attachmentClient
-            ? async (
-                roomId: string,
-                blob: Blob,
-                args: { senderUid?: string; sha256?: string; mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
-              ): Promise<{ msgId: string; attachmentId: string }> => {
-                const { attachmentId, attachment } = await uploadAttachment(roomId, blob, args);
-                const { msgId } = await sendAttachmentMessage(roomId, '', [attachment]);
-                return { msgId, attachmentId };
-              }
-            : undefined,
         };
         this.#composer = new Composer({
           client: composerClient,

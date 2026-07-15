@@ -11,6 +11,7 @@ import { AttachmentPicker } from './attachment-picker.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
+import { sanitizeFilename } from '../utils/attachments.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -27,23 +28,18 @@ interface ComposerClient {
   sendText(roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }>;
   sendTextOptimistic?(roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }>;
   e2ee?: unknown;
-  /** W2.2 slice 4: optional — enables attachment support. */
-  sendFile?(
-    roomId: string,
-    blob: Blob,
-    args: { senderUid?: string; sha256?: string; mimeType?: string; signal?: AbortSignal },
-  ): Promise<{ msgId: string; attachmentId: string }>;
-  /** Stage-then-send split (slice 1): upload an attachment and return its id + envelope metadata. */
+  /** Stage-then-send split (slice 4): upload an attachment and return its id + envelope metadata. */
   uploadAttachment?(
     roomId: string,
     blob: Blob,
     args: { mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
   ): Promise<{ attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number } }>;
-  /** Stage-then-send split (slice 1): send a message with the given caption + attachment envelope. */
+  /** Stage-then-send split (slice 4): send a message with the given caption + attachment envelope. */
   sendAttachmentMessage?(
     roomId: string,
     body: string,
     attachments: readonly { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number }[],
+    args?: SendTextArgs,
   ): Promise<{ msgId: string }>;
 }
 
@@ -84,7 +80,7 @@ export class Composer {
   #lastText = '';
   /** CM1: initial text to pre-fill textarea on mount — set via setInitialText() before mount(). */
   #initialText = '';
-  /** W2.2 slice 4: attachment picker — present when client supports sendFile. */
+  /** W2.2 slice 4: attachment picker — present when client supports uploadAttachment + sendAttachmentMessage. */
   #attachmentPicker: AttachmentPicker | null = null;
   /** W9: optional product card to attach to the next outgoing text message. */
   #productRef: string | null = null;
@@ -214,8 +210,11 @@ export class Composer {
     const main = document.createElement('div');
     main.className = 'oxp-composer-main';
 
-    // W2.2 slice 4: paperclip attachment button (only when client supports sendFile)
-    if (typeof this.#client.sendFile === 'function') {
+    // W2.2 slice 4: paperclip attachment button (only when client supports uploadAttachment + sendAttachmentMessage)
+    if (
+      typeof this.#client.uploadAttachment === 'function' &&
+      typeof this.#client.sendAttachmentMessage === 'function'
+    ) {
       const attachBtn = document.createElement('button');
       attachBtn.type = 'button';
       attachBtn.className = 'oxp-composer-attachment-btn';
@@ -257,12 +256,15 @@ export class Composer {
     textarea.addEventListener('keydown', this.#onKeydown);
     sendBtn.addEventListener('click', this.#onSendClick);
 
-    // W2.2 slice 4: paste + drag-drop (only when client supports sendFile)
-    if (typeof this.#client.sendFile === 'function') {
-      // Mount picker inside composer root for queue display
+    // W2.2 slice 4: paste + drag-drop (only when client supports uploadAttachment + sendAttachmentMessage)
+    if (
+      typeof this.#client.uploadAttachment === 'function' &&
+      typeof this.#client.sendAttachmentMessage === 'function'
+    ) {
+      // Mount picker inside composer root for tray display
       const pickerContainer = document.createElement('div');
       root.insertBefore(pickerContainer, main);
-      // sendFile existence is already guarded above; cast is safe
+      // uploadAttachment/sendAttachmentMessage existence is already guarded above; cast is safe
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.#attachmentPicker = new AttachmentPicker({
         client: this.#client as any,
@@ -270,6 +272,7 @@ export class Composer {
         container: pickerContainer,
         signal: this.#signal,
         lang: this.#lang,
+        onChange: () => this.#updateState(),
       });
       this.#attachmentPicker.mount();
 
@@ -409,9 +412,10 @@ export class Composer {
     const text = this.#textarea.value;
     const len = text.length;
     const trimmed = text.trim();
+    const hasStaged = this.#attachmentPicker?.hasStaged() ?? false;
 
     const overLimit = len > MAX_BODY_CHARS;
-    const empty = trimmed.length === 0;
+    const empty = trimmed.length === 0 && !hasStaged;
     this.#sendBtn.disabled = empty || overLimit || this.#sending;
 
     // M10 / 1G: update send-hint text for screen readers.
@@ -420,8 +424,12 @@ export class Composer {
     if (hint) {
       if (this.#sending) {
         hint.textContent = t('sendingMessage', this.#lang);
+      } else if (overLimit) {
+        hint.textContent = t('messageExceedsLimit', this.#lang);
+      } else if (!empty) {
+        hint.textContent = t('sendMessageAria', this.#lang);
       } else {
-        hint.textContent = overLimit ? t('messageExceedsLimit', this.#lang) : t('messageEmpty', this.#lang);
+        hint.textContent = t('messageEmpty', this.#lang);
       }
     }
 
@@ -442,7 +450,8 @@ export class Composer {
     if (!this.#textarea || !this.#sendBtn) return;
 
     const text = textOverride ?? this.#textarea.value.trim();
-    if (!text || text.length === 0) return;
+    const hasStaged = this.#attachmentPicker?.hasStaged() ?? false;
+    if (text.length === 0 && !hasStaged) return;
     if (text.length > MAX_BODY_CHARS) return;
 
     // Save for retry before the send attempt
@@ -462,11 +471,6 @@ export class Composer {
     this.#clearErrorChip();
 
     try {
-      // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path
-      const useOptimistic =
-        typeof this.#client.sendTextOptimistic === 'function' &&
-        Boolean(this.#client.e2ee);
-
       const sendArgs: SendTextArgs = {};
       if (this.#replyTarget) {
         sendArgs.threadRootMsgId = this.#replyTarget.msgId;
@@ -476,10 +480,31 @@ export class Composer {
         sendArgs.productMeta = this.#productMeta;
       }
 
-      if (useOptimistic) {
-        await this.#client.sendTextOptimistic!(this.#roomId, text, sendArgs);
+      if (hasStaged) {
+        // Await any in-flight uploads; on error awaitAllUploaded rejects and the
+        // tray stays visible with the failed item(s) so the user can retry/remove.
+        await this.#attachmentPicker!.awaitAllUploaded();
+        const staged = this.#attachmentPicker!.getStaged();
+        const attachments = staged.map((item) => ({
+          id: item.attachmentId!,
+          mime: item.mime,
+          filename: sanitizeFilename(item.file.name),
+          sizeBytes: item.sizeBytes,
+          width: item.width,
+          height: item.height,
+        }));
+        await this.#client.sendAttachmentMessage!(this.#roomId, text, attachments, sendArgs);
       } else {
-        await this.#client.sendText(this.#roomId, text, sendArgs);
+        // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path
+        const useOptimistic =
+          typeof this.#client.sendTextOptimistic === 'function' &&
+          Boolean(this.#client.e2ee);
+
+        if (useOptimistic) {
+          await this.#client.sendTextOptimistic!(this.#roomId, text, sendArgs);
+        } else {
+          await this.#client.sendText(this.#roomId, text, sendArgs);
+        }
       }
 
       // 1E: Clear only if not destroyed during the send.
@@ -492,6 +517,7 @@ export class Composer {
         this.#productRef = null;
         this.#productMeta = null;
         this.#clearReplyTarget();
+        this.#attachmentPicker?.clearStaged();
         this.#updateState();
       }
     } catch (err) {
