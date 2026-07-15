@@ -58,6 +58,13 @@ export const THEME_CSS = `
    * Light: rgba(0,0,0,0.55) blends to #737373 on white → 3.15:1 PASS (non-text ≥3:1).
    * Prior --oxp-border (#e0e0e0 on white) = 1.32:1 FAIL. */
   --oxp-spinner-track: rgba(0, 0, 0, 0.55);
+  /* WCAG 1.4.11: --oxp-waveform-inactive for the unplayed bars of the voice
+   * waveform (rendered on bubble backgrounds, NOT the widget bg). Light
+   * rgba(0,0,0,0.55) blends to:
+   *   #637059 on #dcf8c6 (self-light)  → 4.58:1 PASS
+   *   #6c6c6c on #f1f0f0 (other-light) → 4.53:1 PASS
+   * Both ≥3:1 (non-text UI components). Mirrors --oxp-spinner-track's alpha. */
+  --oxp-waveform-inactive: rgba(0, 0, 0, 0.55);
 
   display: block;
   box-sizing: border-box;
@@ -114,6 +121,12 @@ export const THEME_CSS = `
    * using 0.50 is empirically verified.
    * Prior --oxp-border (#38383a on #1c1c1e) = 1.45:1 FAIL. */
   --oxp-spinner-track: rgba(255, 255, 255, 0.50);
+  /* WCAG 1.4.11: dark --oxp-waveform-inactive for unplayed waveform bars on
+   * dark bubble backgrounds. rgba(255,255,255,0.55) blends to:
+   *   #9aafa2 on #1e4e31 (self-dark)  → 4.26:1 PASS
+   *   #a0a0a1 on #2c2c2e (other-dark) → 5.31:1 PASS
+   * Both ≥3:1 (non-text UI components). Alpha 0.55 mirrors the light token. */
+  --oxp-waveform-inactive: rgba(255, 255, 255, 0.55);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -144,6 +157,8 @@ export const THEME_CSS = `
     --oxp-code-border: rgba(255, 255, 255, 0.40);
     /* B1: dark spinner-track matching dark theme block */
     --oxp-spinner-track: rgba(255, 255, 255, 0.50);
+    /* WCAG 1.4.11: dark waveform-inactive matching dark theme block */
+    --oxp-waveform-inactive: rgba(255, 255, 255, 0.55);
   }
 }
 
@@ -1103,18 +1118,12 @@ export const THEME_CSS = `
   flex-wrap: wrap;
 }
 
-.oxp-voice-preview-audio {
+/* Voice pre-send preview host — mirrors the retired .oxp-voice-preview-audio
+ * (native <audio> is gone; the VoiceBubble shell lives inside this host). */
+.oxp-voice-preview-host {
   flex: 1;
   min-width: 120px;
   display: block;
-}
-
-.oxp-voice-preview-duration {
-  font-size: 0.75rem;
-  color: var(--oxp-fg-secondary);
-  font-variant-numeric: tabular-nums;
-  min-width: 44px;
-  text-align: right;
 }
 
 .oxp-voice-preview-send {
@@ -1164,6 +1173,87 @@ export const THEME_CSS = `
 @media (hover: none) {
   .oxp-voice-preview-send,
   .oxp-voice-preview-discard { min-width: 44px; min-height: 44px; }
+}
+
+/* ── VoiceBubble (audio attachment playback shell) ──
+ * Row layout: play button | waveform canvas | speed button | duration. */
+.oxp-voice-bubble {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--oxp-spacing-unit);
+  min-width: 0;
+}
+
+.oxp-voice-bubble-play {
+  width: 40px;
+  height: 40px;
+  background: var(--oxp-accent);
+  color: var(--oxp-on-accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.oxp-voice-bubble-play:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.oxp-voice-bubble-play:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-voice-bubble-speed {
+  width: 40px;
+  height: 40px;
+  background: none;
+  border: none;
+  color: var(--oxp-fg-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.oxp-voice-bubble-speed:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+/* Responsive waveform canvas — CSS width fills the row, backing-store set
+ * from clientWidth × DPR in renderStaticWaveform (already DPR-aware).
+ * max-width prevents overflow on very wide bubbles; the flex row caps it. */
+.oxp-voice-bubble-waveform {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  max-width: 220px;
+  height: 36px;
+  cursor: pointer;
+  border-radius: calc(var(--oxp-radius) * 0.25);
+  border: 1px solid var(--oxp-border);
+  box-sizing: border-box;
+}
+
+.oxp-voice-bubble-waveform:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .oxp-voice-bubble-play,
+  .oxp-voice-bubble-speed { min-width: 44px; min-height: 44px; }
 }
 
 /* Drag-over visual indicator — DM2: color-only outline fails WCAG 1.4.1.

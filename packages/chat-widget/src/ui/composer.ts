@@ -13,8 +13,9 @@ import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { sanitizeFilename } from '../utils/attachments.js';
 import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
-import { createVoiceRecorder, validateVoiceBlob, MAX_VOICE_MS, type VoiceRecorder, type VoiceRecorderResult } from '../utils/voice.js';
+import { createVoiceRecorder, validateVoiceBlob, MAX_VOICE_MS, type VoiceRecorder, type VoiceRecorderResult, extractPeaksFromBlob } from '@oxpulse/voice-core';
 import { formatDuration } from '../utils/list-helpers.js';
+import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -106,15 +107,22 @@ export class Composer {
 
   // P0 follow-up: voice pre-send preview
   #voicePreviewEl: HTMLElement | null = null;
-  #voicePreviewAudio: HTMLAudioElement | null = null;
+  #voicePreviewBubbleHost: HTMLElement | null = null;
+  #voicePreviewBubble: VoiceBubble | null = null;
   #voicePreviewSend: HTMLButtonElement | null = null;
   #voicePreviewDiscard: HTMLButtonElement | null = null;
-  #voicePreviewDurationEl: HTMLElement | null = null;
+  /** Active-flag for the voice preview. Set to a non-null marker when a
+   *  recording is staged for review; the VoiceBubble's headless player owns
+   *  the actual blob: URL (created from #voicePreviewBlob, revoked on
+   *  destroy) — this field is NOT a URL anymore, just a presence sentinel
+   *  preserving the existing `!== null` checks across #updateState /
+   *  #sendVoicePreview / #discardVoicePreview. */
   #voicePreviewObjectURL: string | null = null;
   #voicePreviewBlob: Blob | null = null;
   #voicePreviewDuration = 0;
   #voicePreviewMime = '';
   #voicePreviewFilename = '';
+  #voicePreviewPeaks: number[] = [];
 
   constructor(opts: ComposerOptions) {
     this.#container = opts.container;
@@ -330,19 +338,19 @@ export class Composer {
     recordingEl.appendChild(recordingControls);
 
     // P0 follow-up: voice pre-send preview — hidden until recording stops.
+    // Phase 2: the preview player is a VoiceBubble shell (headless player +
+    // waveform) built dynamically in #showVoicePreview, hosted here. Replaces
+    // the native <audio controls> — same shell the message-list uses, so the
+    // 0.12.0 P3 nits (orphaned <audio> node after discard; 0:00 scrubber
+    // pre-metadata) are fixed by construction.
     const voicePreviewEl = document.createElement('div');
     voicePreviewEl.className = 'oxp-composer-voice-preview';
     voicePreviewEl.setAttribute('role', 'status');
     voicePreviewEl.setAttribute('aria-label', t('voicePreviewLabel', this.#lang));
     voicePreviewEl.hidden = true;
 
-    const voicePreviewAudio = document.createElement('audio');
-    voicePreviewAudio.className = 'oxp-voice-preview-audio';
-    voicePreviewAudio.controls = true;
-    voicePreviewAudio.setAttribute('aria-label', t('voicePreviewLabel', this.#lang));
-
-    const voicePreviewDuration = document.createElement('span');
-    voicePreviewDuration.className = 'oxp-voice-preview-duration';
+    const voicePreviewBubbleHost = document.createElement('div');
+    voicePreviewBubbleHost.className = 'oxp-voice-preview-host';
 
     const voicePreviewSend = document.createElement('button');
     voicePreviewSend.type = 'button';
@@ -358,8 +366,7 @@ export class Composer {
     voicePreviewDiscard.textContent = '×';
     voicePreviewDiscard.addEventListener('click', () => this.#discardVoicePreview());
 
-    voicePreviewEl.appendChild(voicePreviewAudio);
-    voicePreviewEl.appendChild(voicePreviewDuration);
+    voicePreviewEl.appendChild(voicePreviewBubbleHost);
     voicePreviewEl.appendChild(voicePreviewSend);
     voicePreviewEl.appendChild(voicePreviewDiscard);
 
@@ -381,10 +388,9 @@ export class Composer {
     this.#recordingEl = recordingEl;
     this.#recordingTimerEl = recordingTimerEl;
     this.#voicePreviewEl = voicePreviewEl;
-    this.#voicePreviewAudio = voicePreviewAudio;
+    this.#voicePreviewBubbleHost = voicePreviewBubbleHost;
     this.#voicePreviewSend = voicePreviewSend;
     this.#voicePreviewDiscard = voicePreviewDiscard;
-    this.#voicePreviewDurationEl = voicePreviewDuration;
 
     // Event listeners
     textarea.addEventListener('input', this.#onInput);
@@ -484,10 +490,9 @@ export class Composer {
     this.#recordingEl = null;
     this.#recordingTimerEl = null;
     this.#voicePreviewEl = null;
-    this.#voicePreviewAudio = null;
+    this.#voicePreviewBubbleHost = null;
     this.#voicePreviewSend = null;
     this.#voicePreviewDiscard = null;
-    this.#voicePreviewDurationEl = null;
   }
 
   // ── Private handlers ────────────────────────────────────────────────────────
@@ -658,7 +663,13 @@ export class Composer {
     this.#voicePreviewDuration = result.durationMs;
     this.#voicePreviewMime = result.mime;
     this.#voicePreviewFilename = sanitizeFilename(this.#voiceFilenameForMime(result.mime));
-    this.#voicePreviewObjectURL = URL.createObjectURL(result.blob);
+    // Phase 2: compute waveform peaks now so the receiver renders the real
+    // waveform. extractPeaksFromBlob decodes via OfflineAudioContext (returns
+    // [] when unavailable — e.g. jsdom — caller treats empty as flat
+    // fallback). The player owns the blob: URL for the preview; this field is
+    // just the active-presence sentinel now.
+    this.#voicePreviewPeaks = [...(await extractPeaksFromBlob(result.blob))];
+    this.#voicePreviewObjectURL = 'preview-active';
 
     this.#resetRecordingUI();
     this.#showVoicePreview();
@@ -720,10 +731,31 @@ export class Composer {
   // P0 follow-up: voice pre-send preview
 
   #showVoicePreview(): void {
-    if (!this.#voicePreviewEl || !this.#voicePreviewAudio || !this.#voicePreviewDurationEl) return;
+    if (!this.#voicePreviewEl || !this.#voicePreviewBubbleHost || !this.#voicePreviewBlob) return;
 
-    this.#voicePreviewAudio.src = this.#voicePreviewObjectURL ?? '';
-    this.#voicePreviewDurationEl.textContent = formatDuration(this.#voicePreviewDuration);
+    // Tear down any previous preview bubble (e.g. a re-record without an
+    // explicit discard) — its player revokes the blob: URL it owned.
+    this.#destroyVoicePreviewBubble();
+
+    // The preview plays from the recorded Blob directly — the headless
+    // player creates + owns the objectURL and revokes it on destroy(). No
+    // authed loader needed here (the blob is already in memory).
+    const bubble = createVoiceBubble({
+      att: {
+        id: 'voice-preview',
+        url: '',
+        mime: this.#voicePreviewMime,
+        filename: this.#voicePreviewFilename,
+        sizeBytes: this.#voicePreviewBlob.size,
+        durationMs: this.#voicePreviewDuration,
+        peaks: this.#voicePreviewPeaks,
+      },
+      blob: this.#voicePreviewBlob,
+      lang: this.#lang,
+    });
+    this.#voicePreviewBubble = bubble;
+    this.#voicePreviewBubbleHost.appendChild(bubble.el);
+
     if (this.#voicePreviewSend) {
       this.#voicePreviewSend.disabled = false;
     }
@@ -736,19 +768,27 @@ export class Composer {
     this.#voicePreviewEl.hidden = false;
   }
 
-  #clearVoicePreview(): void {
-    if (this.#voicePreviewObjectURL) {
-      URL.revokeObjectURL(this.#voicePreviewObjectURL);
-      this.#voicePreviewObjectURL = null;
+  #destroyVoicePreviewBubble(): void {
+    if (this.#voicePreviewBubble) {
+      this.#voicePreviewBubble.destroy();
+      this.#voicePreviewBubble = null;
     }
+    if (this.#voicePreviewBubbleHost) {
+      this.#voicePreviewBubbleHost.replaceChildren();
+    }
+  }
+
+  #clearVoicePreview(): void {
+    // The player owned the blob: URL; destroy() revokes it. The sentinel
+    // just flips the active-presence flag.
+    this.#destroyVoicePreviewBubble();
+    this.#voicePreviewObjectURL = null;
     this.#voicePreviewBlob = null;
     this.#voicePreviewDuration = 0;
     this.#voicePreviewMime = '';
     this.#voicePreviewFilename = '';
+    this.#voicePreviewPeaks = [];
 
-    if (this.#voicePreviewAudio) {
-      this.#voicePreviewAudio.src = '';
-    }
     if (this.#voicePreviewEl) this.#voicePreviewEl.hidden = true;
     if (this.#voicePreviewSend) this.#voicePreviewSend.disabled = false;
     if (this.#voicePreviewDiscard) this.#voicePreviewDiscard.disabled = false;
@@ -785,7 +825,13 @@ export class Composer {
         mimeType: this.#voicePreviewMime,
         filename: this.#voicePreviewFilename,
       });
-      const voiceAttachment = { ...attachment, durationMs: this.#voicePreviewDuration };
+      const voiceAttachment = {
+        ...attachment,
+        durationMs: this.#voicePreviewDuration,
+        // Phase 2: peaks on the wire — receiver renders the real waveform.
+        // Empty array is omitted (treated as flat fallback on decode).
+        ...(this.#voicePreviewPeaks.length > 0 ? { peaks: this.#voicePreviewPeaks } : {}),
+      };
       await this.#client.sendAttachmentMessage(this.#roomId, caption, [voiceAttachment]);
 
       if (!this.#destroyed) {

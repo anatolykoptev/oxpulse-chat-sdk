@@ -1,3 +1,9 @@
+// sanitizePeaks mirrors clampDimension's untrusted-input contract (length ≤
+// MAX_VOICE_PEAKS=64, drop non-finite/out-of-range, drop the field not the
+// attachment). Imported from voice-core rather than re-implemented — the
+// canonical sanitize lives with the waveform math it serves.
+import { sanitizePeaks } from '@oxpulse/voice-core';
+
 /**
  * attachment-envelope.ts — carries attachment metadata inside the plaintext
  * message body.
@@ -73,6 +79,11 @@ export interface EnvelopeAttachment {
   width?: number;
   height?: number;
   durationMs?: number;
+  /** Downsampled waveform peaks (float[0,1], length ≤ MAX_VOICE_PEAKS).
+   *  Additive-optional like durationMs: no envelope version bump, decoder
+   *  tolerates absence (flat fallback waveform), sanitizePeaks clamps on
+   *  decode — a room peer's plaintext body is untrusted input. */
+  peaks?: number[];
 }
 
 export interface AttachmentEnvelope {
@@ -114,6 +125,8 @@ function parseAttachment(value: unknown): EnvelopeAttachment | null {
       typeof v.durationMs === 'number' && Number.isFinite(v.durationMs) && v.durationMs >= 0
         ? v.durationMs
         : undefined,
+    // sanitizePeaks: undefined when absent/malformed → flat fallback waveform.
+    peaks: sanitizePeaks(v.peaks),
   };
 }
 

@@ -6,6 +6,13 @@ export const MAX_VOICE_PEAKS = 64;
 /** Default bar count — 48 fits inside a 220px voice bubble at 3px/bar. */
 export const DEFAULT_PEAK_BARS = 48;
 
+/** Flat fallback peaks — a uniform low-amplitude envelope used when no peaks
+ *  are present (decode failure, legacy envelope without peaks). The amplitude
+ *  0.12 is low enough to read as "quiet" but visible enough to paint bars.
+ *  Bar count matches DEFAULT_PEAK_BARS. Shells import this instead of
+ *  re-declaring the literal. */
+export const FLAT_FALLBACK_PEAKS: ReadonlyArray<number> = new Array<number>(DEFAULT_PEAK_BARS).fill(0.12);
+
 /** Downsample an AudioBuffer-style channel array to `bars` bars by
  *  taking the max absolute amplitude inside each chunk and normalizing
  *  the whole array to [0,1] by the global peak. Returns at most `bars`

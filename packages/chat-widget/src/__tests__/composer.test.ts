@@ -8,13 +8,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Composer } from '../ui/composer.js';
 import { MAX_BODY_CHARS } from '../utils/textfield-helpers.js';
-import { createVoiceRecorder, type VoiceRecorder } from '../utils/voice.js';
+import { createVoiceRecorder, type VoiceRecorder } from '@oxpulse/voice-core';
 
-vi.mock('../utils/voice.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../utils/voice.js')>();
+vi.mock('@oxpulse/voice-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@oxpulse/voice-core')>();
   return {
     ...actual,
     createVoiceRecorder: vi.fn(),
+    // The preview VoiceBubble runs the REAL headless player (so audio.src +
+    // destroy()-revoke are exercised), but jsdom has no Canvas2D context —
+    // no-op the waveform paint so the synchronous subscribe callback in
+    // createVoicePlayer doesn't throw on ctx.setTransform.
+    renderStaticWaveform: vi.fn(),
+    // jsdom has no OfflineAudioContext — the real fn already returns [], but
+    // stub it so the stop handler's await is deterministic + microtask-fast.
+    extractPeaksFromBlob: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -122,16 +130,21 @@ function stubImageCompression(): void {
   vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 400, height: 300, close: vi.fn() }));
   const mockCtx = { imageSmoothingEnabled: false, imageSmoothingQuality: 'high', drawImage: vi.fn() };
   const compressedBlob = new Blob(['compressed'], { type: 'image/webp' });
-  const mockCanvas = {
-    width: 0,
-    height: 0,
-    getContext: vi.fn().mockReturnValue(mockCtx),
-    toBlob: vi.fn().mockImplementation((cb: (b: Blob | null) => void) => cb(compressedBlob)),
-  };
+  // Build the canvas mock on a REAL HTMLCanvasElement so the VoiceBubble
+  // shell (which calls setAttribute/className/addEventListener/getBoundingClientRect
+  // on its waveform canvas) keeps working — only getContext/toBlob are
+  // overridden, which is all the compress() path actually needs under jsdom.
   const origCreate = globalThis.document.createElement.bind(globalThis.document);
   vi.spyOn(globalThis.document, 'createElement').mockImplementation((tag: string) => {
-    if (tag === 'canvas') return mockCanvas as unknown as HTMLElement;
-    return origCreate(tag);
+    const el = origCreate(tag) as HTMLElement & {
+      getContext: (c: string) => unknown;
+      toBlob: (cb: (b: Blob | null) => void, type?: string, q?: number) => void;
+    };
+    if (tag === 'canvas') {
+      el.getContext = vi.fn().mockReturnValue(mockCtx) as unknown as typeof el.getContext;
+      el.toBlob = vi.fn().mockImplementation((cb: (b: Blob | null) => void) => cb(compressedBlob));
+    }
+    return el;
   });
   class FakeReader {
     onerror: (() => void) | null = null;
@@ -1305,7 +1318,9 @@ describe('Composer', () => {
     expect(preview).not.toBeNull();
     expect(preview.hidden).toBe(false);
 
-    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    // Phase 2: the preview player is a VoiceBubble shell owning a hidden
+    // <audio>; the headless player sets audio.src from the recorded Blob.
+    const audio = container.querySelector('.oxp-composer-voice-preview audio') as HTMLAudioElement;
     expect(audio).not.toBeNull();
     expect(audio.getAttribute('src')).toBeTruthy();
 
@@ -1334,7 +1349,7 @@ describe('Composer', () => {
     stopBtn.click();
     await drain(15);
 
-    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    const audio = container.querySelector('.oxp-composer-voice-preview audio') as HTMLAudioElement;
     const objectURL = audio.getAttribute('src')!;
 
     const textarea = getInput(container);
@@ -1422,7 +1437,7 @@ describe('Composer', () => {
     stopBtn.click();
     await drain(15);
 
-    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    const audio = container.querySelector('.oxp-composer-voice-preview audio') as HTMLAudioElement;
     const objectURL = audio.getAttribute('src')!;
 
     const revokeSpy = vi.spyOn(globalThis.URL, 'revokeObjectURL');
@@ -1495,7 +1510,7 @@ describe('Composer', () => {
     stopBtn.click();
     await drain(15);
 
-    const audio = container.querySelector('.oxp-voice-preview-audio') as HTMLAudioElement;
+    const audio = container.querySelector('.oxp-composer-voice-preview audio') as HTMLAudioElement;
     const objectURL = audio.getAttribute('src')!;
 
     const revokeSpy = vi.spyOn(globalThis.URL, 'revokeObjectURL');

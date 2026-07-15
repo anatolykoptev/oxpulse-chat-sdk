@@ -115,6 +115,9 @@ export interface AttachmentMeta {
   width?: number;
   height?: number;
   durationMs?: number;
+  /** Waveform peaks for audio attachments (float[0,1], ≤ MAX_VOICE_PEAKS).
+   *  Absent on non-voice attachments and legacy envelopes → flat fallback. */
+  peaks?: number[];
 }
 
 // ── URL safety (CB1) ──────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ describe('defaultWaveformTheme', () => {
     const theme = defaultWaveformTheme();
 
     expect(theme.active).toBe('currentColor');
-    expect(theme.inactive).toBe('rgba(128,128,128,0.28)');
+    expect(theme.inactive).toBe('rgba(0,0,0,0.55)');
     expect(theme.background).toBeUndefined();
     expect(getComputedStyle).not.toHaveBeenCalled();
   });

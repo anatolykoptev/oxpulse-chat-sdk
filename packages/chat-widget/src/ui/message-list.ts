@@ -21,6 +21,7 @@ import { ReactionQuickBar } from './reaction-quick-bar.js';
 import { ReactionTrigger } from './reaction-trigger.js';
 import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
+import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
 import type { ProductMeta, WriteFailureOp, WriteFailureReason } from '../types.js';
 import { classifyWriteFailureReason } from '../utils/auth.js';
 
@@ -371,6 +372,7 @@ function renderAttachment(
   hydrate?: (url: string, signal?: AbortSignal) => Promise<Blob>,
   trackObjectUrl?: (url: string) => void,
   signal?: AbortSignal,
+  trackVoiceBubble?: (bubble: VoiceBubble) => void,
 ): HTMLElement {
   // CM1: use raw att.filename for DOM property/textContent assignments — these treat
   // the value as text, not HTML. escapeHtml() is only needed for innerHTML/setAttribute.
@@ -408,28 +410,26 @@ function renderAttachment(
     const wrap = document.createElement('div');
     wrap.className = 'oxp-attachment-audio';
 
-    // CB1: reject non-safe URL schemes before setting audio.src
+    // CB1: reject non-safe URL schemes before the player sources audio
     if (!isSafeAttachmentUrl(att.url)) {
       renderUnsafePlaceholder(att, wrap, lang);
       return wrap;
     }
 
-    const audio = document.createElement('audio');
-    hydrateMediaSrc(audio, att, hydrate, trackObjectUrl, signal);
-    audio.controls = true;
-    audio.preload = 'metadata';
-    // CM1: setAttribute for aria-label — use escapeHtml
-    audio.setAttribute(
-      'aria-label',
-      t('audioAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
-    );
-    wrap.appendChild(audio);
-    if (typeof att.durationMs === 'number' && att.durationMs > 0) {
-      const dur = document.createElement('span');
-      dur.className = 'oxp-attachment-audio-duration';
-      dur.textContent = formatDuration(att.durationMs);
-      wrap.appendChild(dur);
-    }
+    // Phase 2: VoiceBubble render shell over the headless player + static
+    // waveform. Replaces the bare <audio controls>. The player's source is
+    // the authed blob loader (hydrate) — NEVER a raw attachment URL on the
+    // authed path. The shell owns the <audio> element (ADR-3); a hidden
+    // <audio> remains in the DOM for the controller to read/write.
+    const bubble = createVoiceBubble({
+      att,
+      hydrate,
+      trackObjectUrl,
+      signal,
+      lang,
+    });
+    trackVoiceBubble?.(bubble);
+    wrap.appendChild(bubble.el);
     return wrap;
   }
 
@@ -654,6 +654,15 @@ export class MessageList {
    *  a long-lived busy room doesn't accumulate decoded-image memory past the
    *  eviction cap, and swept wholesale in destroy() as the final backstop. */
   #attachmentObjectUrls: Map<string, string[]> = new Map();
+  /** Phase 2: VoiceBubble shells (headless player + waveform) rendered for
+   *  audio attachments, keyed by msgId — destroyed in #evictOldMessages()
+   *  (same lifecycle as #attachmentObjectUrls) so an evicted row's player
+   *  revokes its objectURL + nulls its audio handlers, and destroy() sweeps
+   *  any that survived to teardown. Closes the #77/#82/#88 blob-leak class
+   *  for the voice path: the player's destroy() revokes the blob: URL it
+   *  set as audio.src, and the widget's #attachmentObjectUrls backstop
+   *  catches any the load adapter tracked (idempotent double-revoke). */
+  #voiceBubbles: Map<string, VoiceBubble[]> = new Map();
 
   constructor(opts: MessageListOptions) {
     this.#client = opts.client;
@@ -782,6 +791,12 @@ export class MessageList {
       for (const url of urls) URL.revokeObjectURL(url);
     }
     this.#attachmentObjectUrls.clear();
+    // Phase 2: destroy every surviving VoiceBubble player (revoke its
+    // objectURL + null audio handlers) — same final-backstop contract.
+    for (const bubbles of this.#voiceBubbles.values()) {
+      for (const b of bubbles) b.destroy();
+    }
+    this.#voiceBubbles.clear();
   }
 
   /** issue #67: records a blob: URL created for an attachment image/audio src,
@@ -793,6 +808,29 @@ export class MessageList {
     if (existing) existing.push(url);
     else this.#attachmentObjectUrls.set(msgId, [url]);
   };
+  /** Phase 2: records a VoiceBubble for a msgId so eviction/destroy can
+   *  destroy its headless player (revoke objectURL + null audio handlers).
+   *  Bound method so renderAttachment() — a free function — gets a stable
+   *  callback reference, mirroring #trackAttachmentObjectUrl. */
+  readonly #trackVoiceBubble = (msgId: string, bubble: VoiceBubble): void => {
+    const existing = this.#voiceBubbles.get(msgId);
+    if (existing) existing.push(bubble);
+    else this.#voiceBubbles.set(msgId, [bubble]);
+  };
+
+  /** Phase 2 review-fix: destroy + untrack any VoiceBubbles previously rendered
+   *  for this msgId. Called from #populateBubble BEFORE the innerHTML wipe so a
+   *  live re-render (mutation SSE, dedupe/reclassify upsert) doesn't orphan the
+   *  prior bubble's headless player — which would leak its objectURL + fire a
+   *  redundant authed audio fetch on every re-render. Same lifecycle as
+   *  #teardownReactionTrigger (called before the footer rebuild). */
+  #destroyVoiceBubblesForMsg(msgId: string): void {
+    const bubbles = this.#voiceBubbles.get(msgId);
+    if (bubbles) {
+      for (const b of bubbles) b.destroy();
+      this.#voiceBubbles.delete(msgId);
+    }
+  }
 
   // ── Private ────────────────────────────────────────────────────────────────
 
@@ -996,6 +1034,17 @@ export class MessageList {
       if (objectUrls) {
         for (const url of objectUrls) URL.revokeObjectURL(url);
         this.#attachmentObjectUrls.delete(evictedId);
+      }
+      // Phase 2: destroy the evicted row's VoiceBubble players — each
+      // destroy() revokes the blob: URL the player set as audio.src and
+      // nulls its audio event handlers. Same lifecycle as the objectURL
+      // sweep above; the #attachmentObjectUrls backstop already revoked the
+      // tracked URL (idempotent), but the player's own revoke + handler
+      // cleanup must run too.
+      const bubbles = this.#voiceBubbles.get(evictedId);
+      if (bubbles) {
+        for (const b of bubbles) b.destroy();
+        this.#voiceBubbles.delete(evictedId);
       }
       const child = this.#listEl?.firstElementChild;
       if (child) {
@@ -1630,6 +1679,12 @@ export class MessageList {
     // Preserve existing reaction cluster if present (reactions are managed separately)
     const existingCluster = el.querySelector('.oxp-bubble-reactions');
 
+    // Phase 2 review-fix: destroy any VoiceBubble players previously rendered
+    // for this msgId BEFORE the innerHTML wipe orphans them. Without this, a
+    // live re-render (mutation/dedupe) leaves the prior headless player alive
+    // → leaked objectURL + redundant authed audio fetch on every re-render.
+    this.#destroyVoiceBubblesForMsg(row.msgId);
+
     el.innerHTML = '';
 
     // Sender label (hidden when chained via CSS).
@@ -1724,6 +1779,7 @@ export class MessageList {
               this.#client.fetchAttachmentBlob,
               (url) => this.#trackAttachmentObjectUrl(row.msgId, url),
               this.#signal,
+              (bubble) => this.#trackVoiceBubble(row.msgId, bubble),
             ),
           );
         }
@@ -1997,6 +2053,16 @@ export class MessageList {
   }
 
   #dispatchError(message: string): void {
+    // #102 flake guard: a post-teardown dispatch (an in-flight #fetchAndRender
+    // whose list() rejected AFTER destroy() aborted the signal) must not fire
+    // an event on a torn-down container — under jsdom that surfaced as an
+    // unhandled rejection landing in a LATER test's window (CI runs #77,
+    // #100). #signal.aborted IS the destroyed signal (set first in destroy()),
+    // so this is the same guard #handleReaction already uses. The arg is
+    // always a string here (we build the CustomEvent ourselves), so the
+    // "real Event" half of the guard is structural — defended in case a future
+    // caller passes through an external event.
+    if (this.#signal.aborted) return;
     this.#container.dispatchEvent(
       new CustomEvent('oxpulse-chat:error', {
         bubbles: true,
