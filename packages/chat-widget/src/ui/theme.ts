@@ -826,6 +826,37 @@ export const THEME_CSS = `
   padding: 2px;
 }
 
+/* Review fix (CRITICAL, PR #88; reopened on re-review — source-order cascade):
+ * desktop floor for .oxp-attachment-cancel (>=24px, WCAG 2.5.8 AA) MUST
+ * appear BEFORE the @media(hover:none),(pointer:coarse) block below, not
+ * after. Both rules have equal specificity (0,1,0), neither has !important,
+ * and a media condition adds NO specificity — the cascade breaks the tie by
+ * SOURCE ORDER alone. An earlier version of this fix placed this block
+ * AFTER the media query (further down the file); on a coarse-pointer
+ * device BOTH rules then matched, and being later in source, the
+ * unconditional 24px rule silently WON over the 44px touch rule — the
+ * exact bug this fix closes, reopened by fixing it in the wrong place.
+ * Base 24px here, THEN the 44px touch override cascades last and wins on
+ * touch. (cancelBtn also used to set min-width/min-height INLINE — higher
+ * specificity than any class rule, touch or not; see attachment-picker.ts.) */
+.oxp-attachment-cancel {
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* FYI fix (PR #88 re-review): .oxp-attachment-retry had no desktop floor at
+ * all. Same source-order requirement as above; kept separate from cancel's
+ * flex-centering since retry is a text pill with its own padding, not an
+ * icon button. */
+.oxp-attachment-retry {
+  min-width: 24px;
+  min-height: 24px;
+}
+
 @media (hover: none), (pointer: coarse) {
   /* P2 design-review fix (starthey demo, widget 0.8.0, 2026-07-14): the
    * heart button measured 26x22px live despite the min-width/min-height:44px
@@ -993,7 +1024,7 @@ export const THEME_CSS = `
   z-index: 1;
 }
 
-/* Upload queue popover — DM3: position:absolute so it doesn't displace composer flex layout.
+/* Staged attachment tray — DM3: position:absolute so it doesn't displace composer flex layout.
  * DB2: box-shadow 0 0 0 1px discrete ring (same pattern as reaction picker — F1 WCAG 1.4.11).
  *   Light: rgba(0,0,0,0.50) on #fff → rgb(128,128,128) → 3.95:1 PASS.
  *   Dark:  rgba(255,255,255,0.50) on #1c1c1e → rgb(141,141,142) → 4.39:1 PASS. */
@@ -1004,10 +1035,11 @@ export const THEME_CSS = `
   border-radius: var(--oxp-radius);
   padding: calc(var(--oxp-spacing-unit) * 0.5);
   display: flex;
-  flex-direction: column;
-  gap: calc(var(--oxp-spacing-unit) * 0.5);
-  max-height: 200px;
-  overflow-y: auto;
+  flex-direction: row;
+  gap: 4px;
+  max-height: 92px;
+  overflow-x: auto;
+  overflow-y: hidden;
   position: absolute;
   bottom: 100%;
   left: 0;
@@ -1145,6 +1177,66 @@ export const THEME_CSS = `
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+/* Multi-image collage grid (staged attachment tray slice 2).
+ * N=2: 1x1 side-by-side; N=3: 2x1 hero + two 1x1 tiles;
+ * N=4: 2x2 3:2; N>=5: 2x2 3:2 with a blurred fourth tile + "+N" overlay. */
+.oxp-attachment-collage {
+  border-radius: var(--oxp-radius);
+  max-width: min(100%, 550px);
+  max-height: 400px;
+  overflow: hidden;
+}
+
+.oxp-attachment-collage-tile {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  /* Review fix (MEDIUM, PR #88): spec §B calls for "radius var per tile" —
+   * only the outer .oxp-attachment-collage container had one. */
+  border-radius: var(--oxp-radius);
+}
+
+.oxp-attachment-collage-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Review fix (HIGH, PR #88): tile aspect-ratio now lives here (a real,
+ * reactive CSS media query) instead of a one-time JS matchMedia() snapshot
+ * baked into an inline style at row-build time in message-list.ts — an
+ * inline value can't react to the widget iframe/container crossing this
+ * breakpoint after the row already rendered, unlike every other responsive
+ * rule in this file. */
+.oxp-attachment-collage-tile--square {
+  aspect-ratio: 1 / 1;
+}
+
+.oxp-attachment-collage-tile--wide {
+  aspect-ratio: 3 / 2;
+}
+
+@media (max-width: 640px) {
+  .oxp-attachment-collage-tile--wide {
+    aspect-ratio: 1 / 1;
+  }
+}
+
+.oxp-attachment-collage-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 1.25rem;
+  font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
 }
 
 /* ── W2.2 slice 5: Reconnect banner ──────────────────────────────────────── */

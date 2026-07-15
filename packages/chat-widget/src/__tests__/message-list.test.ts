@@ -15,6 +15,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageList } from '../ui/message-list.js';
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
+import { THEME_CSS } from '../ui/theme.js';
 
 // ── SDK mock helpers ──────────────────────────────────────────────────────────
 
@@ -909,6 +910,170 @@ describe('MessageList', () => {
     expect(img).not.toBeNull();
     // Without dimensions, minHeight='80px' must be set
     expect(img!.style.minHeight).toBe('80px');
+
+    ml.destroy();
+  });
+
+  // ── Staged attachment tray + multi-image collage slice 2: collage grid ───────
+
+  function makeImageAttachment(id: string, index: number): { id: string; url: string; mime: string; filename: string; sizeBytes: number } {
+    return {
+      id,
+      url: `https://cdn.example.com/img${index}.png`,
+      mime: 'image/png',
+      filename: `photo${index}.png`,
+      sizeBytes: 1024 + index,
+    };
+  }
+
+  it('N=2_collage_uses_two_equal_columns_and_square_tiles', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const grid = container.querySelector('.oxp-attachment-collage') as HTMLElement | null;
+    expect(grid).not.toBeNull();
+    expect(grid!.style.gridTemplateColumns).toBe('1fr 1fr');
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(2);
+    for (const tile of tiles) {
+      // Review fix (HIGH, PR #88): ratio comes from a CSS class (reactive to
+      // @media(max-width:640px) in a real browser), not an inline style —
+      // jsdom doesn't evaluate width-based media queries either (verified
+      // empirically), so the class-membership assertion is what's checkable
+      // here; the media-query text itself is covered by a THEME_CSS
+      // string-match test below (this file's established pattern for every
+      // other jsdom-unsupported media feature, e.g. hover/pointer).
+      expect(tile.classList.contains('oxp-attachment-collage-tile--square')).toBe(true);
+      expect(tile.classList.contains('oxp-attachment-collage-tile--wide')).toBe(false);
+    }
+
+    ml.destroy();
+  });
+
+  it('N=3_collage_uses_2fr_1fr_columns_hero_spans_rows', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2), makeImageAttachment('a3', 3)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const grid = container.querySelector('.oxp-attachment-collage') as HTMLElement | null;
+    expect(grid).not.toBeNull();
+    expect(grid!.style.gridTemplateColumns).toBe('2fr 1fr');
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(3);
+    const hero = tiles[0] as HTMLElement;
+    expect(hero.style.gridRow).toBe('1 / 3');
+    expect(hero.classList.contains('oxp-attachment-collage-tile--square')).toBe(false);
+    expect(hero.classList.contains('oxp-attachment-collage-tile--wide')).toBe(false);
+    expect(tiles[1].classList.contains('oxp-attachment-collage-tile--square')).toBe(true);
+    expect(tiles[2].classList.contains('oxp-attachment-collage-tile--square')).toBe(true);
+
+    ml.destroy();
+  });
+
+  it('N=4_collage_uses_2x2_grid_and_wide_tiles', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2), makeImageAttachment('a3', 3), makeImageAttachment('a4', 4)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const grid = container.querySelector('.oxp-attachment-collage') as HTMLElement | null;
+    expect(grid).not.toBeNull();
+    expect(grid!.style.gridTemplateColumns).toBe('1fr 1fr');
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(4);
+    for (const tile of tiles) {
+      expect(tile.classList.contains('oxp-attachment-collage-tile--wide')).toBe(true);
+      // MEDIUM review fix (PR #88): spec §B "radius var per tile" — each
+      // tile carries the theme's radius token, not just the outer container.
+      expect((tile as HTMLElement).style.borderRadius).toBe('');
+    }
+
+    ml.destroy();
+  });
+
+  it('collage_tile_wide_class_gets_forced_to_1_1_on_mobile_via_a_real_media_query', () => {
+    // Review fix (HIGH, PR #88): the actual reactive behavior (an iframe
+    // resized across 640px re-applying the square ratio) can only be proven
+    // in a real browser — jsdom doesn't evaluate width-based @media queries
+    // (verified empirically: overriding window.innerWidth + dispatching
+    // 'resize' does not change getComputedStyle results here). This is a
+    // source-text check on the SAME THEME_CSS shipped to the browser, mirroring
+    // every other jsdom-unsupported-media-feature test in this suite
+    // (theme.test.ts's hover/pointer 44px rules use the identical pattern).
+    const mediaIdx = THEME_CSS.indexOf('@media (max-width: 640px)');
+    expect(mediaIdx).toBeGreaterThanOrEqual(0);
+    const closeIdx = THEME_CSS.indexOf('\n}', mediaIdx);
+    const mediaBlock = THEME_CSS.slice(mediaIdx, closeIdx);
+    expect(mediaBlock).toContain('.oxp-attachment-collage-tile--wide');
+    expect(mediaBlock).toMatch(/aspect-ratio:\s*1\s*\/\s*1/);
+  });
+
+  it('N=5_collage_renders_four_tiles_with_overlay_on_fourth', async () => {
+    const rows = [makeRow({
+      senderUid: 'u1',
+      seq: 1,
+      attachments: [
+        makeImageAttachment('a1', 1),
+        makeImageAttachment('a2', 2),
+        makeImageAttachment('a3', 3),
+        makeImageAttachment('a4', 4),
+        makeImageAttachment('a5', 5),
+      ],
+    })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(4);
+
+    const fourth = tiles[3] as HTMLElement;
+    const overlay = fourth.querySelector('.oxp-attachment-collage-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay!.textContent).toBe('+2');
+
+    const img = fourth.querySelector('img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img!.style.filter).toContain('blur');
+
+    ml.destroy();
+  });
+
+  it('N=1_image_keeps_single_attachment_path_no_collage', async () => {
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    expect(container.querySelector('.oxp-attachment-collage')).toBeNull();
+    const img = container.querySelector('.oxp-attachment-image img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+
+    ml.destroy();
+  });
+
+  it('mixed_mime_row_keeps_non_collage_render_path', async () => {
+    const rows = [makeRow({
+      senderUid: 'u1',
+      seq: 1,
+      attachments: [
+        makeImageAttachment('a1', 1),
+        { id: 'a2', url: 'https://cdn.example.com/voice.webm', mime: 'audio/webm', filename: 'voice.webm', sizeBytes: 5000 },
+      ],
+    })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    expect(container.querySelector('.oxp-attachment-collage')).toBeNull();
+    expect(container.querySelector('.oxp-attachment-image img')).not.toBeNull();
+    expect(container.querySelector('.oxp-attachment-audio audio')).not.toBeNull();
 
     ml.destroy();
   });

@@ -1317,9 +1317,10 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     expect(btn).toBeNull();
   });
 
-  it('paste event with an image routes through the REAL composerClient.sendFile: presign -> PUT -> send an attachment envelope', async () => {
+  it('paste event with an image stages via uploadAttachment (presign -> PUT), then an explicit send fires sendAttachmentMessage with the attachment envelope (stage-then-send)', async () => {
     // Drives composer.ts:265's real #onPaste handler (not a picker-internal
-    // mock) all the way through element.ts's composerClient.sendFile.
+    // mock) all the way through element.ts's composerClient.uploadAttachment,
+    // then a real send-button click through composerClient.sendAttachmentMessage.
     const client = makeCapableClient();
 
     const presignResp = { attachment_id: 'att-paste-1', upload_url: '/api/sdk/attachments/att-paste-1?t=tok' };
@@ -1363,6 +1364,8 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     textarea.dispatchEvent(pasteEvent);
     await new Promise((r) => setTimeout(r, 30));
 
+    // Stage-then-send: pasting eagerly uploads (UPLOAD-ON-STAGE) but must NOT
+    // send a message on its own.
     expect(presignCalls).toHaveLength(1);
     expect(presignCalls[0]?.method).toBe('POST');
     const presignBody = JSON.parse(presignCalls[0]!.body as string) as Record<string, unknown>;
@@ -1371,6 +1374,15 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     expect(presignBody['mime_type']).toBe('image/webp');
     expect(putCalls).toHaveLength(1);
     expect(putCalls[0]?.method).toBe('PUT');
+    expect(client.send).not.toHaveBeenCalled();
+
+    // Explicit send (real button click, real Composer#send) is the only thing
+    // that fires sendAttachmentMessage -> client.send.
+    const sendBtn = el.shadowRoot!.querySelector('.oxp-composer-send') as HTMLButtonElement;
+    expect(sendBtn.disabled).toBe(false);
+    sendBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
     expect(client.send).toHaveBeenCalledTimes(1);
     const [roomIdArg, sendArgs] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
@@ -1422,6 +1434,13 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
     Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pngFile] } });
     textarea.dispatchEvent(pasteEvent);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Staging (presign+PUT) succeeds; the orphan only occurs once the user
+    // explicitly sends and send() rejects.
+    const sendBtn = el.shadowRoot!.querySelector('.oxp-composer-send') as HTMLButtonElement;
+    expect(sendBtn.disabled).toBe(false);
+    sendBtn.click();
     await new Promise((r) => setTimeout(r, 30));
 
     const orphanWarning = warnSpy.mock.calls.find(

@@ -34,6 +34,7 @@ import {
   encodeAttachmentEnvelope,
   decodeAttachmentEnvelope,
   attachmentUrl,
+  type EnvelopeAttachment,
 } from './utils/attachment-envelope.js';
 
 const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERSION__ : '0.0.0-dev';
@@ -88,7 +89,10 @@ function readBlobAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
 }
 
 /**
- * issue #67: read-side inverse of composerClient.sendFile's envelope encode.
+ * issue #67: read-side inverse of composerClient.sendAttachmentMessage's
+ * envelope encode (composerClient.uploadAttachment + sendAttachmentMessage
+ * below — the old single-shot sendFile field was replaced, not kept, once
+ * AttachmentPicker moved to stage-then-send; see PR #88's changeset).
  *
  * chat-sdk's MessageRow has no attachments field at all (verified: types.ts,
  * client.ts's rowToMessageRow) — a stored attachment blob is structurally
@@ -532,9 +536,10 @@ export class OxpulseChatElement extends HTMLElement {
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         /**
-         * issue #67: optional — enables attachment upload. composerClient.sendFile
-         * (below) drives presignAttachment() + PUT + send() directly rather than
-         * chat-sdk's sendFile() convenience wrapper, because that wrapper discards
+         * issue #67: optional — enables attachment upload. composerClient's
+         * uploadAttachment + sendAttachmentMessage (below) drive
+         * presignAttachment() + PUT + send() directly rather than chat-sdk's
+         * own sendFile() convenience wrapper, because that wrapper discards
          * the presigned attachmentId when it calls send() (attachments.ts:163-167) —
          * see the "attachments (issue #67)" comment block near composerClient below.
          * Feature-detected like sendReaction?/getReactions? above; a real
@@ -841,14 +846,116 @@ export class OxpulseChatElement extends HTMLElement {
         // issue #67: narrow ONCE to a client that can drive the presign/PUT/send
         // attachment flow (send/baseUrl/jwt all present — a real SDKChatClient
         // always has all three together; test mocks opt in explicitly). Typed
-        // here so composerClient.sendFile below needs no per-call-site casts.
+        // here so uploadAttachment/sendAttachmentMessage below need no
+        // per-call-site casts.
         const attachmentClient: (RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string }) | null =
           capturedSendClient.send && capturedSendClient.baseUrl !== undefined && capturedSendClient.jwt !== undefined
             ? (capturedSendClient as RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string })
             : null;
+
+        // issue #67: split presign/PUT from send so the attachmentId is available
+        // before the message is sent (stage-then-send).
+        async function uploadAttachment(
+          // Review fix (LOW, PR #88): unused here — presign/PUT aren't room-scoped
+          // (the catch path below uses the outer config!.roomId instead) — but the
+          // param stays in the signature to satisfy AttachmentPickerClient's
+          // uploadAttachment(roomId, blob, args) interface contract.
+          _roomId: string,
+          blob: Blob,
+          args: { mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
+        ): Promise<{ attachmentId: string; attachment: EnvelopeAttachment }> {
+          try {
+            const mimeType = args.mimeType ?? blob.type;
+            const digest = await crypto.subtle.digest('SHA-256', await readBlobAsArrayBuffer(blob));
+            const sha256 = bytesToHex(digest);
+            const { attachmentId, uploadUrl } = await presignAttachment(attachmentClient!, {
+              mimeType,
+              byteSize: blob.size,
+              sha256,
+            });
+            const putUrl = uploadUrl.startsWith('/') ? `${attachmentClient!.baseUrl}${uploadUrl}` : uploadUrl;
+            const putResp = await fetch(putUrl, {
+              method: 'PUT',
+              body: blob,
+              headers: { 'Content-Type': mimeType },
+              signal: args.signal,
+            });
+            if (!putResp.ok) {
+              throw new Error(`attachment upload failed: HTTP ${putResp.status}`);
+            }
+            const attachment: EnvelopeAttachment = {
+              id: attachmentId,
+              mime: mimeType,
+              filename: args.filename ?? 'file',
+              sizeBytes: blob.size,
+              width: args.width,
+              height: args.height,
+            };
+            return { attachmentId, attachment };
+          } catch (err) {
+            const reason = classifyWriteFailureReason(err);
+            const errMsg = err instanceof Error ? err.message : String(err);
+            self.#notifyWriteFailure('send', reason, errMsg);
+            if (reason === 'auth_expired') {
+              self.#notifyTokenExpired(config!.roomId);
+            }
+            throw err;
+          }
+        }
+
+        async function sendAttachmentMessage(
+          roomId: string,
+          body: string,
+          attachments: readonly EnvelopeAttachment[],
+          args?: SendTextArgs,
+        ): Promise<{ msgId: string }> {
+          try {
+            const sealed = encodeAttachmentEnvelope(body, attachments);
+            let result: { seq: number; msgId: string };
+            try {
+              // Review fix (LOW, PR #88): spread caller-supplied args FIRST so
+              // senderUid/sealed — the authoritative identity + payload —
+              // always win, rather than a caller-supplied object being able
+              // to silently override them (defense-in-depth; SendTextArgs
+              // doesn't declare these keys today, but nothing enforces that
+              // at the call site since args flows through a variable, not a
+              // literal TS can excess-property-check).
+              result = await attachmentClient!.send(roomId, {
+                ...args,
+                senderUid: resolvedSelfUid ?? '',
+                sealed,
+              });
+            } catch (sendErr) {
+              const ids = attachments.map((a) => a.id).join(', ');
+              console.warn(
+                `[oxpulse/chat-widget] composerClient.sendAttachmentMessage: attachment(s) ${ids} ` +
+                  'uploaded but client.send failed (orphaned attachment(s) may exist).',
+                sendErr,
+              );
+              throw sendErr;
+            }
+            self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
+              bubbles: true,
+              composed: true,
+              detail: { roomId, msgId: result.msgId },
+            }));
+            return { msgId: result.msgId };
+          } catch (err) {
+            const reason = classifyWriteFailureReason(err);
+            const errMsg = err instanceof Error ? err.message : String(err);
+            self.#notifyWriteFailure('send', reason, errMsg);
+            if (reason === 'auth_expired') {
+              self.#notifyTokenExpired(config!.roomId);
+            }
+            throw err;
+          }
+        }
+
         const composerClient = {
           sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> =>
-            capturedSendClient.sendText(roomId, { senderUid: resolvedSelfUid ?? '', text, ...args }).then((res) => {
+            // Noted (PR #88 review, same class as sendAttachmentMessage below):
+            // spread args first so senderUid/text can't be silently overridden.
+            capturedSendClient.sendText(roomId, { ...args, senderUid: resolvedSelfUid ?? '', text }).then((res) => {
               // Dispatch message-sent event on success
               self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                 bubbles: true,
@@ -868,93 +975,18 @@ export class OxpulseChatElement extends HTMLElement {
               const errMsg = err instanceof Error ? err.message : String(err);
               self.#notifyWriteFailure('send', reason, errMsg);
               if (reason === 'auth_expired') {
-                self.#notifyTokenExpired(config.roomId);
+                self.#notifyTokenExpired(config!.roomId);
               }
               // Re-throw so the Composer's catch path fires (renders error chip + generic error event).
               throw err;
             }),
-          // issue #67: attachments wired end-to-end. Deliberately bypasses chat-sdk's
-          // sendFile() convenience wrapper (attachments.ts:120-176) — that wrapper's
-          // own SendFileArgs.sealed is a REQUIRED caller-supplied argument, so it must
-          // be built BEFORE presign runs, but presign is the only place attachmentId
-          // is minted. There is no way for a caller of that wrapper to embed
-          // attachmentId into the sealed payload it sends. Driving presign → PUT →
-          // send() directly here removes that ordering constraint. Only exposed when
-          // the underlying client is upload-capable (send/baseUrl/jwt present — mirrors
-          // sendReaction?/getReactions? above); paperclip/paste/drag-drop in composer.ts
-          // stay gated closed otherwise (composer.ts:206/249 feature-detect this field).
-          sendFile: attachmentClient
-            ? async (
-                roomId: string,
-                blob: Blob,
-                args: { senderUid?: string; sha256?: string; mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
-              ): Promise<{ msgId: string; attachmentId: string }> => {
-                try {
-                  const mimeType = args.mimeType ?? blob.type;
-                  const digest = await crypto.subtle.digest('SHA-256', await readBlobAsArrayBuffer(blob));
-                  const sha256 = bytesToHex(digest);
-                  const { attachmentId, uploadUrl } = await presignAttachment(attachmentClient, {
-                    mimeType,
-                    byteSize: blob.size,
-                    sha256,
-                  });
-                  const putUrl = uploadUrl.startsWith('/') ? `${attachmentClient.baseUrl}${uploadUrl}` : uploadUrl;
-                  const putResp = await fetch(putUrl, {
-                    method: 'PUT',
-                    body: blob,
-                    headers: { 'Content-Type': mimeType },
-                    signal: args.signal,
-                  });
-                  if (!putResp.ok) {
-                    throw new Error(`attachment upload failed: HTTP ${putResp.status}`);
-                  }
-                  const sealed = encodeAttachmentEnvelope('', [{
-                    id: attachmentId,
-                    mime: mimeType,
-                    filename: args.filename ?? 'file',
-                    sizeBytes: blob.size,
-                    width: args.width,
-                    height: args.height,
-                  }]);
-                  // Same orphaned-attachment convention as chat-sdk's own sendFile()
-                  // (attachments.ts:161-167): if send() fails AFTER a successful PUT,
-                  // the blob is already stored with no message pointing at it — warn
-                  // with the attachmentId so an operator can find/sweep it later.
-                  let result: { seq: number; msgId: string };
-                  try {
-                    result = await attachmentClient.send(roomId, {
-                      senderUid: args.senderUid ?? resolvedSelfUid ?? '',
-                      sealed,
-                    });
-                  } catch (sendErr) {
-                    console.warn(
-                      `[oxpulse/chat-widget] composerClient.sendFile: attachment ${attachmentId} ` +
-                        'uploaded but client.send failed (orphaned attachment may exist).',
-                      sendErr,
-                    );
-                    throw sendErr;
-                  }
-                  self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
-                    bubbles: true,
-                    composed: true,
-                    detail: { roomId, msgId: result.msgId },
-                  }));
-                  return { msgId: result.msgId, attachmentId };
-                } catch (err) {
-                  // Same write-failure telemetry contract as sendText's catch above —
-                  // an attachment send failure IS a send failure (WriteFailureOp has no
-                  // separate 'send_file' variant; reusing 'send' avoids growing that
-                  // enum for a failure surface that is identical to a text send).
-                  const reason = classifyWriteFailureReason(err);
-                  const errMsg = err instanceof Error ? err.message : String(err);
-                  self.#notifyWriteFailure('send', reason, errMsg);
-                  if (reason === 'auth_expired') {
-                    self.#notifyTokenExpired(config.roomId);
-                  }
-                  throw err;
-                }
-              }
-            : undefined,
+          // issue #67: attachments wired end-to-end. Split into uploadAttachment
+          // (presign+PUT only) and sendAttachmentMessage (encode+send) so the
+          // attachmentId(s) can be staged before the composer sends the message.
+          // Only exposed when the underlying client is upload-capable (send/baseUrl/jwt
+          // present); paperclip/paste/drag-drop in composer.ts feature-detect this.
+          uploadAttachment: attachmentClient ? uploadAttachment : undefined,
+          sendAttachmentMessage: attachmentClient ? sendAttachmentMessage : undefined,
         };
         this.#composer = new Composer({
           client: composerClient,

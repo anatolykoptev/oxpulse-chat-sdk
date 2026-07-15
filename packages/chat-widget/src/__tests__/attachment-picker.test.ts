@@ -1,23 +1,60 @@
 /**
- * attachment-picker.test.ts — W2.2 slice 4 TDD RED.
+ * attachment-picker.test.ts — staged attachment tray (slice 3).
  *
- * Tests: AttachmentPicker class acceptance criteria.
+ * Tests: AttachmentPicker stages files, uploads via uploadAttachment, and does
+ * NOT send messages. getStaged/hasStaged/clearStaged/awaitAllUploaded wired.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AttachmentPicker } from '../ui/attachment-picker.js';
+import { THEME_CSS } from '../ui/theme.js';
+import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
 
 // ── Stub SDK client ───────────────────────────────────────────────────────────
 
+function makeStubAttachment(args: {
+  attachmentId?: string;
+  blob?: Blob;
+  mimeType?: string;
+  filename?: string;
+  width?: number;
+  height?: number;
+} = {}): { attachmentId: string; attachment: EnvelopeAttachment } {
+  const attachmentId = args.attachmentId ?? 'att-1';
+  const blob = args.blob ?? new Blob(['x'], { type: 'image/png' });
+  return {
+    attachmentId,
+    attachment: {
+      id: attachmentId,
+      mime: args.mimeType ?? blob.type,
+      filename: args.filename ?? 'file',
+      sizeBytes: blob.size,
+      width: args.width,
+      height: args.height,
+    },
+  };
+}
+
 function makeStubClient(opts: {
-  resolveWith?: { msgId: string; attachmentId: string };
+  resolveWith?: { attachmentId: string; attachment: EnvelopeAttachment };
   rejectWith?: Error;
-  /** ms to delay before resolve/reject (simulates slow upload) */
   delayMs?: number;
 } = {}) {
   return {
-    sendFile: vi.fn((_roomId: string, _blob: Blob, _args: unknown) => {
-      const result = opts.resolveWith ?? { msgId: 'msg-1', attachmentId: 'att-1' };
+    uploadAttachment: vi.fn((_roomId: string, blob: Blob, args: unknown) => {
+      const a = args as {
+        mimeType?: string;
+        filename?: string;
+        width?: number;
+        height?: number;
+      };
+      const result = opts.resolveWith ?? makeStubAttachment({
+        blob,
+        mimeType: a.mimeType,
+        filename: a.filename,
+        width: a.width,
+        height: a.height,
+      });
       if (opts.delayMs) {
         return new Promise<typeof result>((resolve, reject) => {
           setTimeout(() => {
@@ -29,6 +66,7 @@ function makeStubClient(opts: {
       if (opts.rejectWith) return Promise.reject(opts.rejectWith);
       return Promise.resolve(result);
     }),
+    sendAttachmentMessage: vi.fn(),
   };
 }
 
@@ -46,26 +84,10 @@ function makeTextFile(): File {
   return new File(['hello'], 'doc.txt', { type: 'text/plain' });
 }
 
-// Drain microtasks
 async function drain(n = 10): Promise<void> {
   for (let i = 0; i < n; i++) await Promise.resolve();
 }
 
-/**
- * Stub the browser image-decode pipeline compress() needs
- * (createImageBitmap + canvas + FileReader), matching the working pattern
- * in attachments.test.ts's "compress — decompression bomb defense" suite.
- * jsdom implements none of these natively, so every test that uploads an
- * image/* file through the REAL AttachmentPicker.#upload() (which now runs
- * compress() before sendFile — image compression wiring) needs this stub,
- * not just the tests that assert on compression specifically.
- *
- * Installed ONCE per test in beforeEach; the stubbed bitmap dims / output
- * blob read from mutable module state (bitmapWidth/bitmapHeight/compressedOutBlob)
- * so a single test can override just those before calling handleFiles()
- * without re-installing the document.createElement spy — re-installing on
- * top of an already-spied createElement double-wraps it and recurses.
- */
 let bitmapWidth = 400;
 let bitmapHeight = 300;
 let compressedOutBlob: Blob = new Blob(['compressed'], { type: 'image/webp' });
@@ -89,11 +111,6 @@ function installImageCompressionStubs(): void {
     return origCreate?.(tag);
   });
 
-  // Resolves via microtask (not setTimeout) — every test in this file drains
-  // pending work with a bounded `await Promise.resolve()` loop (drain()), which
-  // does not advance macrotask timers. A real FileReader is macrotask-based in
-  // the browser, but this test double only needs to be AWAITABLE the same way
-  // the rest of the upload chain already is.
   class FakeReader {
     onerror: (() => void) | null = null;
     onload: (() => void) | null = null;
@@ -111,10 +128,6 @@ describe('AttachmentPicker', () => {
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
-    // Compression wiring (issue #67): #upload() now runs compress() for every
-    // image/* file before calling client.sendFile — stub its browser deps
-    // globally so every pre-existing makePngFile() upload test still reaches
-    // sendFile (it previously called sendFile directly with the raw File).
     bitmapWidth = 400;
     bitmapHeight = 300;
     compressedOutBlob = new Blob(['compressed'], { type: 'image/webp' });
@@ -129,33 +142,29 @@ describe('AttachmentPicker', () => {
 
   // ── Rendering ───────────────────────────────────────────────────────────────
 
-  it('renders_hidden_file_input_and_visible_button', () => {
+  it('renders_hidden_file_input_and_staging_tray', () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement | null;
     expect(input).not.toBeNull();
-    // Input should be visually hidden (aria-hidden or input hidden via CSS class)
-    // Visible paperclip button
+    // BUG-1: picker must not render its own visible button; composer.ts supplies the trigger.
     const btn = container.querySelector('.oxp-attachment-btn');
-    expect(btn).not.toBeNull();
-    expect(btn?.getAttribute('aria-label')).toBe('Attach files');
+    expect(btn).toBeNull();
+    const tray = container.querySelector('.oxp-attachment-queue');
+    expect(tray).not.toBeNull();
 
     picker.destroy();
   });
 
-  // i18n follow-up: lang defaults to English (unchanged); lang='ru' localizes
-  // aria-labels and the retry/error text rendered in the upload queue.
-  it('localizes_button_aria_labels_for_lang_ru', () => {
+  it('localizes_input_aria_label_for_lang_ru', () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container, lang: 'ru' });
     picker.mount();
 
     const input = container.querySelector('input[type="file"]');
-    const btn = container.querySelector('.oxp-attachment-btn');
     expect(input?.getAttribute('aria-label')).toBe('Выбрать файлы для прикрепления');
-    expect(btn?.getAttribute('aria-label')).toBe('Прикрепить файлы');
 
     picker.destroy();
   });
@@ -172,6 +181,19 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
+  // ── Review fix (LOW, PR #88): tray group semantics ──────────────────────────
+  it('staging_tray_has_group_role_and_an_accessible_name', () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container, lang: 'ru' });
+    picker.mount();
+
+    const tray = container.querySelector('.oxp-attachment-queue');
+    expect(tray?.getAttribute('role')).toBe('group');
+    expect(tray?.getAttribute('aria-label')).toBe('Вложения для отправки');
+
+    picker.destroy();
+  });
+
   // ── Validation ──────────────────────────────────────────────────────────────
 
   it('validates_files_before_upload — over-size file rejected', () => {
@@ -179,12 +201,9 @@ describe('AttachmentPicker', () => {
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
-    const bigFile = makeLargeFile();
-    picker.handleFiles([bigFile]);
+    picker.handleFiles([makeLargeFile()]);
+    expect(client.uploadAttachment).not.toHaveBeenCalled();
 
-    // Client.sendFile should NOT be called for oversized file
-    expect(client.sendFile).not.toHaveBeenCalled();
-    // Error event should be dispatched
     picker.destroy();
   });
 
@@ -198,7 +217,7 @@ describe('AttachmentPicker', () => {
 
     picker.handleFiles([makeTextFile()]);
 
-    expect(client.sendFile).not.toHaveBeenCalled();
+    expect(client.uploadAttachment).not.toHaveBeenCalled();
     expect(errorEvents.length).toBeGreaterThan(0);
     expect(errorEvents[0].detail.kind).toBe('upload_invalid');
 
@@ -219,45 +238,52 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
-  // ── Upload pipeline ─────────────────────────────────────────────────────────
+  // ── Staging / upload pipeline ───────────────────────────────────────────────
 
-  it('uploads_via_client_sendFile — valid file triggers sendFile call', async () => {
-    const client = makeStubClient({ resolveWith: { msgId: 'msg-x', attachmentId: 'att-x' } });
+  it('stages_and_uploads_but_does_not_send_a_message', async () => {
+    const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r42', container });
     picker.mount();
 
     picker.handleFiles([makePngFile()]);
     await drain(15);
 
-    expect(client.sendFile).toHaveBeenCalledWith(
-      'r42',
-      expect.any(Blob),
-      expect.any(Object),
-    );
+    expect(client.uploadAttachment).toHaveBeenCalledWith('r42', expect.any(Blob), expect.any(Object));
+    expect(client.sendAttachmentMessage).not.toHaveBeenCalled();
 
     picker.destroy();
   });
 
-  it('tracks_progress_per_file — multiple files get independent state', async () => {
+  it('getStaged_reflects_done_items_with_attachmentId', async () => {
+    const client = makeStubClient({ resolveWith: { attachmentId: 'att-x', attachment: { id: 'att-x', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 } } });
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile()]);
+    await drain(15);
+
+    const staged = picker.getStaged();
+    expect(staged.length).toBe(1);
+    expect(staged[0].status).toBe('done');
+    expect(staged[0].attachmentId).toBe('att-x');
+
+    picker.destroy();
+  });
+
+  it('tracks_progress_per_file — multiple files get independent uploads', async () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
-    const files = [makePngFile('a.png'), makePngFile('b.png')];
-    picker.handleFiles(files);
+    picker.handleFiles([makePngFile('a.png'), makePngFile('b.png')]);
     await drain(15);
 
-    // Both files should have been uploaded
-    expect(client.sendFile).toHaveBeenCalledTimes(2);
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(2);
 
     picker.destroy();
   });
 
-  // ── Compression wiring (issue #67) ───────────────────────────────────────────
-
-  it('compresses image/* files and threads the resulting dims into sendFile args', async () => {
-    // Distinct compressed bytes from the source File — proves sendFile receives
-    // compress()'s output blob, not the raw 1024-zero-byte File from makePngFile().
+  it('compresses_image_files_and_threads_the_resulting_dims_into_uploadAttachment_args', async () => {
     const compressedBlob = new Blob(['webp-bytes'], { type: 'image/webp' });
     bitmapWidth = 640;
     bitmapHeight = 480;
@@ -270,8 +296,8 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([makePngFile('photo.png')]);
     await drain(15);
 
-    expect(client.sendFile).toHaveBeenCalledTimes(1);
-    const [, blobArg, argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(1);
+    const [, blobArg, argsArg] = (client.uploadAttachment as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       Blob,
       Record<string, unknown>,
@@ -283,7 +309,7 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
-  it('bypasses compress() for a non-image file — original File reaches sendFile untouched', async () => {
+  it('bypasses_compress_for_a_non-image_file — original File reaches uploadAttachment untouched', async () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
@@ -292,8 +318,8 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([pdfFile]);
     await drain(15);
 
-    expect(client.sendFile).toHaveBeenCalledTimes(1);
-    const [, blobArg, argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(1);
+    const [, blobArg, argsArg] = (client.uploadAttachment as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       Blob,
       Record<string, unknown>,
@@ -302,14 +328,19 @@ describe('AttachmentPicker', () => {
     expect(argsArg.width).toBeUndefined();
     expect(argsArg.height).toBeUndefined();
 
+    // Review fix (MEDIUM, PR #88): non-image preview (📎 + filename) is
+    // shared between the 'uploading' and 'done' branches via
+    // #renderNonImagePreview — assert the rendered card actually shows it
+    // once uploaded, not just that upload args were correct.
+    const nameEl = container.querySelector('.oxp-attachment-name');
+    expect(nameEl?.textContent).toBe('doc.pdf');
+    const card = container.querySelector('.oxp-attachment-item[data-status="done"]');
+    expect(card?.textContent).toContain('📎');
+
     picker.destroy();
   });
 
-  it('bypasses compress() for image/gif — canvas re-encode would flatten the animation to one frame', async () => {
-    // Review fix: compress() draws a single decoded frame to <canvas> and
-    // re-encodes — correct for a static image, but silently destroys an
-    // animated GIF's other frames. Size cap (validate(), before #upload runs
-    // at all) still applies; only the re-encode step is skipped.
+  it('bypasses_compress_for_image_gif — canvas re-encode would_flatten_animation', async () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
@@ -318,25 +349,21 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([gifFile]);
     await drain(15);
 
-    expect(client.sendFile).toHaveBeenCalledTimes(1);
-    const [, blobArg, argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(1);
+    const [, blobArg, argsArg] = (client.uploadAttachment as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       Blob,
       Record<string, unknown>,
     ];
-    expect(blobArg).toBe(gifFile); // original bytes untouched — not re-encoded
+    expect(blobArg).toBe(gifFile);
     expect(argsArg.width).toBeUndefined();
     expect(argsArg.height).toBeUndefined();
-    // createImageBitmap is stubbed globally in beforeEach for the OTHER image
-    // tests in this file — asserting it was never called here proves compress()
-    // (which always calls createImageBitmap first) was genuinely skipped, not
-    // just coincidentally reused-original due to compress()'s own size check.
     expect(createImageBitmap).not.toHaveBeenCalled();
 
     picker.destroy();
   });
 
-  it('threads the sanitized filename into sendFile args for both image and non-image files', async () => {
+  it('threads_the_sanitized_filename_into_uploadAttachment_args', async () => {
     const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
@@ -344,7 +371,7 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([makePngFile('vacation photo.png')]);
     await drain(15);
 
-    const [, , argsArg] = (client.sendFile as ReturnType<typeof vi.fn>).mock.calls[0] as [
+    const [, , argsArg] = (client.uploadAttachment as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       Blob,
       Record<string, unknown>,
@@ -354,23 +381,155 @@ describe('AttachmentPicker', () => {
     picker.destroy();
   });
 
-  // ── Cancel ──────────────────────────────────────────────────────────────────
+  // ── Cancel / remove ─────────────────────────────────────────────────────────
 
-  it('cancel_button_aborts_upload — abort is called on slow upload', async () => {
-    const client = makeStubClient({ delayMs: 5000, resolveWith: { msgId: 'm', attachmentId: 'a' } });
+  it('cancel_button_aborts_upload', async () => {
+    const client = makeStubClient({ delayMs: 5000 });
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
     picker.handleFiles([makePngFile('slow.png')]);
     await drain(5);
 
-    // Queue item should be visible; click cancel
     const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
     expect(cancelBtn).not.toBeNull();
     cancelBtn!.click();
 
-    // sendFile should have been called (upload started)
-    expect(client.sendFile).toHaveBeenCalledTimes(1);
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(1);
+    expect(picker.hasStaged()).toBe(false);
+
+    picker.destroy();
+  });
+
+  it('removing_a_staged_item_revokes_its_objectURL', async () => {
+    const client = makeStubClient();
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('remove.png')]);
+    await drain(15);
+
+    const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn!.click();
+
+    expect(revokeSpy).toHaveBeenCalled();
+    expect(picker.hasStaged()).toBe(false);
+
+    picker.destroy();
+  });
+
+  // ── Review fix (LOW, PR #88): non-image objectURL isn't consumed by the
+  // rendered preview (#renderNonImagePreview never reads item.objectURL —
+  // only the image branch does) but IS still created for every file
+  // regardless of mime type. Confirmed by reading every removal path
+  // (destroy/clearStaged/cancel all call #revokeAllObjectURLs or
+  // #revokeItemObjectURL unconditionally) that this is wasted-but-not-leaked;
+  // these tests make that a regression guard instead of a one-time read.
+  it('non_image_file_objectURL_is_revoked_on_cancel_even_though_the_preview_never_reads_it', async () => {
+    const client = makeStubClient();
+    const createSpy = vi.spyOn(URL, 'createObjectURL');
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    const pdfFile = new File(['%PDF-1.4'], 'doc.pdf', { type: 'application/pdf' });
+    picker.handleFiles([pdfFile]);
+    await drain(15);
+
+    expect(createSpy).toHaveBeenCalledWith(pdfFile);
+    const createdUrl = createSpy.mock.results[0]?.value as string;
+
+    const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn!.click();
+
+    expect(revokeSpy).toHaveBeenCalledWith(createdUrl);
+    expect(picker.hasStaged()).toBe(false);
+
+    picker.destroy();
+  });
+
+  it('non_image_file_objectURL_is_revoked_on_destroy', async () => {
+    const client = makeStubClient();
+    const createSpy = vi.spyOn(URL, 'createObjectURL');
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    const pdfFile = new File(['%PDF-1.4'], 'doc2.pdf', { type: 'application/pdf' });
+    picker.handleFiles([pdfFile]);
+    await drain(15);
+
+    const createdUrl = createSpy.mock.results[0]?.value as string;
+    picker.destroy();
+
+    expect(revokeSpy).toHaveBeenCalledWith(createdUrl);
+  });
+
+  // ── Review fix (CRITICAL, PR #88): computed style, not string-match ─────────
+  //
+  // theme.test.ts's cancel_retry_buttons_44px_on_mobile only string-matches the
+  // CSS source text — it would stay green even while cancelBtn's inline
+  // cssText hardcoded min-width/min-height:20px, because an inline style
+  // always outranks a class rule regardless of what the class rule says. This
+  // test renders the REAL THEME_CSS against a REAL staged cancelBtn and reads
+  // getComputedStyle, which DOES reflect inline-vs-class specificity.
+  //
+  // jsdom does not implement the hover/pointer media features (verified
+  // empirically: a @media(pointer:coarse) block never matches in jsdom), so
+  // the touch 44px floor can't be exercised here — that remains
+  // theme.test.ts's job. What IS fully verifiable in jsdom, and is exactly
+  // what broke: whether the inline style still hardcodes a min-width/
+  // min-height that would defeat ANY class rule, touch or not.
+  it('cancel_button_min_size_comes_from_the_class_not_an_inline_override', async () => {
+    const styleEl = document.createElement('style');
+    styleEl.textContent = THEME_CSS;
+    document.head.appendChild(styleEl);
+
+    try {
+      const client = makeStubClient();
+      const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+      picker.mount();
+      picker.handleFiles([makePngFile('cancel-size.png')]);
+      await drain(15);
+
+      const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
+      expect(cancelBtn).not.toBeNull();
+
+      // The bug: an inline min-width/min-height here always wins, so the class
+      // rule (24px desktop, 44px touch) never gets a chance to apply.
+      expect(cancelBtn!.style.minWidth).toBe('');
+      expect(cancelBtn!.style.minHeight).toBe('');
+
+      const computed = getComputedStyle(cancelBtn!);
+      expect(computed.minWidth).toBe('24px');
+      expect(computed.minHeight).toBe('24px');
+
+      picker.destroy();
+    } finally {
+      styleEl.remove();
+    }
+  });
+
+  it('clearStaged_revokes_all_remaining_objectURLs', async () => {
+    const client = makeStubClient();
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('a.png'), makePngFile('b.png')]);
+    await drain(15);
+
+    expect(picker.getStaged().length).toBe(2);
+    picker.clearStaged();
+    expect(picker.hasStaged()).toBe(false);
+    expect(revokeSpy).toHaveBeenCalledTimes(2);
 
     picker.destroy();
   });
@@ -388,10 +547,36 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([makePngFile()]);
     await drain(15);
 
-    expect(errorEvents.length).toBeGreaterThan(0);
-    const errEvt = errorEvents.find(e => e.detail.kind === 'upload_failed');
+    const errEvt = errorEvents.find((e) => e.detail.kind === 'upload_failed');
     expect(errEvt).not.toBeUndefined();
     expect(errEvt!.detail.message).toContain('network error');
+
+    picker.destroy();
+  });
+
+  // ── Review fix (HIGH, PR #88): realistic error text ─────────────────────────
+  it('error_label_is_ellipsis_clipped_and_the_full_message_reaches_the_live_region', async () => {
+    // A realistic error string is much longer than the 72px card can show —
+    // the visible label must be safely clipped (not overflow the card or
+    // overlap the cancel button), and the FULL text must still reach a
+    // non-hover channel (the aria-live region), not just errEl.title.
+    const longError = 'Upload rejected: the storage backend returned HTTP 413 Payload Too Large for this file';
+    const client = makeStubClient({ rejectWith: new Error(longError) });
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('big-error.png')]);
+    await drain(15);
+
+    const errEl = container.querySelector('.oxp-attachment-error') as HTMLElement | null;
+    expect(errEl).not.toBeNull();
+    expect(errEl!.style.overflow).toBe('hidden');
+    expect(errEl!.style.textOverflow).toBe('ellipsis');
+    expect(errEl!.style.whiteSpace).toBe('nowrap');
+
+    const live = container.querySelector('[aria-live="polite"]') as HTMLElement | null;
+    expect(live).not.toBeNull();
+    expect(live!.textContent).toContain(longError);
 
     picker.destroy();
   });
@@ -441,7 +626,6 @@ describe('AttachmentPicker', () => {
     });
     picker.mount();
 
-    // Nothing should have been mounted
     const btn = container.querySelector('.oxp-attachment-btn');
     expect(btn).toBeNull();
 
@@ -460,22 +644,16 @@ describe('AttachmentPicker', () => {
 
     const live = container.querySelector('[aria-live="polite"]') as HTMLElement | null;
     expect(live).not.toBeNull();
-    // Live region should have some text indicating upload status
-    // (either file name or status label)
     expect(live!.textContent).toBeTruthy();
 
     picker.destroy();
   });
 
-  // ── CB2: Cancel button passes signal to sendFile ─────────────────────────────
-
-  it('passes_signal_to_sendFile_for_cancellation', async () => {
-    // CB2: sendFile must receive opts.signal so server-side upload can be aborted
+  it('passes_signal_to_uploadAttachment_for_cancellation', async () => {
     let capturedOpts: unknown = null;
     const client = {
-      sendFile: vi.fn((_roomId: string, _blob: Blob, opts: unknown) => {
+      uploadAttachment: vi.fn((_roomId: string, _blob: Blob, opts: unknown) => {
         capturedOpts = opts;
-        // Never resolves — simulates slow upload
         return new Promise(() => {});
       }),
     };
@@ -485,9 +663,7 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([makePngFile('signal-test.png')]);
     await drain(5);
 
-    // sendFile must have been called
-    expect(client.sendFile).toHaveBeenCalledTimes(1);
-    // opts must contain a signal property
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(1);
     expect(capturedOpts).not.toBeNull();
     expect((capturedOpts as Record<string, unknown>).signal).toBeInstanceOf(AbortSignal);
 
@@ -495,14 +671,13 @@ describe('AttachmentPicker', () => {
   });
 
   it('cancel_button_aborts_upload_via_signal', async () => {
-    // CB2: clicking cancel must trigger AbortSignal.aborted on the signal passed to sendFile
     let capturedSignal: AbortSignal | null = null;
     let rejectUpload!: (err: Error) => void;
 
     const client = {
-      sendFile: vi.fn((_roomId: string, _blob: Blob, opts: { signal?: AbortSignal }) => {
+      uploadAttachment: vi.fn((_roomId: string, _blob: Blob, opts: { signal?: AbortSignal }) => {
         capturedSignal = opts.signal ?? null;
-        return new Promise<{ msgId: string; attachmentId: string }>((_, reject) => {
+        return new Promise<{ attachmentId: string; attachment: EnvelopeAttachment }>((_, reject) => {
           rejectUpload = reject;
           if (opts.signal) {
             opts.signal.addEventListener('abort', () => {
@@ -523,7 +698,6 @@ describe('AttachmentPicker', () => {
     expect(cancelBtn).not.toBeNull();
     cancelBtn!.click();
 
-    // Signal must be aborted after cancel
     expect(capturedSignal!.aborted).toBe(true);
 
     picker.destroy();
@@ -532,11 +706,10 @@ describe('AttachmentPicker', () => {
   // ── CM6: Focus preserved on progress update (diff-patch queue) ───────────────
 
   it('focus_preserved_on_progress_update_during_upload', async () => {
-    // CM6: #renderQueue must diff-patch rather than innerHTML='', to preserve focus
-    let resolveUpload!: (v: { msgId: string; attachmentId: string }) => void;
+    let resolveUpload!: (v: { attachmentId: string; attachment: EnvelopeAttachment }) => void;
     const client = {
-      sendFile: vi.fn((_roomId: string, _blob: Blob, _opts: unknown) => {
-        return new Promise<{ msgId: string; attachmentId: string }>((resolve) => {
+      uploadAttachment: vi.fn((_roomId: string, _blob: Blob, _opts: unknown) => {
+        return new Promise<{ attachmentId: string; attachment: EnvelopeAttachment }>((resolve) => {
           resolveUpload = resolve;
         });
       }),
@@ -547,18 +720,14 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([makePngFile('focus-test.png')]);
     await drain(5);
 
-    // Focus the cancel button
     const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
     expect(cancelBtn).not.toBeNull();
     cancelBtn!.focus();
     expect(document.activeElement).toBe(cancelBtn);
 
-    // Simulate a second file being added (triggers re-render of queue)
     picker.handleFiles([makePngFile('focus-test2.png')]);
     await drain(5);
 
-    // Focus must still be on the same cancel button (not lost to body)
-    // NOTE: innerHTML='' wipe destroys the node — focus falls to body
     expect(document.activeElement).not.toBe(document.body);
 
     picker.destroy();
@@ -567,9 +736,7 @@ describe('AttachmentPicker', () => {
   // ── DB4: Progress bar role and indeterminate aria ────────────────────────────
 
   it('progress_has_role_progressbar_and_indeterminate_aria', async () => {
-    // DB4: progress element must have role="progressbar" and aria-valuetext="Uploading…"
-    // (indeterminate = no aria-valuenow)
-    const client = makeStubClient({ delayMs: 5000, resolveWith: { msgId: 'm', attachmentId: 'a' } });
+    const client = makeStubClient({ delayMs: 5000 });
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
     picker.handleFiles([makePngFile('progress-a11y.png')]);
@@ -578,62 +745,38 @@ describe('AttachmentPicker', () => {
     const progress = container.querySelector('.oxp-attachment-progress') as HTMLElement | null;
     expect(progress).not.toBeNull();
     expect(progress!.getAttribute('role')).toBe('progressbar');
-    // Indeterminate: aria-valuetext present, aria-valuenow absent
     expect(progress!.getAttribute('aria-valuetext')).toBeTruthy();
     expect(progress!.getAttribute('aria-valuenow')).toBeNull();
 
     picker.destroy();
   });
 
-  // ── F3: Done-state visible before removal (design B4) ────────────────────────
-
-  it('shows_done_state_visibly_before_removing', async () => {
-    // F3: completed upload rows were filtered with continue → row disappeared immediately.
-    // Fix: keep done rows with data-status='done' visible, remove after 2s timeout.
-    vi.useFakeTimers();
-
-    let resolveUpload!: (v: { msgId: string; attachmentId: string }) => void;
-    const client = {
-      sendFile: vi.fn((_roomId: string, _blob: Blob, _opts: unknown) => {
-        return new Promise<{ msgId: string; attachmentId: string }>((resolve) => {
-          resolveUpload = resolve;
-        });
-      }),
-    };
-
+  // ── Review fix (MEDIUM, PR #88): uploading overlay contrast ─────────────────
+  it('uploading_overlay_uses_a_theme_independent_scrim_not_a_theme_fg_token', async () => {
+    // The overlay sits on top of an ARBITRARY user photo — a theme token
+    // (dark in light mode) guarantees nothing about contrast against the
+    // photo's own luminance. Must use the same fixed, high-opacity
+    // dark-scrim + white-glyph pairing this file already uses for
+    // .oxp-composer-dragover::after (theme-independent by design).
+    const client = makeStubClient({ delayMs: 5000 });
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
-    picker.handleFiles([makePngFile('complete.png')]);
+    picker.handleFiles([makePngFile('overlay-contrast.png')]);
     await drain(5);
 
-    // Complete the upload
-    resolveUpload({ msgId: 'msg-done', attachmentId: 'att-done' });
-    await drain(10);
+    const overlay = container.querySelector('.oxp-attachment-uploading-overlay') as HTMLElement | null;
+    expect(overlay).not.toBeNull();
+    expect(overlay!.style.color).not.toContain('var(');
+    expect(overlay!.style.color).toBe('rgb(255, 255, 255)');
+    expect(overlay!.style.background).toContain('0.7');
 
-    // Immediately after completion: row must still be visible with data-status='done'
-    const doneRow = container.querySelector('.oxp-attachment-item[data-status="done"]') as HTMLElement | null;
-    expect(doneRow).not.toBeNull();
-
-    // Before 2s: still visible
-    vi.advanceTimersByTime(1999);
-    const doneRowStillThere = container.querySelector('.oxp-attachment-item[data-status="done"]') as HTMLElement | null;
-    expect(doneRowStillThere).not.toBeNull();
-
-    // After 2s: row removed
-    vi.advanceTimersByTime(1);
-    const doneRowGone = container.querySelector('.oxp-attachment-item[data-status="done"]') as HTMLElement | null;
-    expect(doneRowGone).toBeNull();
-
-    vi.useRealTimers();
     picker.destroy();
   });
 
   // ── F5: Duplicate filename queue collision ────────────────────────────────────
 
   it('enqueues_two_files_with_same_filename_as_separate_rows', async () => {
-    // F5: existingRows keyed by filename → two concurrent Screenshot.png collapse to one row.
-    // Fix: assign stable item.id (crypto.randomUUID), key existingRows by item.id.
-    const client = makeStubClient({ delayMs: 5000, resolveWith: { msgId: 'm', attachmentId: 'a' } });
+    const client = makeStubClient({ delayMs: 5000 });
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
@@ -642,95 +785,90 @@ describe('AttachmentPicker', () => {
     picker.handleFiles([file1, file2]);
     await drain(5);
 
-    // Both files must produce distinct rows in the queue
     const rows = container.querySelectorAll('.oxp-attachment-item');
     expect(rows.length).toBe(2);
 
     picker.destroy();
   });
 
-  // ── 1B: Cancel focus loss on completion (#1266) ──────────────────────────────
+  // ── Done-state stays staged (not auto-removed) ───────────────────────────────
 
-  it('cancel_focus_moves_to_paperclip_on_completion', async () => {
-    // 1B: cancelBtn.hidden = true removes it from a11y tree. If cancelBtn is focused,
-    // focus falls to body. Fix: BEFORE setting hidden, focus next logical element
-    // (the paperclip button, or failing that the composer textarea).
-    let resolveUpload!: (v: { msgId: string; attachmentId: string }) => void;
-    const client = {
-      sendFile: vi.fn(
-        (_roomId: string, _blob: Blob, _opts: unknown) =>
-          new Promise<{ msgId: string; attachmentId: string }>((resolve) => {
-            resolveUpload = resolve;
-          }),
-      ),
-    };
-
+  it('done_item_remains_in_staged_list', async () => {
+    const client = makeStubClient();
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
-    picker.handleFiles([makePngFile('focus-recover.png')]);
-    await drain(5);
+    picker.handleFiles([makePngFile('complete.png')]);
+    await drain(15);
 
-    // Focus the cancel button
-    const cancelBtn = container.querySelector('.oxp-attachment-cancel') as HTMLButtonElement | null;
-    expect(cancelBtn).not.toBeNull();
-    cancelBtn!.focus();
-    expect(document.activeElement).toBe(cancelBtn);
-
-    // Complete the upload — cancelBtn.hidden becomes true
-    resolveUpload({ msgId: 'msg1', attachmentId: 'att1' });
-    await drain(10);
-
-    // Focus must NOT have fallen to body
-    expect(document.activeElement).not.toBe(document.body);
-    // Focus must have moved to the paperclip/attachment button (or any non-body element in picker)
-    const paperclipBtn = container.querySelector('.oxp-attachment-btn') as HTMLButtonElement | null;
-    if (paperclipBtn) {
-      expect(document.activeElement).toBe(paperclipBtn);
-    } else {
-      // Fallback: focus somewhere meaningful, not body
-      expect(document.activeElement).not.toBe(document.body);
-    }
+    expect(picker.getStaged().length).toBe(1);
+    expect(picker.getStaged()[0].status).toBe('done');
 
     picker.destroy();
   });
 
-  it('cancel_only_affects_clicked_item_when_duplicate_filename', async () => {
-    // F5: cancel handler closed over first item by filename — cancelling first item
-    // also removed second item with same filename.
-    // Fix: each row has data-item-id; cancel reads item.id from closure.
-    let uploadCount = 0;
-    const abortSignals: AbortSignal[] = [];
+  // ── Multi-add and MAX_ATTACHMENTS ───────────────────────────────────────────
 
-    const client = {
-      sendFile: vi.fn((_roomId: string, _blob: Blob, opts: { signal?: AbortSignal }) => {
-        uploadCount++;
-        if (opts.signal) abortSignals.push(opts.signal);
-        // Never resolves — stays uploading
-        return new Promise<{ msgId: string; attachmentId: string }>(() => {});
-      }),
-    };
+  it('multi_add_appends_across_handleFiles_calls', async () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('first.png')]);
+    await drain(5);
+    picker.handleFiles([makePngFile('second.png')]);
+    await drain(5);
+
+    expect(picker.getStaged().length).toBe(2);
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(2);
+
+    picker.destroy();
+  });
+
+  it('max_attachments_rejects_extras', async () => {
+    const client = makeStubClient();
+    const errorEvents: CustomEvent[] = [];
+    container.addEventListener('oxpulse-chat:error', (e) => errorEvents.push(e as CustomEvent));
 
     const picker = new AttachmentPicker({ client, roomId: 'r1', container });
     picker.mount();
 
-    picker.handleFiles([makePngFile('Screenshot.png'), makePngFile('Screenshot.png')]);
-    await drain(5);
+    const files = Array.from({ length: 11 }, (_, i) => makePngFile(`img${i}.png`));
+    picker.handleFiles(files);
+    await drain(15);
 
-    expect(uploadCount).toBe(2);
+    expect(picker.getStaged().length).toBe(10);
+    expect(client.uploadAttachment).toHaveBeenCalledTimes(10);
+    expect(errorEvents.some((e) => e.detail.kind === 'upload_invalid')).toBe(true);
 
-    // Cancel the first row
-    const cancelBtns = container.querySelectorAll<HTMLButtonElement>('.oxp-attachment-cancel');
-    expect(cancelBtns.length).toBe(2);
-    cancelBtns[0]!.click();
-    await drain(5);
+    picker.destroy();
+  });
 
-    // Second row must still be present and uploading
-    const remainingRows = container.querySelectorAll('.oxp-attachment-item');
-    expect(remainingRows.length).toBe(1);
+  // ── awaitAllUploaded ─────────────────────────────────────────────────────────
 
-    // The first signal should be aborted; second should not
-    expect(abortSignals[0]?.aborted).toBe(true);
-    expect(abortSignals[1]?.aborted).toBe(false);
+  it('awaitAllUploaded_resolves_when_all_uploads_done', async () => {
+    const client = makeStubClient();
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('a.png'), makePngFile('b.png')]);
+    const promise = picker.awaitAllUploaded();
+    await drain(15);
+
+    await expect(promise).resolves.toBeUndefined();
+
+    picker.destroy();
+  });
+
+  it('awaitAllUploaded_rejects_when_any_upload_fails', async () => {
+    const client = makeStubClient({ rejectWith: new Error('fail') });
+    const picker = new AttachmentPicker({ client, roomId: 'r1', container });
+    picker.mount();
+
+    picker.handleFiles([makePngFile('fail.png')]);
+    const promise = picker.awaitAllUploaded();
+    await drain(15);
+
+    await expect(promise).rejects.toBeDefined();
 
     picker.destroy();
   });
