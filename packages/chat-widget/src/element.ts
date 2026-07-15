@@ -105,7 +105,8 @@ function readBlobAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
  * pre-existing plain-text message — fails the shape check and passes through
  * unchanged, so this never touches the ordinary text path.
  */
-function decodeRowAttachments(row: MessageRow, baseUrl: string): MessageRow {
+/** @internal Exported for tests only. */
+export function decodeRowAttachments(row: MessageRow, baseUrl: string): MessageRow {
   if (!row.plaintext) return row;
   let text: string;
   try {
@@ -126,6 +127,7 @@ function decodeRowAttachments(row: MessageRow, baseUrl: string): MessageRow {
       sizeBytes: a.sizeBytes,
       width: a.width,
       height: a.height,
+      durationMs: a.durationMs,
     })),
   };
 }

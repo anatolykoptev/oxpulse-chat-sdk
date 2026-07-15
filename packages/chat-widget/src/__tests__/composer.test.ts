@@ -8,6 +8,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Composer } from '../ui/composer.js';
 import { MAX_BODY_CHARS } from '../utils/textfield-helpers.js';
+import { createVoiceRecorder } from '../utils/voice.js';
+
+vi.mock('../utils/voice.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/voice.js')>();
+  return {
+    ...actual,
+    createVoiceRecorder: vi.fn(),
+  };
+});
 
 // ── Stub client ────────────────────────────────────────────────────────────────
 
@@ -142,6 +151,7 @@ describe('Composer', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     stubImageCompression();
+    vi.stubGlobal('navigator', { language: 'en-US', mediaDevices: { getUserMedia: vi.fn() } });
   });
 
   afterEach(() => {
@@ -1218,6 +1228,137 @@ describe('Composer', () => {
     expect(replyEl.getAttribute('aria-label')).not.toBeNull();
 
     composer.destroy();
+  });
+
+  // ── P0: Voice messages ───────────────────────────────────────────────────────
+
+  function makeMockVoiceRecorder(opts: { mime?: string; durationMs?: number; blob?: Blob } = {}) {
+    const mime = opts.mime ?? 'audio/mp4';
+    const blob = opts.blob ?? new Blob(['audio'], { type: mime });
+    const durationMs = opts.durationMs ?? 0;
+    return {
+      durationMs: vi.fn(() => durationMs),
+      stop: vi.fn(() => Promise.resolve({ blob, durationMs, mime })),
+      cancel: vi.fn(),
+    };
+  }
+
+  it('mic_button_hidden_without_attachment_capability', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    expect(container.querySelector('.oxp-composer-mic-btn')).toBeNull();
+    composer.destroy();
+  });
+
+  it('mic_button_hidden_without_mediaDevices', () => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    expect(container.querySelector('.oxp-composer-mic-btn')).toBeNull();
+    composer.destroy();
+  });
+
+  it('mic_button_visible_when_both_gates_pass', () => {
+    const client = { ...makeStubClient({}), ...makeAttachmentStubs() };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement | null;
+    expect(micBtn).not.toBeNull();
+    expect(micBtn!.getAttribute('aria-label')).toBe('Record voice message');
+    composer.destroy();
+  });
+
+  it('record_and_stop_uploads_voice_then_sends_with_durationMs', async () => {
+    const blob = new Blob(['voice'], { type: 'audio/mp4' });
+    vi.mocked(createVoiceRecorder).mockResolvedValue(
+      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 12_300, blob }) as any,
+    );
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    expect(createVoiceRecorder).toHaveBeenCalledOnce();
+    expect(container.querySelector('.oxp-composer-recording')).not.toBeNull();
+    expect(container.querySelector('.oxp-composer-main')?.hidden).toBe(true);
+
+    const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
+    stopBtn.click();
+    await drain(15);
+
+    expect(uploadAttachment).toHaveBeenCalledOnce();
+    expect(uploadAttachment).toHaveBeenCalledWith('r1', blob, { mimeType: 'audio/mp4', filename: 'voice.mp4' });
+
+    expect(sendAttachmentMessage).toHaveBeenCalledOnce();
+    const [roomIdArg, bodyArg, attachmentsArg] = (sendAttachmentMessage as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      string,
+      readonly { id: string; durationMs?: number }[],
+    ];
+    expect(roomIdArg).toBe('r1');
+    expect(bodyArg).toBe('');
+    expect(attachmentsArg).toHaveLength(1);
+    expect(attachmentsArg[0]).toMatchObject({ id: 'att-1', mime: 'image/png', durationMs: 12_300 });
+
+    expect(container.querySelector('.oxp-composer-recording')?.hidden).toBe(true);
+    expect(container.querySelector('.oxp-composer-main')?.hidden).toBe(false);
+
+    composer.destroy();
+  });
+
+  it('cancel_voice_recording_sends_nothing', async () => {
+    vi.mocked(createVoiceRecorder).mockResolvedValue(makeMockVoiceRecorder() as any);
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    const cancelBtn = container.querySelector('.oxp-recording-cancel-btn') as HTMLButtonElement;
+    cancelBtn.click();
+    await drain(10);
+
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
+    expect(container.querySelector('.oxp-composer-main')?.hidden).toBe(false);
+
+    composer.destroy();
+  });
+
+  it('destroy_mid_recording_cancels_recorder', async () => {
+    const mockRecorder = makeMockVoiceRecorder();
+    vi.mocked(createVoiceRecorder).mockResolvedValue(mockRecorder as any);
+
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+    micBtn.click();
+    await drain(10);
+
+    composer.destroy();
+    await drain(5);
+
+    expect(mockRecorder.cancel).toHaveBeenCalled();
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(sendAttachmentMessage).not.toHaveBeenCalled();
   });
 });
 

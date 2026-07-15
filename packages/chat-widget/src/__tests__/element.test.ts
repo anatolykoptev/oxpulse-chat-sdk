@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OxpulseChatElement, defineElement, mount } from '../element.js';
+import { OxpulseChatElement, defineElement, mount, decodeRowAttachments } from '../element.js';
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
 import { encodeAttachmentEnvelope, decodeAttachmentEnvelope } from '../utils/attachment-envelope.js';
 
@@ -1538,5 +1538,36 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     const bodyEl = el.shadowRoot!.querySelector('.oxp-bubble-body');
     expect(bodyEl?.textContent).toContain('hello world');
     expect(el.shadowRoot!.querySelector('.oxp-attachment-image')).toBeNull();
+  });
+});
+
+describe('decodeRowAttachments', () => {
+  it('maps_durationMs_from_envelope_to_attachmentMeta', () => {
+    const sealed = encodeAttachmentEnvelope('', [
+      { id: 'att-voice', mime: 'audio/mp4', filename: 'voice.mp4', sizeBytes: 1234, durationMs: 45_000 },
+    ]);
+    const row: MessageRow = {
+      seq: 1,
+      msgId: 'msg-1',
+      senderUid: 'u2',
+      sealed: new ArrayBuffer(0),
+      plaintext: new TextEncoder().encode(new TextDecoder().decode(sealed)),
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: null,
+      productMeta: null,
+    };
+
+    const decoded = decodeRowAttachments(row, 'https://chat.example.com');
+    expect(decoded.text).toBe('');
+    expect(decoded.attachments).toHaveLength(1);
+    expect(decoded.attachments![0]).toMatchObject({
+      id: 'att-voice',
+      mime: 'audio/mp4',
+      filename: 'voice.mp4',
+      sizeBytes: 1234,
+      durationMs: 45_000,
+    });
+    expect(decoded.attachments![0].url).toBe('https://chat.example.com/api/sdk/attachments/att-voice');
   });
 });

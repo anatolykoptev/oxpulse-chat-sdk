@@ -52,6 +52,14 @@ export function formatTime(ts: number): string {
   return pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
+/** Format a millisecond duration as mm:ss (e.g. 0:00). */
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
 /** Format remaining time until a wall-clock expiry timestamp.
  *  - >= 1h: `Hh Mm` (e.g. `2h 15m`)
  *  - >= 1m: `Mm Ss` (e.g. `15m 30s`)
