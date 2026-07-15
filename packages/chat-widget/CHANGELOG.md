@@ -1,5 +1,11 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.12.0
+
+### Minor Changes
+
+- cbbd8d1: voice pre-send preview: record → review/play → send or discard (no more auto-send on stop); mic/paperclip tooltips
+
 ## 0.11.0
 
 ### Minor Changes
