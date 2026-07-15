@@ -33,6 +33,18 @@ interface ComposerClient {
     blob: Blob,
     args: { senderUid?: string; sha256?: string; mimeType?: string; signal?: AbortSignal },
   ): Promise<{ msgId: string; attachmentId: string }>;
+  /** Stage-then-send split (slice 1): upload an attachment and return its id + envelope metadata. */
+  uploadAttachment?(
+    roomId: string,
+    blob: Blob,
+    args: { mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
+  ): Promise<{ attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number } }>;
+  /** Stage-then-send split (slice 1): send a message with the given caption + attachment envelope. */
+  sendAttachmentMessage?(
+    roomId: string,
+    body: string,
+    attachments: readonly { id: string; mime: string; filename: string; sizeBytes: number; width?: number; height?: number }[],
+  ): Promise<{ msgId: string }>;
 }
 
 export interface ComposerOptions {

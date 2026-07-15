@@ -1,9 +1,9 @@
 /**
- * @oxpulse/chat-widget — AttachmentPicker (W2.2 slice 4).
+ * @oxpulse/chat-widget — AttachmentPicker (staged attachment tray slice 3).
  *
- * Renders a hidden file input + visible paperclip button.
- * Handles file validation, upload pipeline via client.sendFile,
- * per-file progress tracking, cancel via AbortController, and retry on error.
+ * Renders a hidden file input + staging tray (horizontal thumbnail strip in
+ * slice 4). Stages files on pick/paste/drop, eagerly uploads each in the
+ * background, and exposes the staged list to Composer for send-time batching.
  *
  * Uses theme tokens exclusively — no inline hex.
  * Dispatches `oxpulse-chat:error` events on validation/upload failures.
@@ -12,26 +12,23 @@
 import { validate, sanitizeFilename, compress } from '../utils/attachments.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { generateUUID } from '@oxpulse/chat-sdk';
+import { MAX_ATTACHMENTS, type EnvelopeAttachment } from '../utils/attachment-envelope.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 /** Minimal SDK surface required by AttachmentPicker. */
 export interface AttachmentPickerClient {
-  sendFile(
+  uploadAttachment(
     roomId: string,
     blob: Blob,
     args: {
-      senderUid?: string;
-      sha256?: string;
       mimeType?: string;
-      /** Sanitized display filename, threaded into the attachment envelope. */
       filename?: string;
-      /** Pixel dimensions of the (possibly compressed) image blob — omitted for non-image files. */
       width?: number;
       height?: number;
       signal?: AbortSignal;
     },
-  ): Promise<{ msgId: string; attachmentId: string }>;
+  ): Promise<{ attachmentId: string; attachment: EnvelopeAttachment }>;
 }
 
 export interface AttachmentPickerOptions {
@@ -43,18 +40,31 @@ export interface AttachmentPickerOptions {
   lang?: string;
 }
 
-/** Per-file upload state. */
-export interface UploadItem {
-  /** F5: stable UUID assigned at enqueue time — used as queue row key instead of filename. */
+/** Per-file staged attachment state. */
+export interface StagedAttachment {
+  /** F5: stable UUID assigned at enqueue time. */
   id: string;
   file: File;
-  status: 'queued' | 'uploading' | 'done' | 'error';
+  /** Object URL for a local thumbnail preview; revoked on remove/clear/destroy. */
+  objectURL: string;
+  status: 'uploading' | 'done' | 'error';
+  // NB: no 'queued' state — files start as 'uploading' immediately because
+  // handleFiles/#upload runs synchronously after enqueue.
   progress: number;
   error?: string;
-  msgId?: string;
+  /** Populated once uploadAttachment resolves. */
   attachmentId?: string;
+  mime: string;
+  sizeBytes: number;
+  width?: number;
+  height?: number;
   abortController: AbortController;
 }
+
+type Awaiter = {
+  resolve: () => void;
+  reject: (err: Error) => void;
+};
 
 // ── AttachmentPicker ───────────────────────────────────────────────────────────
 
@@ -70,11 +80,12 @@ export class AttachmentPicker {
   #liveRegion: HTMLElement | null = null;
   #queueEl: HTMLElement | null = null;
   #destroyed = false;
-  /** F3: per-item done-state removal timers — cleared on destroy to avoid dangling refs. */
-  #doneTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
-  /** All in-flight and completed upload items. */
-  #items: UploadItem[] = [];
+  /** All staged attachments (in-flight, done, or error). */
+  #items: StagedAttachment[] = [];
+
+  /** Pending awaiters for awaitAllUploaded(). */
+  #awaiters: Awaiter[] = [];
 
   constructor(opts: AttachmentPickerOptions) {
     this.#container = opts.container;
@@ -102,14 +113,14 @@ export class AttachmentPicker {
     input.setAttribute('aria-label', t('chooseFilesToAttachAria', this.#lang));
     input.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0';
 
-    // Visible paperclip button
+    // Visible paperclip button (BUG-1 removed in slice 4; composer.ts:207 attachBtn stays the sole trigger).
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'oxp-attachment-btn';
     btn.setAttribute('aria-label', t('attachFilesAria', this.#lang));
     btn.textContent = '📎';
 
-    // Queue list (popover)
+    // Queue list (replaced by horizontal tray in slice 4)
     const queueEl = document.createElement('div');
     queueEl.className = 'oxp-attachment-queue';
     queueEl.hidden = true;
@@ -142,19 +153,16 @@ export class AttachmentPicker {
     if (this.#destroyed) return;
     this.#destroyed = true;
 
-    // F3: clear all pending done-state removal timers
-    for (const timer of this.#doneTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.#doneTimers.clear();
-
     // Abort all in-flight uploads
     for (const item of this.#items) {
-      if (item.status === 'uploading' || item.status === 'queued') {
+      if (item.status === 'uploading') {
         item.abortController.abort();
       }
     }
+
+    this.#revokeAllObjectURLs();
     this.#items = [];
+    this.#awaiters = [];
 
     if (this.#root?.parentNode) {
       this.#root.parentNode.removeChild(this.#root);
@@ -169,13 +177,65 @@ export class AttachmentPicker {
     this.#input?.click();
   }
 
-  /** Validate files and start the upload pipeline. */
+  /** Returns a snapshot of the current staged attachment list. */
+  getStaged(): StagedAttachment[] {
+    return this.#items.slice();
+  }
+
+  /** Whether there is at least one staged attachment. */
+  hasStaged(): boolean {
+    return this.#items.length > 0;
+  }
+
+  /** Revoke every objectURL and clear the staged list. */
+  clearStaged(): void {
+    // Abort anything still in-flight before clearing.
+    for (const item of this.#items) {
+      if (item.status === 'uploading') {
+        item.abortController.abort();
+      }
+    }
+    this.#revokeAllObjectURLs();
+    this.#items = [];
+    this.#flushAwaiters();
+    this.#renderQueue();
+  }
+
+  /**
+   * Resolves once every staged item is done. Rejects immediately if any item is
+   * in the 'error' state, or if a later upload fails while this is pending.
+   * Pending awaiters are cleared when the staged list is cleared/destroyed.
+   */
+  awaitAllUploaded(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const failed = this.#items.find((i) => i.status === 'error');
+      if (failed) {
+        reject(new Error(`Upload failed: ${failed.file.name}`));
+        return;
+      }
+      if (this.#items.length > 0 && this.#items.every((i) => i.status === 'done')) {
+        resolve();
+        return;
+      }
+      if (this.#items.length === 0) {
+        resolve();
+        return;
+      }
+      this.#awaiters.push({ resolve, reject });
+    });
+  }
+
+  /** Validate files and stage them for upload (append to existing staged list). */
   handleFiles(files: FileList | File[]): void {
     const arr = Array.from(files);
     for (const file of arr) {
       const result = validate({ type: file.type, size: file.size, name: file.name });
       if (!result.ok) {
         this.#dispatchError('upload_invalid', file.name, result.reason);
+        continue;
+      }
+      if (this.#items.length >= MAX_ATTACHMENTS) {
+        this.#dispatchError('upload_invalid', file.name, `Too many attachments (max ${MAX_ATTACHMENTS})`);
         continue;
       }
       this.#enqueue(file);
@@ -197,14 +257,15 @@ export class AttachmentPicker {
   };
 
   #enqueue(file: File): void {
-    // F5: assign stable id so two files with same filename get distinct queue rows.
-    // generateUUID() uses crypto.randomUUID when available, with a secure fallback.
     const id = generateUUID();
-    const item: UploadItem = {
+    const item: StagedAttachment = {
       id,
       file,
-      status: 'queued',
+      objectURL: URL.createObjectURL(file),
+      status: 'uploading',
       progress: 0,
+      mime: file.type,
+      sizeBytes: file.size,
       abortController: new AbortController(),
     };
     this.#items.push(item);
@@ -212,7 +273,7 @@ export class AttachmentPicker {
     void this.#upload(item);
   }
 
-  async #upload(item: UploadItem): Promise<void> {
+  async #upload(item: StagedAttachment): Promise<void> {
     if (this.#destroyed) return;
 
     item.status = 'uploading';
@@ -220,15 +281,6 @@ export class AttachmentPicker {
     this.#announce(t('announceUploadingFile', this.#lang, { name: item.file.name }));
 
     try {
-      // Compression wiring (issue #67): downscale/re-encode images (WebP, long-edge
-      // 1920, decompression-bomb guard already inside compress()) before upload —
-      // closes the aspect-reservation gap message-list.ts:214-216 already consumes
-      // (att.width/att.height). Non-images pass through unchanged — compress() only
-      // understands raster images and would reject a PDF/audio blob outright.
-      // Review fix: image/gif is EXCLUDED from compression too — compress() decodes
-      // one frame via createImageBitmap and re-encodes to a static canvas snapshot,
-      // which would silently flatten an animated GIF's other frames. The size cap
-      // (validate(), already enforced before #upload runs at all) still applies.
       let uploadBlob: Blob = item.file;
       let width: number | undefined;
       let height: number | undefined;
@@ -239,10 +291,7 @@ export class AttachmentPicker {
         height = compressed.height;
       }
 
-      // CB2: pass AbortSignal so server-side upload can be cancelled when user clicks ✕.
-      // If the real SDK does not yet support signal, abort() is still called on the
-      // AbortController (client-side cleanup) even if the server ignores it.
-      const result = await this.#client.sendFile(
+      const { attachmentId, attachment } = await this.#client.uploadAttachment(
         this.#roomId,
         uploadBlob,
         {
@@ -256,19 +305,15 @@ export class AttachmentPicker {
       if (this.#destroyed) return;
       item.status = 'done';
       item.progress = 100;
-      item.msgId = result.msgId;
-      item.attachmentId = result.attachmentId;
+      item.attachmentId = attachmentId;
+      item.mime = attachment.mime;
+      item.sizeBytes = attachment.sizeBytes;
+      item.width = attachment.width;
+      item.height = attachment.height;
       this.#announce(t('announceFileUploaded', this.#lang, { name: item.file.name }));
-      // F3: show done row for 2s before removing, so user sees completion feedback.
       this.#renderQueue();
-      const timer = setTimeout(() => {
-        this.#doneTimers.delete(item.id);
-        const idx = this.#items.indexOf(item);
-        if (idx >= 0) this.#items.splice(idx, 1);
-        this.#renderQueue();
-      }, 2000);
-      this.#doneTimers.set(item.id, timer);
-      return; // skip final renderQueue below — already called above
+      this.#flushAwaiters();
+      return;
     } catch (err) {
       if (this.#destroyed) return;
       item.status = 'error';
@@ -278,36 +323,56 @@ export class AttachmentPicker {
     }
 
     this.#renderQueue();
+    this.#flushAwaiters();
+  }
+
+  #flushAwaiters(): void {
+    if (this.#awaiters.length === 0) return;
+
+    const failed = this.#items.filter((i) => i.status === 'error');
+    if (failed.length > 0) {
+      const names = failed.map((i) => i.file.name).join(', ');
+      const err = new Error(`Upload failed: ${names}`);
+      for (const a of this.#awaiters) a.reject(err);
+      this.#awaiters = [];
+      return;
+    }
+
+    if (this.#items.every((i) => i.status === 'done')) {
+      for (const a of this.#awaiters) a.resolve();
+      this.#awaiters = [];
+    }
+  }
+
+  #revokeAllObjectURLs(): void {
+    for (const item of this.#items) {
+      URL.revokeObjectURL(item.objectURL);
+    }
+  }
+
+  #revokeItemObjectURL(item: StagedAttachment): void {
+    URL.revokeObjectURL(item.objectURL);
   }
 
   /**
    * CM6: Diff-patch queue — mutate existing row nodes in-place rather than
    * wiping innerHTML=''. This preserves focus when a progress update fires while
-   * the user has a cancel/retry button focused (innerHTML wipe → focus lost to body).
-   *
-   * DB4: Progress bar uses role="progressbar" + indeterminate CSS animation
-   * (aria-valuetext="Uploading…", no aria-valuenow until SDK provides real progress).
-   *
-   * F3: done items are included in the visible set for their 2s timeout window.
-   * F5: rows keyed by item.id (not filename) so two files with same name get distinct rows.
+   * the user has a cancel/retry button focused.
    */
   #renderQueue(): void {
     const queueEl = this.#queueEl;
     if (!queueEl) return;
 
-    // F3: include done items — they stay visible for 2s before the timer removes them.
     const visible = this.#items;
     queueEl.hidden = visible.length === 0;
 
-    // F5: Build a map of currently rendered rows keyed by item.id (stable UUID).
     const existingRows = new Map<string, HTMLElement>();
     for (const el of Array.from(queueEl.querySelectorAll<HTMLElement>('.oxp-attachment-item'))) {
       const key = el.getAttribute('data-item-id');
       if (key) existingRows.set(key, el);
     }
 
-    // Remove rows for items no longer in the visible list
-    const visibleIds = new Set(visible.map(i => i.id));
+    const visibleIds = new Set(visible.map((i) => i.id));
     for (const [key, el] of existingRows) {
       if (!visibleIds.has(key)) {
         queueEl.removeChild(el);
@@ -317,17 +382,13 @@ export class AttachmentPicker {
 
     for (const item of visible) {
       const safeName = sanitizeFilename(item.file.name);
-      // F5: key by item.id — filename is just the visible label
       const itemId = item.id;
       let row = existingRows.get(itemId);
 
       if (!row) {
-        // New item — create row
         row = document.createElement('div');
         row.className = 'oxp-attachment-item';
-        // F5: store id as DOM attribute so the key remains accessible after creation
         row.setAttribute('data-item-id', itemId);
-        // filename attribute kept for legacy test compatibility (selectors by name still work)
         row.setAttribute('data-file-name', item.file.name);
 
         const nameEl = document.createElement('span');
@@ -335,7 +396,6 @@ export class AttachmentPicker {
         nameEl.textContent = safeName;
         row.appendChild(nameEl);
 
-        // DB4: Progress bar with role + indeterminate aria
         const bar = document.createElement('div');
         bar.className = 'oxp-attachment-progress';
         bar.setAttribute('role', 'progressbar');
@@ -353,8 +413,11 @@ export class AttachmentPicker {
         retryBtn.textContent = t('retry', this.#lang);
         retryBtn.hidden = true;
         retryBtn.addEventListener('click', () => {
-          item.status = 'queued';
+          item.status = 'uploading';
           item.error = undefined;
+          item.attachmentId = undefined;
+          item.width = undefined;
+          item.height = undefined;
           item.abortController = new AbortController();
           this.#renderQueue();
           void this.#upload(item);
@@ -367,20 +430,18 @@ export class AttachmentPicker {
         cancelBtn.setAttribute('aria-label', t('cancelUploadOfAria', this.#lang, { name: safeName }));
         cancelBtn.textContent = '✕';
         cancelBtn.addEventListener('click', () => {
-          // F5: cancel by item reference (captured in closure) — not by filename.
-          // This ensures only the clicked item is cancelled when two files share a name.
           item.abortController.abort();
+          this.#revokeItemObjectURL(item);
           const idx = this.#items.indexOf(item);
           if (idx >= 0) this.#items.splice(idx, 1);
           this.#renderQueue();
+          this.#flushAwaiters();
         });
         row.appendChild(cancelBtn);
 
         queueEl.appendChild(row);
       }
 
-      // Mutate in-place — preserves focus on existing nodes
-      // F3: stamp data-status so tests (and CSS) can observe done state
       row.setAttribute('data-status', item.status);
 
       const bar = row.querySelector('.oxp-attachment-progress') as HTMLElement | null;
@@ -388,24 +449,11 @@ export class AttachmentPicker {
       const retryBtn = row.querySelector('.oxp-attachment-retry') as HTMLElement | null;
 
       if (item.status === 'done') {
-        // F3: show checkmark in name span; hide progress/error/buttons
         const nameEl = row.querySelector('.oxp-attachment-name') as HTMLElement | null;
         if (nameEl) nameEl.textContent = `✓ ${safeName}`;
         if (bar) bar.hidden = true;
         if (errEl) errEl.hidden = true;
         if (retryBtn) retryBtn.hidden = true;
-        const cancelBtn = row.querySelector('.oxp-attachment-cancel') as HTMLElement | null;
-        if (cancelBtn) {
-          // 1B: BEFORE hiding cancelBtn, move focus to paperclip button if cancelBtn is active.
-          // Setting hidden=true removes from a11y tree and drops focus to body.
-          if (document.activeElement === cancelBtn) {
-            const paperclipBtn = this.#root?.querySelector('.oxp-attachment-btn') as HTMLElement | null;
-            if (paperclipBtn) {
-              paperclipBtn.focus();
-            }
-          }
-          cancelBtn.hidden = true;
-        }
       } else if (item.status === 'error') {
         if (bar) bar.hidden = true;
         if (errEl) { errEl.hidden = false; errEl.textContent = item.error ?? t('uploadFailed', this.#lang); }
@@ -417,11 +465,10 @@ export class AttachmentPicker {
       }
     }
 
-    // Update live region with current queue summary
     if (this.#liveRegion && this.#items.length > 0) {
-      const uploading = this.#items.filter(i => i.status === 'uploading').length;
-      const done = this.#items.filter(i => i.status === 'done').length;
-      const errors = this.#items.filter(i => i.status === 'error').length;
+      const uploading = this.#items.filter((i) => i.status === 'uploading').length;
+      const done = this.#items.filter((i) => i.status === 'done').length;
+      const errors = this.#items.filter((i) => i.status === 'error').length;
       const parts: string[] = [];
       if (uploading > 0) parts.push(t('queueUploadingCount', this.#lang, { n: uploading }));
       if (done > 0) parts.push(t('queueDoneCount', this.#lang, { n: done }));

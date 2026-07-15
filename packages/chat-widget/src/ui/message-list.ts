@@ -282,6 +282,7 @@ function renderAttachmentCollage(
   const tileCount = Math.min(count, 4);
   for (let i = 0; i < tileCount; i++) {
     const att = attachments[i];
+    if (!att) break;
     const tile = document.createElement('div');
     tile.className = 'oxp-attachment-collage-tile';
 
