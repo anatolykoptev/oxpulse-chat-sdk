@@ -168,6 +168,12 @@ export class Composer {
    * by design, mirroring the sendProductCard contract to enable marketplace
    * search. Only `productRef` is opaque. Do not put sensitive data in
    * `productMeta`.
+   *
+   * Routing (#114): the widget sends cards through `sendText()` with
+   * `productRef`/`productMeta` args rather than the SDK's standalone
+   * `sendProductCard()` convenience API — see the doc-comment on
+   * `SDKChatClient.sendProductCard` in packages/chat-sdk/src/client.ts for
+   * the rationale. Both paths produce the same wire payload.
    */
   setProductCard(productRef: string, productMeta: ProductMeta): void {
     this.#productRef = productRef;

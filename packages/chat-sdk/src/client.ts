@@ -2610,6 +2610,18 @@ export class SDKChatClient {
    * (plaintext productMeta only, no E2EE content).
    *
    * Wire-contract: POST /api/sdk/messages with `product_ref` + `product_meta`.
+   *
+   * API role (#114): this is the PUBLIC external-integrator convenience API for
+   * sending a product-card message in a single call. The in-house
+   * `@oxpulse/chat-widget` composer deliberately does NOT call this method —
+   * it routes cards through `sendText()` with `productRef`/`productMeta` args
+   * (see Composer.setProductCard in packages/chat-widget/src/ui/composer.ts)
+   * so the card travels the same send path as the caption text. Both paths
+   * produce the same wire payload; the split is an integrator-convenience vs.
+   * in-house-routing decision, not a behavioral difference. Do NOT reroute the
+   * widget to use this method — the composer's send-enable logic, error-chip
+   * retry, and attachment-fallback paths all depend on the shared `sendText`
+   * entrypoint.
    */
   async sendProductCard(
     roomId: string,
