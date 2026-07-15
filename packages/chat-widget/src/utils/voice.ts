@@ -9,7 +9,6 @@
  *   • MediaRecorder timeslice 100 ms.
  *   • requestData() flush before recorder.stop() (Android/WebKit quirk).
  *   • iOS webkitAudioContext fallback.
- *   • AudioContext.close() BEFORE MediaStreamTrack.stop() ordering.
  */
 
 export const MAX_VOICE_MS = 60_000;
@@ -80,19 +79,6 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
     ? new MediaRecorder(stream, { mimeType: mime })
     : new MediaRecorder(stream);
 
-  let audioCtx: AudioContext | null = null;
-  try {
-    const Ctor =
-      window.AudioContext ??
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (Ctor) {
-      audioCtx = new Ctor();
-      void audioCtx.resume().catch(() => undefined);
-    }
-  } catch {
-    audioCtx = null;
-  }
-
   const chunks: Blob[] = [];
   recorder.ondataavailable = (ev) => {
     if (ev.data && ev.data.size > 0) chunks.push(ev.data);
@@ -105,12 +91,6 @@ export async function createVoiceRecorder(): Promise<VoiceRecorder> {
   let cancelFlag = false;
 
   function stopStream(): void {
-    try {
-      audioCtx?.close();
-    } catch {
-      // already closed
-    }
-    audioCtx = null;
     for (const track of stream.getTracks()) {
       track.stop();
     }

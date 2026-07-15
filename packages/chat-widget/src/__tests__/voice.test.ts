@@ -57,28 +57,15 @@ class MockMediaRecorder {
   }
 }
 
-class MockAudioContext {
-  static lastInstance: MockAudioContext | null = null;
-  resume = vi.fn(() => Promise.resolve());
-  close = vi.fn(() => Promise.resolve());
-
-  constructor() {
-    MockAudioContext.lastInstance = this;
-  }
-}
-
 function installMocks() {
   const getUserMedia = vi.fn().mockResolvedValue(makeMockStream() as unknown as MediaStream);
   vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
   vi.stubGlobal('MediaRecorder', MockMediaRecorder as unknown as typeof MediaRecorder);
-  vi.stubGlobal('AudioContext', MockAudioContext as unknown as typeof AudioContext);
-  vi.stubGlobal('webkitAudioContext', undefined);
 }
 
 function restoreMocks() {
   vi.unstubAllGlobals();
   MockMediaRecorder.lastInstance = null;
-  MockAudioContext.lastInstance = null;
 }
 
 describe('pickMime', () => {
@@ -207,7 +194,7 @@ describe('createVoiceRecorder', () => {
     expect(result.durationMs).toBe(MAX_VOICE_MS);
   });
 
-  it('cancel_stops_tracks_and_closes_audioContext_without_resolving', async () => {
+  it('cancel_stops_tracks_without_resolving', async () => {
     MockMediaRecorder.isTypeSupported.mockReturnValue(true);
     vi.setSystemTime(0);
 
@@ -228,7 +215,7 @@ describe('createVoiceRecorder', () => {
     expect(race).toBe('not-resolved');
   });
 
-  it('close_audioContext_before_track_stop', async () => {
+  it('stop_stops_every_track', async () => {
     MockMediaRecorder.isTypeSupported.mockReturnValue(true);
     vi.setSystemTime(0);
 
@@ -237,12 +224,11 @@ describe('createVoiceRecorder', () => {
 
     await recorder.stop();
 
-    const audioCtx = MockAudioContext.lastInstance!;
+    expect(mediaRecorder.stop).toHaveBeenCalled();
     const tracks = MockMediaRecorder.lastInstance?.stream.getTracks() as MockTrack[];
-    expect(audioCtx.close).toHaveBeenCalled();
-    expect(tracks[0].stop).toHaveBeenCalled();
-    expect(audioCtx.close.mock.invocationCallOrder![0]).toBeLessThan(
-      tracks[0].stop.mock.invocationCallOrder![0],
-    );
+    expect(tracks.length).toBeGreaterThan(0);
+    for (const track of tracks) {
+      expect(track.stop).toHaveBeenCalled();
+    }
   });
 });

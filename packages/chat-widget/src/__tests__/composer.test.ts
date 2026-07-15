@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Composer } from '../ui/composer.js';
 import { MAX_BODY_CHARS } from '../utils/textfield-helpers.js';
-import { createVoiceRecorder } from '../utils/voice.js';
+import { createVoiceRecorder, type VoiceRecorder } from '../utils/voice.js';
 
 vi.mock('../utils/voice.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/voice.js')>();
@@ -1359,6 +1359,54 @@ describe('Composer', () => {
     expect(mockRecorder.cancel).toHaveBeenCalled();
     expect(uploadAttachment).not.toHaveBeenCalled();
     expect(sendAttachmentMessage).not.toHaveBeenCalled();
+  });
+
+  it('mic_double_click_before_createVoiceRecorder_resolves_starts_one_stream', async () => {
+    const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
+    const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
+
+    const tracks: Array<{ stop: ReturnType<typeof vi.fn> }> = [];
+    const getUserMedia = vi.fn().mockImplementation(() => {
+      const track = { stop: vi.fn() };
+      const stream = { getTracks: () => [track] };
+      tracks.push(track);
+      return Promise.resolve(stream);
+    });
+    vi.stubGlobal('navigator', { language: 'en-US', mediaDevices: { getUserMedia } });
+
+    vi.mocked(createVoiceRecorder).mockClear();
+    vi.mocked(createVoiceRecorder).mockImplementation(async () => {
+      const stream = await getUserMedia({ audio: true } as unknown as MediaStreamConstraints);
+      const track = stream.getTracks()[0];
+      const blob = new Blob(['voice'], { type: 'audio/mp4' });
+      return {
+        durationMs: vi.fn(() => 0),
+        stop: vi.fn(() => Promise.resolve({ blob, durationMs: 0, mime: 'audio/mp4' })),
+        cancel: () => {
+          track.stop();
+        },
+      } as unknown as VoiceRecorder;
+    });
+
+    // Two synchronous clicks before the async recorder resolves
+    micBtn.click();
+    micBtn.click();
+    await drain(10);
+
+    expect(createVoiceRecorder).toHaveBeenCalledOnce();
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(tracks).toHaveLength(1);
+
+    composer.destroy();
+    await drain(2);
+
+    for (const track of tracks) {
+      expect(track.stop).toHaveBeenCalledOnce();
+    }
   });
 });
 

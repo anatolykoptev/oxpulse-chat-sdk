@@ -518,10 +518,15 @@ export class Composer {
       return;
     }
 
+    // Guard mic re-entrancy BEFORE the async getUserMedia call so a second
+    // synchronous click cannot acquire a second stream and orphan the first.
+    this.#isRecording = true;
+
     let recorder: VoiceRecorder;
     try {
       recorder = await createVoiceRecorder();
     } catch (err) {
+      this.#isRecording = false;
       const message = err instanceof Error ? err.message : String(err);
       this.#container.dispatchEvent(
         new CustomEvent('oxpulse-chat:error', {
