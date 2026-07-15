@@ -174,7 +174,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     expect(result.items[0].productMeta!.currency.length).toBe(16);
   });
 
-  it('oversized imageUrl (2049 chars) → capped to 2048', async () => {
+  it('oversized imageUrl (2049 chars) → coerced to empty string', async () => {
     const longUrl = 'https://example.com/' + 'A'.repeat(2030);
     stubFetch(makeListResponse([
       makeServerRow({
@@ -186,8 +186,10 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     const client = makeClient();
     const result = await client.list('room-1');
 
+    // Over-cap URL degrades to '' (not a truncated, broken-but-clickable URL) —
+    // the render-side isSafeAttachmentUrl gate then omits the image.
     expect(result.items[0].productMeta).not.toBeNull();
-    expect(result.items[0].productMeta!.imageUrl.length).toBe(2048);
+    expect(result.items[0].productMeta!.imageUrl).toBe('');
   });
 
   it('bad imageUrl (not a string) → coerced to empty string', async () => {

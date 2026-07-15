@@ -576,6 +576,7 @@ export class Composer {
     this.#counter = null;
     this.#errorChip = null;
     this.#replyEl = null;
+    this.#productCardEl = null;
     this.#micBtn = null;
     this.#recordingEl = null;
     this.#recordingTimerEl = null;

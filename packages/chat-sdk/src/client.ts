@@ -141,8 +141,10 @@ function normalizeProductMeta(raw: unknown): ProductMeta | null {
   if (title.length === 0 || price.length === 0 || currency.length === 0) return null;
 
   const capUrl = (v: unknown): string => {
-    if (typeof v !== 'string') return '';
-    return v.length > 2048 ? v.slice(0, 2048) : v;
+    // Non-string or over-cap → '' (render-safe: the isSafeAttachmentUrl gate
+    // then omits the image/link) — never a truncated, broken-but-clickable URL.
+    if (typeof v !== 'string' || v.length > 2048) return '';
+    return v;
   };
 
   return {

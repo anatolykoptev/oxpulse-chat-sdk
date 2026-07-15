@@ -1271,6 +1271,49 @@ describe('Composer', () => {
     composer.destroy();
   });
 
+  it('product_card_chip_retained_after_failed_send', async () => {
+    const client = makeStubClient({ sendTextReject: new Error('network fail') });
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    composer.setProductCard('sku-1', {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    });
+    const chip = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chip.hidden).toBe(false);
+
+    setInputValue(getInput(container), 'buy this');
+    getSendBtn(container).click();
+    await drain(20);
+
+    // Send failed → the card (and its chip) are retained so a retry re-sends it.
+    expect(chip.hidden).toBe(false);
+
+    composer.destroy();
+  });
+
+  it('product_card_chip_removed_from_dom_on_destroy', () => {
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    composer.setProductCard('sku-1', {
+      title: 'Widget Pro',
+      price: '999',
+      currency: 'USD',
+      imageUrl: 'https://example.com/img.png',
+      productUrl: 'https://example.com/p/1',
+    });
+    expect(container.querySelector('.oxp-composer-product-chip')).not.toBeNull();
+
+    composer.destroy();
+    expect(container.querySelector('.oxp-composer-product-chip')).toBeNull();
+  });
+
   it('setReplyTarget_renders_preview_and_send_includes_threadRootMsgId', async () => {
     const client = makeStubClient({});
     const composer = new Composer({ client, roomId: 'r1', container });
