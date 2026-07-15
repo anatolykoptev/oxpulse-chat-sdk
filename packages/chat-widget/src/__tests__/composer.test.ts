@@ -1467,9 +1467,14 @@ describe('Composer', () => {
   it('auto_stop_at_60s_enters_preview_not_send', async () => {
     vi.useFakeTimers();
     const blob = new Blob(['voice'], { type: 'audio/mp4' });
-    vi.mocked(createVoiceRecorder).mockResolvedValue(
-      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 60_000, blob }) as any,
-    );
+    // The MAX_VOICE_MS cap is now enforced by the recorder's internal timer,
+    // which calls opts.onAutoStop → composer #stopRecording. Simulate that in
+    // the mock (createVoiceRecorder is mocked, so its real timer never runs).
+    vi.mocked(createVoiceRecorder).mockImplementation((_extract, opts) => {
+      const rec = makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 60_000, blob });
+      if (opts?.onAutoStop) setTimeout(() => opts.onAutoStop!(), 60_000);
+      return Promise.resolve(rec as any);
+    });
 
     const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
     const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
@@ -1482,7 +1487,7 @@ describe('Composer', () => {
       // let the async getUserMedia/createVoiceRecorder resolve
       await vi.advanceTimersByTimeAsync(1);
 
-      // hit the 60 s auto-cap
+      // hit the 60 s auto-cap → recorder's onAutoStop fires → #stopRecording
       await vi.advanceTimersByTimeAsync(60_000);
       await drain(10);
 

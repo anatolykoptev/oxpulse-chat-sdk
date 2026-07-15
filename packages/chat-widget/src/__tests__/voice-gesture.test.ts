@@ -100,6 +100,40 @@ describe('createVoiceGesture', () => {
     expect(host.cancel).not.toHaveBeenCalled();
   });
 
+  it('a quick tap during a SLOW mic grant still locks (no ~0s Empty-recording clip)', async () => {
+    // Cold-permission grant: pointerdown, a fast physical release, THEN the mic
+    // resolves 800ms later. `held` measured from pointerdown would be > 250ms →
+    // wrongly finalize a near-0s clip. Must latch locked instead.
+    nowVal = 0;
+    micBtn.dispatchEvent(ptr('pointerdown'));
+    micBtn.dispatchEvent(ptr('pointerup'));
+    nowVal = 800; // grant latency
+    await grantMic();
+
+    expect(gesture.locked).toBe(true);
+    expect(host.onLockChange).toHaveBeenLastCalledWith(true);
+    expect(host.stop).not.toHaveBeenCalled();
+    expect(host.cancel).not.toHaveBeenCalled();
+  });
+
+  it('a slide-up cancel DURING a slow mic grant discards — never locks a live mic', async () => {
+    // Regression guard: on a cold grant, a slide-up-past-threshold then lift
+    // sends pendingRelease='up' while willCancel is set. It must discard, not
+    // latch a locked live recording.
+    nowVal = 0;
+    micBtn.dispatchEvent(ptr('pointerdown', { clientY: 200 }));
+    micBtn.dispatchEvent(ptr('pointermove', { clientY: 200 - 100 })); // dy = -100 → willCancel
+    expect(gesture.willCancel).toBe(true);
+    micBtn.dispatchEvent(ptr('pointerup')); // pendingRelease='up', willCancel true
+    nowVal = 800;
+    await grantMic();
+
+    expect(host.cancel).toHaveBeenCalledOnce();
+    expect(gesture.locked).toBe(false);
+    expect(gesture.willCancel).toBe(false);
+    expect(host.stop).not.toHaveBeenCalled();
+  });
+
   it('a long hold released finalizes (stop → preview), unlocked', async () => {
     nowVal = 0;
     micBtn.dispatchEvent(ptr('pointerdown'));

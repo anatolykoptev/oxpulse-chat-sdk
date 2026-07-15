@@ -13,7 +13,7 @@ import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { sanitizeFilename } from '../utils/attachments.js';
 import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
-import { createVoiceRecorder, validateVoiceBlob, MAX_VOICE_MS, type VoiceRecorder, type VoiceRecorderResult, extractPeaksFromBlob, attachAnalyserTap, type AnalyserTap, renderStaticWaveform, type WaveformTheme } from '@oxpulse/voice-core';
+import { createVoiceRecorder, validateVoiceBlob, type VoiceRecorder, type VoiceRecorderResult, extractPeaksFromBlob, attachAnalyserTap, type AnalyserTap, renderStaticWaveform, type WaveformTheme } from '@oxpulse/voice-core';
 import { formatDuration } from '../utils/list-helpers.js';
 import { createVoiceBubble, resolveToken, type VoiceBubble } from './voice-bubble.js';
 import { createVoiceGesture, type VoiceGesture } from './voice-gesture.js';
@@ -103,7 +103,6 @@ export class Composer {
   #recordingTimerEl: HTMLElement | null = null;
   #voiceRecorder: VoiceRecorder | null = null;
   #recordingTimer: ReturnType<typeof setInterval> | null = null;
-  #recordingAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
   #isRecording = false;
 
   // Live recording waveform + hold-to-record gesture (burner-parity).
@@ -666,7 +665,15 @@ export class Composer {
 
     let recorder: VoiceRecorder;
     try {
-      recorder = await createVoiceRecorder();
+      // onAutoStop: on the MAX_VOICE_MS cap, the recorder hands control back so
+      // #stopRecording closes the analyser tap BEFORE the tracks stop (correct
+      // teardown ordering) — one auto-stop path, no dual-timer race. INVARIANT:
+      // #stopRecording must call recorder.stop() synchronously (before its first
+      // await) so the recorder's safety-net self-stop sees stopping=true and
+      // skips — do not insert an await ahead of that call.
+      recorder = await createVoiceRecorder(undefined, {
+        onAutoStop: () => { void this.#stopRecording(); },
+      });
     } catch (err) {
       this.#isRecording = false;
       const message = err instanceof Error ? err.message : String(err);
@@ -678,6 +685,16 @@ export class Composer {
         }),
       );
       this.#renderErrorChip(message);
+      return false;
+    }
+
+    // The widget may have been destroyed while getUserMedia was pending (SPA
+    // nav / unmount with the permission prompt open). Re-check before wiring the
+    // recorder + tap + RAF onto a dead component — otherwise the mic stays live
+    // and the AudioContext leaks (every other async path re-checks #destroyed).
+    if (this.#destroyed) {
+      recorder.cancel();
+      this.#isRecording = false;
       return false;
     }
 
@@ -708,9 +725,8 @@ export class Composer {
     this.#startVoicePaint();
     this.#updateRecordingUI();
     this.#recordingTimer = setInterval(() => this.#updateRecordingUI(), 250);
-    this.#recordingAutoStopTimer = setTimeout(() => {
-      void this.#stopRecording();
-    }, MAX_VOICE_MS);
+    // The MAX_VOICE_MS cap is enforced by the recorder's internal timer, which
+    // calls onAutoStop → #stopRecording (tap closed before tracks stop).
     return true;
   }
 
@@ -838,8 +854,9 @@ export class Composer {
       }
       if (this.#voiceTap) this.#voiceTap.sampleLiveBars(this.#voiceBars, this.#voiceScratch, 0.7);
       if (this.#recordingWaveEl) {
-        // progress = 1 → all bars active (live-recording look).
-        renderStaticWaveform(this.#recordingWaveEl, Array.from(this.#voiceBars), 1, theme);
+        // progress = 1 → all bars active (live-recording look). Pass the reused
+        // Float32Array directly — renderStaticWaveform takes ArrayLike<number>.
+        renderStaticWaveform(this.#recordingWaveEl, this.#voiceBars, 1, theme);
       }
       this.#voiceRaf = requestAnimationFrame(loop);
     };
@@ -865,10 +882,6 @@ export class Composer {
     if (this.#recordingTimer) {
       clearInterval(this.#recordingTimer);
       this.#recordingTimer = null;
-    }
-    if (this.#recordingAutoStopTimer) {
-      clearTimeout(this.#recordingAutoStopTimer);
-      this.#recordingAutoStopTimer = null;
     }
   }
 

@@ -4,6 +4,7 @@ import {
   validateVoiceBlob,
   MAX_VOICE_MS,
   MAX_VOICE_BYTES,
+  type VoiceRecorder,
 } from '../recorder.ts';
 
 class FakeMediaStream {
@@ -172,6 +173,50 @@ describe('createVoiceRecorder', () => {
         ),
       ]);
       expect(settled.blob).toBeInstanceOf(Blob);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('onAutoStop delegates the cap-stop to the caller with no internal double-stop', async () => {
+    vi.useFakeTimers();
+    try {
+      const stopSpy = vi.spyOn(FakeMediaRecorder.prototype, 'stop');
+      let calls = 0;
+      let rec!: VoiceRecorder;
+      rec = await createVoiceRecorder(undefined, {
+        onAutoStop: () => {
+          calls++;
+          void rec.stop(); // caller drives the stop (would close its tap first)
+        },
+      });
+      vi.advanceTimersByTime(MAX_VOICE_MS);
+      expect(calls).toBe(1);
+      // The caller's stop() drove the single MediaRecorder.stop; the recorder's
+      // internal safety net saw stopping=true and did NOT stop again.
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      await vi.runAllTimersAsync();
+      stopSpy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('onAutoStop safety net still caps the recording if the caller ignores it', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      await createVoiceRecorder(undefined, {
+        onAutoStop: () => {
+          calls++; // caller ignores — does NOT stop
+        },
+      });
+      const fake = FakeMediaRecorder.lastInstance!;
+      vi.advanceTimersByTime(MAX_VOICE_MS);
+      expect(calls).toBe(1);
+      // Safety self-stop fired because the caller left it running.
+      expect(fake.state).toBe('inactive');
+      await vi.runAllTimersAsync();
     } finally {
       vi.useRealTimers();
     }

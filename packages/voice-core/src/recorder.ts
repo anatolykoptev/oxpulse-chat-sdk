@@ -108,6 +108,14 @@ export function pickMime(): string {
  *  caller catches and surfaces the error. */
 export async function createVoiceRecorder(
   extractPeaks?: (blob: Blob) => Promise<ReadonlyArray<number>>,
+  opts?: {
+    /** Called when the internal MAX_VOICE_MS cap is hit, BEFORE the recorder
+     *  stops its own tracks. Lets the caller tear down in order (e.g. close an
+     *  analyser-tap AudioContext before the MediaStream tracks stop). The
+     *  caller is expected to call stop()/cancel() synchronously; a guarded
+     *  self-stop is the safety net if it doesn't. */
+    onAutoStop?: () => void;
+  },
 ): Promise<VoiceRecorder> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -141,7 +149,12 @@ export async function createVoiceRecorder(
   }
 
   const autoStopTimer = setTimeout(() => {
-    if (!resolved && !cancelFlag) {
+    if (resolved || cancelFlag || stopping) return;
+    // Let the caller close its own resources (e.g. an analyser tap) in the
+    // correct order first; it should call stop()/cancel() synchronously.
+    opts?.onAutoStop?.();
+    // Safety net: if the caller did not stop/cancel, cap the recording here.
+    if (!stopping && !cancelFlag) {
       recorder.stop();
     }
   }, MAX_VOICE_MS);

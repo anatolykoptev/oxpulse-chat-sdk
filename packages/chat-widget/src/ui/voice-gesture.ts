@@ -141,7 +141,20 @@ export function createVoiceGesture(
       if (pendingRelease) {
         const k = pendingRelease;
         pendingRelease = null;
-        finishUnlockedRelease(k);
+        if (k === 'cancel' || willCancel) {
+          // An explicit cancel (pointercancel, or a slide-up past the cancel
+          // threshold before lifting) must discard — never lock a live mic.
+          finishUnlockedRelease('cancel');
+        } else {
+          // Released BEFORE the mic finished acquiring, with no cancel intent =
+          // a tap, not a hold. `held` (measured from pointerdown) would include
+          // the whole grant latency → wrongly finalize a ~0s "Empty recording"
+          // clip on the first cold-permission tap. Latch locked (tap-to-lock).
+          const captureId = pressOrigin?.pointerId;
+          pressOrigin = null;
+          releaseCapture(captureId);
+          setLocked(true);
+        }
       }
     });
   };
