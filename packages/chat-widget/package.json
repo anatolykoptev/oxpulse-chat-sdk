@@ -57,7 +57,7 @@
   },
   "dependencies": {
     "@oxpulse/chat-sdk": "workspace:^",
-    "@oxpulse/voice-core": "workspace:*"
+    "@oxpulse/voice-core": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -82,6 +82,7 @@ const PROVENANCE = process.env.NPM_PROVENANCE === '1';
 const PACKAGES = [
 	{ name: '@oxpulse/wire-codec', dir: 'packages/wire-codec' },
 	{ name: '@oxpulse/chat-sdk',   dir: 'packages/chat-sdk'   },
+	{ name: '@oxpulse/voice-core', dir: 'packages/voice-core' },
 	{ name: '@oxpulse/chat-widget', dir: 'packages/chat-widget' },
 ];
 
@@ -92,7 +93,7 @@ const PACKAGES = [
 //
 // Bootstrapped packages (wire-codec, chat-sdk, chat-widget) must NOT be in
 // this set — their publish failures are fatal.
-const SOFT_PACKAGES_OIDC = new Set([]);
+const SOFT_PACKAGES_OIDC = new Set(['@oxpulse/voice-core']);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
