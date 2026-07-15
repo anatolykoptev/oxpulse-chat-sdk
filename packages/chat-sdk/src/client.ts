@@ -119,9 +119,46 @@ function dtoToMember(dto: MemberDTO): Member {
 // ─── Shared row mapper (M5 DRY fix) ──────────────────────────────────────────
 
 /**
+ * #117: Validate + normalize a raw `product_meta` payload at the SDK receive
+ * boundary. Mirrors the widget's `normalizeProductMeta` render-gate guard so
+ * `MessageRow.productMeta: ProductMeta | null` is honest for all SDK consumers.
+ *
+ * Rules:
+ *   - Non-object → null.
+ *   - Core fields (title, price, currency) must be non-empty strings → else null.
+ *   - Length caps: title 200, price 40, currency 16, urls 2048 (truncated).
+ *   - Non-string / oversized URLs coerced to '' (never garbage).
+ */
+function normalizeProductMeta(raw: unknown): ProductMeta | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+
+  const title = typeof obj['title'] === 'string' ? obj['title'] : '';
+  const price = typeof obj['price'] === 'string' ? obj['price'] : '';
+  const currency = typeof obj['currency'] === 'string' ? obj['currency'] : '';
+
+  // Core fields must be non-empty strings.
+  if (title.length === 0 || price.length === 0 || currency.length === 0) return null;
+
+  const capUrl = (v: unknown): string => {
+    if (typeof v !== 'string') return '';
+    return v.length > 2048 ? v.slice(0, 2048) : v;
+  };
+
+  return {
+    title: title.length > 200 ? title.slice(0, 200) : title,
+    price: price.length > 40 ? price.slice(0, 40) : price,
+    currency: currency.length > 16 ? currency.slice(0, 16) : currency,
+    imageUrl: capUrl(obj['imageUrl']),
+    productUrl: capUrl(obj['productUrl']),
+  };
+}
+
+/**
  * Map a raw wire-DTO row (snake_case) to a `MessageRow` (camelCase).
  * Used by list(), thread list, and the SSE onmessage handler.
  * M5 fix: extracted from two duplicated sites to prevent mapper drift.
+ * #117: product_meta is normalized at this receive boundary — never garbage.
  */
 function rowToMessageRow(row: {
   seq: number;
@@ -144,7 +181,7 @@ function rowToMessageRow(row: {
     createdAt: row.created_at,
     threadRootMsgId: row.thread_root_msg_id ?? null,
     productRef: row.product_ref ?? null,
-    productMeta: row.product_meta ?? null,
+    productMeta: normalizeProductMeta(row.product_meta),
     editedAt: row.edited_at ?? undefined,
     deletedAt: row.deleted_at ?? undefined,
     editCount: row.edit_count ?? 0,
