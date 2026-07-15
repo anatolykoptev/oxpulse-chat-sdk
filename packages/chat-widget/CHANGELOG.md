@@ -1,5 +1,50 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.15.0
+
+### Minor Changes
+
+- 73c08db: Product-card followups (#113, #114, #116, #117):
+
+  - **chat-widget**: Composer now renders a dismissible "product card attached" chip
+    when a card is staged via `setProductCard`, mirroring the reply-preview bar
+    pattern. The chip's × dismiss calls `clearProductCard()`; the chip is hidden on
+    clear and after a successful send. i18n: `productCardAttached` + `removeProductCard`
+    in en and ru. Theme CSS mirrors the reply-preview classes.
+  - **chat-widget**: New end-to-end test mounts `OxpulseChatElement` with a real
+    `SDKChatClient` + fetch mock, calls `setProductCard` + sends, and asserts the
+    outgoing POST body carries `product_ref` + `product_meta` through the full
+    adapter → SDK → wire path.
+  - **chat-sdk**: `rowToMessageRow` now normalizes `product_meta` at the receive
+    boundary — requires title/price/currency non-empty strings, caps lengths
+    (title 200, price 40, currency 16, urls 2048), coerces bad URLs to '', returns
+    null for non-object or invalid payloads. `MessageRow.productMeta` is now honest
+    for all SDK consumers.
+  - **chat-sdk**: `sendProductCard()` doc-comment documents its role as the public
+    external-integrator convenience API and explains why the in-house widget routes
+    cards through `sendText()` instead. No behavior change.
+
+### Patch Changes
+
+- 73c08db: Harden the W9 product card (marketplace) feature — review follow-ups to #52.
+
+  - **Bare-card send:** a staged product card now enables the send button and
+    rides an empty-text send (the "drop the product in, no caption" marketplace
+    flow). Previously `setProductCard` left the send button disabled with an
+    empty textarea and `#send` early-returned, so a card could not be sent on
+    its own. `setProductCard`/`clearProductCard` now refresh the send state.
+  - **Server `product_meta` validation:** `product_meta` is unsealed opaque JSON
+    any room peer can POST; the widget now validates + caps it before render.
+    A partial (missing title/price/currency), non-object, or oversized value
+    degrades to "no card" instead of rendering "undefined" or a multi-MB title
+    (layout DoS-lite). Core display fields are required; URLs are length-capped.
+  - **Image privacy:** the product-card image now carries
+    `referrerPolicy="no-referrer"`, so a peer-controlled `imageUrl` can no longer
+    leak the viewer's page URL as a referrer on load.
+
+- Updated dependencies [73c08db]
+  - @oxpulse/chat-sdk@3.0.2
+
 ## 0.14.0
 
 ### Minor Changes
