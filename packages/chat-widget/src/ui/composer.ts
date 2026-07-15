@@ -13,6 +13,8 @@ import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { sanitizeFilename } from '../utils/attachments.js';
 import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
+import { createVoiceRecorder, validateVoiceBlob, MAX_VOICE_MS, type VoiceRecorder, type VoiceRecorderResult } from '../utils/voice.js';
+import { formatDuration } from '../utils/list-helpers.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,17 @@ export class Composer {
   #replyTarget: ReplySnapshot | null = null;
   /** W7: reply preview bar container — created in mount(), populated by setReplyTarget(). */
   #replyEl: HTMLDivElement | null = null;
+
+  // P0: voice recording
+  #main: HTMLElement | null = null;
+  #footer: HTMLElement | null = null;
+  #micBtn: HTMLButtonElement | null = null;
+  #recordingEl: HTMLElement | null = null;
+  #recordingTimerEl: HTMLElement | null = null;
+  #voiceRecorder: VoiceRecorder | null = null;
+  #recordingTimer: ReturnType<typeof setInterval> | null = null;
+  #recordingAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
+  #isRecording = false;
 
   constructor(opts: ComposerOptions) {
     this.#container = opts.container;
@@ -211,11 +224,16 @@ export class Composer {
     const main = document.createElement('div');
     main.className = 'oxp-composer-main';
 
-    // W2.2 slice 4: paperclip attachment button (only when client supports uploadAttachment + sendAttachmentMessage)
-    if (
+    const hasAttachment =
       typeof this.#client.uploadAttachment === 'function' &&
-      typeof this.#client.sendAttachmentMessage === 'function'
-    ) {
+      typeof this.#client.sendAttachmentMessage === 'function';
+    const hasMediaDevices =
+      typeof navigator !== 'undefined' &&
+      typeof navigator.mediaDevices === 'object' &&
+      navigator.mediaDevices !== null;
+
+    // W2.2 slice 4: paperclip attachment button (only when client supports uploadAttachment + sendAttachmentMessage)
+    if (hasAttachment) {
       const attachBtn = document.createElement('button');
       attachBtn.type = 'button';
       attachBtn.className = 'oxp-composer-attachment-btn';
@@ -225,6 +243,18 @@ export class Composer {
         this.#attachmentPicker?.openFileDialog();
       });
       main.appendChild(attachBtn);
+    }
+
+    // P0: voice recording trigger (same attachment capability + navigator.mediaDevices)
+    let micBtn: HTMLButtonElement | null = null;
+    if (hasAttachment && hasMediaDevices) {
+      micBtn = document.createElement('button');
+      micBtn.type = 'button';
+      micBtn.className = 'oxp-composer-mic-btn';
+      micBtn.setAttribute('aria-label', t('recordVoiceMessageAria', this.#lang));
+      micBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
+      micBtn.addEventListener('click', this.#onMicClick);
+      main.appendChild(micBtn);
     }
 
     main.appendChild(textarea);
@@ -241,16 +271,66 @@ export class Composer {
 
     footer.appendChild(counter);
 
+    // P0: voice recording UI — hidden until the user starts recording
+    const recordingEl = document.createElement('div');
+    recordingEl.className = 'oxp-composer-recording';
+    recordingEl.setAttribute('role', 'status');
+    recordingEl.setAttribute('aria-live', 'off');
+    recordingEl.setAttribute(
+      'aria-label',
+      t('recordingLabel', this.#lang, { duration: formatDuration(0) }),
+    );
+    recordingEl.hidden = true;
+
+    const recordingDot = document.createElement('span');
+    recordingDot.className = 'oxp-recording-dot';
+    recordingDot.setAttribute('aria-hidden', 'true');
+
+    const recordingTimerEl = document.createElement('span');
+    recordingTimerEl.className = 'oxp-recording-timer';
+    recordingTimerEl.textContent = formatDuration(0);
+
+    const recordingControls = document.createElement('div');
+    recordingControls.style.display = 'flex';
+    recordingControls.style.flexDirection = 'row';
+    recordingControls.style.gap = 'calc(var(--oxp-spacing-unit) * 0.5)';
+
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'oxp-recording-stop-btn';
+    stopBtn.setAttribute('aria-label', t('stopRecordingAria', this.#lang));
+    stopBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
+    stopBtn.addEventListener('click', this.#onStopRecording);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'oxp-recording-cancel-btn';
+    cancelBtn.setAttribute('aria-label', t('cancelRecordingAria', this.#lang));
+    cancelBtn.textContent = '×';
+    cancelBtn.addEventListener('click', this.#onCancelRecording);
+
+    recordingControls.appendChild(stopBtn);
+    recordingControls.appendChild(cancelBtn);
+    recordingEl.appendChild(recordingDot);
+    recordingEl.appendChild(recordingTimerEl);
+    recordingEl.appendChild(recordingControls);
+
     root.appendChild(sendHint);
     root.appendChild(replyEl);
     root.appendChild(main);
+    root.insertBefore(recordingEl, main);
     root.appendChild(footer);
     this.#container.appendChild(root);
 
     this.#root = root;
+    this.#main = main;
+    this.#footer = footer;
     this.#textarea = textarea;
     this.#sendBtn = sendBtn;
     this.#counter = counter;
+    this.#micBtn = micBtn;
+    this.#recordingEl = recordingEl;
+    this.#recordingTimerEl = recordingTimerEl;
 
     // Event listeners
     textarea.addEventListener('input', this.#onInput);
@@ -307,6 +387,10 @@ export class Composer {
     if (this.#destroyed) return;
     this.#destroyed = true;
 
+    this.#stopRecordingTimers();
+    this.#voiceRecorder?.cancel();
+    this.#voiceRecorder = null;
+
     if (this.#textarea) {
       this.#textarea.removeEventListener('input', this.#onInput);
       this.#textarea.removeEventListener('keydown', this.#onKeydown);
@@ -314,6 +398,9 @@ export class Composer {
     }
     if (this.#sendBtn) {
       this.#sendBtn.removeEventListener('click', this.#onSendClick);
+    }
+    if (this.#micBtn) {
+      this.#micBtn.removeEventListener('click', this.#onMicClick);
     }
     if (this.#root) {
       this.#root.removeEventListener('dragover', this.#onDragover);
@@ -329,11 +416,16 @@ export class Composer {
     }
 
     this.#root = null;
+    this.#main = null;
+    this.#footer = null;
     this.#textarea = null;
     this.#sendBtn = null;
     this.#counter = null;
     this.#errorChip = null;
     this.#replyEl = null;
+    this.#micBtn = null;
+    this.#recordingEl = null;
+    this.#recordingTimerEl = null;
   }
 
   // ── Private handlers ────────────────────────────────────────────────────────
@@ -404,6 +496,174 @@ export class Composer {
   readonly #onSendClick = (): void => {
     void this.#send();
   };
+
+  // P0: voice recording handlers
+  readonly #onMicClick = (): void => {
+    void this.#startRecording();
+  };
+
+  readonly #onStopRecording = (): void => {
+    void this.#stopRecording();
+  };
+
+  readonly #onCancelRecording = (): void => {
+    this.#cancelRecording();
+  };
+
+  async #startRecording(): Promise<void> {
+    if (this.#isRecording || this.#sending || !this.#client.uploadAttachment || !this.#client.sendAttachmentMessage) {
+      return;
+    }
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
+      return;
+    }
+
+    // Guard mic re-entrancy BEFORE the async getUserMedia call so a second
+    // synchronous click cannot acquire a second stream and orphan the first.
+    this.#isRecording = true;
+
+    let recorder: VoiceRecorder;
+    try {
+      recorder = await createVoiceRecorder();
+    } catch (err) {
+      this.#isRecording = false;
+      const message = err instanceof Error ? err.message : String(err);
+      this.#container.dispatchEvent(
+        new CustomEvent('oxpulse-chat:error', {
+          bubbles: true,
+          composed: true,
+          detail: { kind: 'voice_record_failed', message },
+        }),
+      );
+      this.#renderErrorChip(message);
+      return;
+    }
+
+    this.#voiceRecorder = recorder;
+    this.#isRecording = true;
+    this.#clearErrorChip();
+
+    this.#recordingEl?.setAttribute(
+      'aria-label',
+      t('recordingLabel', this.#lang, { duration: formatDuration(0) }),
+    );
+    if (this.#recordingTimerEl) this.#recordingTimerEl.textContent = formatDuration(0);
+
+    if (this.#main) this.#main.hidden = true;
+    if (this.#footer) this.#footer.hidden = true;
+    if (this.#recordingEl) this.#recordingEl.hidden = false;
+    if (this.#replyEl) this.#replyEl.hidden = true;
+
+    this.#updateRecordingUI();
+    this.#recordingTimer = setInterval(() => this.#updateRecordingUI(), 250);
+    this.#recordingAutoStopTimer = setTimeout(() => {
+      void this.#stopRecording();
+    }, MAX_VOICE_MS);
+  }
+
+  async #stopRecording(): Promise<void> {
+    if (!this.#isRecording || !this.#voiceRecorder) return;
+
+    const recorder = this.#voiceRecorder;
+    this.#voiceRecorder = null;
+    this.#stopRecordingTimers();
+
+    let result: VoiceRecorderResult;
+    try {
+      result = await recorder.stop();
+    } catch (err) {
+      this.#resetRecordingUI();
+      this.#handleRecordingError(err);
+      return;
+    }
+
+    const valid = validateVoiceBlob({ size: result.blob.size, durationMs: result.durationMs });
+    if (!valid.ok) {
+      this.#resetRecordingUI();
+      this.#renderErrorChip(valid.reason);
+      return;
+    }
+
+    this.#sending = true;
+    this.#resetRecordingUI();
+    this.#updateState();
+
+    try {
+      const { attachment } = await this.#client.uploadAttachment!(this.#roomId, result.blob, {
+        mimeType: result.mime,
+        filename: sanitizeFilename(this.#voiceFilenameForMime(result.mime)),
+      });
+      const voiceAttachment = { ...attachment, durationMs: result.durationMs };
+      await this.#client.sendAttachmentMessage!(this.#roomId, '', [voiceAttachment]);
+
+      if (!this.#destroyed) {
+        this.#clearReplyTarget();
+        this.#clearErrorChip();
+        if (this.#textarea) this.#textarea.value = '';
+        this.#lastText = '';
+        this.#productRef = null;
+        this.#productMeta = null;
+      }
+    } catch (err) {
+      this.#handleRecordingError(err);
+    } finally {
+      this.#sending = false;
+      if (!this.#destroyed) this.#updateState();
+    }
+  }
+
+  #cancelRecording(): void {
+    if (!this.#isRecording || !this.#voiceRecorder) return;
+    this.#voiceRecorder.cancel();
+    this.#voiceRecorder = null;
+    this.#resetRecordingUI();
+  }
+
+  #resetRecordingUI(): void {
+    this.#isRecording = false;
+    this.#stopRecordingTimers();
+    this.#voiceRecorder = null;
+    if (this.#recordingEl) this.#recordingEl.hidden = true;
+    if (this.#main) this.#main.hidden = false;
+    if (this.#footer) this.#footer.hidden = false;
+    this.#renderReplyTarget();
+    if (!this.#destroyed) this.#updateState();
+  }
+
+  #updateRecordingUI(): void {
+    if (!this.#recordingTimerEl || !this.#recordingEl || !this.#voiceRecorder) return;
+    const durationMs = this.#voiceRecorder.durationMs();
+    const text = formatDuration(durationMs);
+    this.#recordingTimerEl.textContent = text;
+    this.#recordingEl.setAttribute('aria-label', t('recordingLabel', this.#lang, { duration: text }));
+  }
+
+  #stopRecordingTimers(): void {
+    if (this.#recordingTimer) {
+      clearInterval(this.#recordingTimer);
+      this.#recordingTimer = null;
+    }
+    if (this.#recordingAutoStopTimer) {
+      clearTimeout(this.#recordingAutoStopTimer);
+      this.#recordingAutoStopTimer = null;
+    }
+  }
+
+  #handleRecordingError(err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    this.#container.dispatchEvent(
+      new CustomEvent('oxpulse-chat:error', {
+        bubbles: true,
+        composed: true,
+        detail: { kind: 'send_failed', message },
+      }),
+    );
+    this.#renderErrorChip(message);
+  }
+
+  #voiceFilenameForMime(mime: string): string {
+    return mime.includes('mp4') ? 'voice.mp4' : 'voice.webm';
+  }
 
   // ── State updates ───────────────────────────────────────────────────────────
 

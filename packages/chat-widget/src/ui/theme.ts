@@ -996,6 +996,97 @@ export const THEME_CSS = `
 
 @media (hover: none) {
   .oxp-composer-attachment-btn { min-width: 44px; min-height: 44px; }
+  .oxp-composer-mic-btn { min-width: 44px; min-height: 44px; }
+}
+
+/* Voice messages (P0): mic trigger, recording row, controls. */
+.oxp-composer-mic-btn {
+  font-family: var(--oxp-font);
+  min-width: 40px;
+  min-height: 40px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--oxp-radius);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 calc(var(--oxp-spacing-unit) * 0.5);
+  color: var(--oxp-fg-secondary);
+  flex-shrink: 0;
+}
+
+.oxp-composer-mic-btn:hover {
+  background: var(--oxp-border);
+  color: var(--oxp-fg);
+}
+
+.oxp-composer-mic-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-composer-recording {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--oxp-spacing-unit);
+  min-height: 44px;
+}
+
+.oxp-recording-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--oxp-danger);
+  flex-shrink: 0;
+}
+
+.oxp-recording-timer {
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--oxp-fg);
+  min-width: 48px;
+}
+
+.oxp-recording-stop-btn {
+  width: 40px;
+  height: 40px;
+  background: var(--oxp-danger);
+  color: var(--oxp-on-danger);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.oxp-recording-stop-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+.oxp-recording-cancel-btn {
+  width: 40px;
+  height: 40px;
+  background: none;
+  border: none;
+  color: var(--oxp-fg-secondary);
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.oxp-recording-cancel-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
 }
 
 /* Drag-over visual indicator — DM2: color-only outline fails WCAG 1.4.1.
@@ -1160,6 +1251,12 @@ export const THEME_CSS = `
 
 /* Audio */
 .oxp-attachment-audio audio { width: 100%; display: block; }
+
+.oxp-attachment-audio-duration {
+  font-size: 0.75rem;
+  color: var(--oxp-fg-secondary);
+  margin-top: 2px;
+}
 
 /* File download link — DB1: use --oxp-link (WCAG ≥4.5:1 on all bubble backgrounds).
  * Permanent underline (not hover-only) for WCAG 1.4.1 non-color link differentiation. */

@@ -37,6 +37,26 @@ describe('encodeAttachmentEnvelope / decodeAttachmentEnvelope', () => {
     expect(decoded?.attachments[0]?.height).toBeUndefined();
   });
 
+  it('round-trips an audio attachment with durationMs', () => {
+    const buf = encodeAttachmentEnvelope('', [
+      { id: 'att-voice', mime: 'audio/mp4', filename: 'voice.mp4', sizeBytes: 1234, durationMs: 45_000 },
+    ]);
+    const decoded = decodeAttachmentEnvelope(new TextDecoder().decode(buf));
+    expect(decoded?.attachments[0]?.durationMs).toBe(45_000);
+  });
+
+  it('drops_negative_or_nonfinite_durationMs', () => {
+    const decoded = decodeAttachmentEnvelope(JSON.stringify({
+      v: 1,
+      t: 'att',
+      body: '',
+      attachments: [
+        { id: 'bad', mime: 'audio/mp4', filename: 'v.mp4', sizeBytes: 1, durationMs: -1 },
+      ],
+    }));
+    expect(decoded?.attachments[0]?.durationMs).toBeUndefined();
+  });
+
   it('returns null for plain (non-JSON) chat text — backward compatible with existing messages', () => {
     expect(decodeAttachmentEnvelope('hello world')).toBeNull();
   });

@@ -13,7 +13,7 @@
 import { renderMarkdown } from '../utils/markdown.js';
 import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl, replyBodySnapshotForMessage } from '../utils/attachments.js';
-import { shouldAutoScroll, isChained, formatTime, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch, cssEscape } from '../utils/list-helpers.js';
+import { shouldAutoScroll, isChained, formatTime, formatDuration, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch, cssEscape } from '../utils/list-helpers.js';
 import { reactionButtonAriaLabel, HEART_EMOJI } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
@@ -424,6 +424,12 @@ function renderAttachment(
       t('audioAria', lang, { name: escapeHtml(filename), size: formatSizeKb(att.sizeBytes) }),
     );
     wrap.appendChild(audio);
+    if (typeof att.durationMs === 'number' && att.durationMs > 0) {
+      const dur = document.createElement('span');
+      dur.className = 'oxp-attachment-audio-duration';
+      dur.textContent = formatDuration(att.durationMs);
+      wrap.appendChild(dur);
+    }
     return wrap;
   }
 

@@ -1595,4 +1595,35 @@ describe('MessageList — P2 scroll re-pin on composer resize', () => {
 
     expect(ro!.disconnected).toBe(true);
   });
+
+  it('renders_audio_duration_label_when_durationMs_present', async () => {
+    const rows = [
+      makeRow({
+        senderUid: 'u2',
+        seq: 1,
+        text: '',
+        attachments: [
+          {
+            id: 'att-voice',
+            url: 'https://example.com/voice.mp4',
+            mime: 'audio/mp4',
+            filename: 'voice.mp4',
+            sizeBytes: 1234,
+            durationMs: 65_000,
+          },
+        ],
+      }),
+    ];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const bubble = container.querySelector('[role="article"]') as HTMLElement | null;
+    expect(bubble).not.toBeNull();
+    expect(bubble!.querySelector('audio')).not.toBeNull();
+    const durationEl = bubble!.querySelector('.oxp-attachment-audio-duration');
+    expect(durationEl).not.toBeNull();
+    expect(durationEl!.textContent).toBe('01:05');
+    ml.destroy();
+  });
 });

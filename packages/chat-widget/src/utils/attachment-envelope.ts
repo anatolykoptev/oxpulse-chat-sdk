@@ -72,6 +72,7 @@ export interface EnvelopeAttachment {
   sizeBytes: number;
   width?: number;
   height?: number;
+  durationMs?: number;
 }
 
 export interface AttachmentEnvelope {
@@ -109,6 +110,10 @@ function parseAttachment(value: unknown): EnvelopeAttachment | null {
     sizeBytes: v.sizeBytes,
     width: clampDimension(v.width),
     height: clampDimension(v.height),
+    durationMs:
+      typeof v.durationMs === 'number' && Number.isFinite(v.durationMs) && v.durationMs >= 0
+        ? v.durationMs
+        : undefined,
   };
 }
 

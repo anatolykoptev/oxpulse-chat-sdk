@@ -114,6 +114,7 @@ export interface AttachmentMeta {
   sizeBytes: number;
   width?: number;
   height?: number;
+  durationMs?: number;
 }
 
 // ── URL safety (CB1) ──────────────────────────────────────────────────────────

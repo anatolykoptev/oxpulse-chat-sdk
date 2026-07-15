@@ -55,6 +55,10 @@ export type LocaleKey =
   | 'charactersRemaining'
   | 'retrySendingMessageAria'
   | 'attachFilesAria'
+  | 'recordVoiceMessageAria'
+  | 'stopRecordingAria'
+  | 'cancelRecordingAria'
+  | 'recordingLabel'
   // Attachment picker
   | 'chooseFilesToAttachAria'
   | 'attachmentTrayAria'
@@ -126,6 +130,10 @@ const en: LocaleTable = {
   charactersRemaining: '{remaining} characters remaining',
   retrySendingMessageAria: 'Retry sending message',
   attachFilesAria: 'Attach files',
+  recordVoiceMessageAria: 'Record voice message',
+  stopRecordingAria: 'Stop recording',
+  cancelRecordingAria: 'Cancel recording',
+  recordingLabel: 'Recording {duration}',
 
   chooseFilesToAttachAria: 'Choose files to attach',
   attachmentTrayAria: 'Attachments to send',
@@ -194,6 +202,10 @@ const ru: LocaleTable = {
   charactersRemaining: 'Осталось символов: {remaining}',
   retrySendingMessageAria: 'Повторить отправку сообщения',
   attachFilesAria: 'Прикрепить файлы',
+  recordVoiceMessageAria: 'Записать голосовое',
+  stopRecordingAria: 'Остановить запись',
+  cancelRecordingAria: 'Отменить запись',
+  recordingLabel: 'Запись {duration}',
 
   chooseFilesToAttachAria: 'Выбрать файлы для прикрепления',
   attachmentTrayAria: 'Вложения для отправки',
