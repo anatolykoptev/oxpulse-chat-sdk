@@ -1253,7 +1253,15 @@ describe('Composer', () => {
       durationMs: vi.fn(() => durationMs),
       stop: vi.fn(() => Promise.resolve({ blob, durationMs, mime })),
       cancel: vi.fn(),
+      stream: { getTracks: () => [] } as unknown as MediaStream,
     };
+  }
+
+  // Recording is started by the hold-to-record gesture (pointer/keyboard on the
+  // mic button), not a click. jsdom has no PointerEvent, so the lifecycle tests
+  // drive the keyboard entry point (Enter → locked recording with Stop/Cancel).
+  function startRecordingViaMic(mic: HTMLButtonElement): void {
+    mic.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   }
 
   it('mic_button_hidden_without_attachment_capability', () => {
@@ -1299,7 +1307,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     expect(createVoiceRecorder).toHaveBeenCalledOnce();
@@ -1342,7 +1350,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
@@ -1398,7 +1406,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
@@ -1430,7 +1438,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
@@ -1459,9 +1467,14 @@ describe('Composer', () => {
   it('auto_stop_at_60s_enters_preview_not_send', async () => {
     vi.useFakeTimers();
     const blob = new Blob(['voice'], { type: 'audio/mp4' });
-    vi.mocked(createVoiceRecorder).mockResolvedValue(
-      makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 60_000, blob }) as any,
-    );
+    // The MAX_VOICE_MS cap is now enforced by the recorder's internal timer,
+    // which calls opts.onAutoStop → composer #stopRecording. Simulate that in
+    // the mock (createVoiceRecorder is mocked, so its real timer never runs).
+    vi.mocked(createVoiceRecorder).mockImplementation((_extract, opts) => {
+      const rec = makeMockVoiceRecorder({ mime: 'audio/mp4', durationMs: 60_000, blob });
+      if (opts?.onAutoStop) setTimeout(() => opts.onAutoStop!(), 60_000);
+      return Promise.resolve(rec as any);
+    });
 
     const { uploadAttachment, sendAttachmentMessage } = makeAttachmentStubs();
     const client = { ...makeStubClient({}), uploadAttachment, sendAttachmentMessage };
@@ -1470,11 +1483,11 @@ describe('Composer', () => {
 
     try {
       const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-      micBtn.click();
+      startRecordingViaMic(micBtn);
       // let the async getUserMedia/createVoiceRecorder resolve
       await vi.advanceTimersByTimeAsync(1);
 
-      // hit the 60 s auto-cap
+      // hit the 60 s auto-cap → recorder's onAutoStop fires → #stopRecording
       await vi.advanceTimersByTimeAsync(60_000);
       await drain(10);
 
@@ -1503,7 +1516,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     const stopBtn = container.querySelector('.oxp-recording-stop-btn') as HTMLButtonElement;
@@ -1554,7 +1567,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     const cancelBtn = container.querySelector('.oxp-recording-cancel-btn') as HTMLButtonElement;
@@ -1578,7 +1591,7 @@ describe('Composer', () => {
     composer.mount();
 
     const micBtn = container.querySelector('.oxp-composer-mic-btn') as HTMLButtonElement;
-    micBtn.click();
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     composer.destroy();
@@ -1621,8 +1634,8 @@ describe('Composer', () => {
     });
 
     // Two synchronous clicks before the async recorder resolves
-    micBtn.click();
-    micBtn.click();
+    startRecordingViaMic(micBtn);
+    startRecordingViaMic(micBtn);
     await drain(10);
 
     expect(createVoiceRecorder).toHaveBeenCalledOnce();

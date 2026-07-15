@@ -56,6 +56,12 @@ export interface VoiceRecorder {
   cancel(): void;
   /** Returns elapsed recording time in milliseconds. */
   durationMs(): number;
+  /** The live microphone MediaStream backing this recording. Exposed so a
+   *  caller can compose {@link attachAnalyserTap} onto the SAME stream the
+   *  recorder ships — driving a live composer waveform without a second
+   *  getUserMedia grant. The recorder stops these tracks on stop()/cancel();
+   *  a tap MUST close its AudioContext (tap.stop()) BEFORE that happens. */
+  readonly stream: MediaStream;
 }
 
 /** Read a Blob into a data: URL via FileReader. */
@@ -102,6 +108,14 @@ export function pickMime(): string {
  *  caller catches and surfaces the error. */
 export async function createVoiceRecorder(
   extractPeaks?: (blob: Blob) => Promise<ReadonlyArray<number>>,
+  opts?: {
+    /** Called when the internal MAX_VOICE_MS cap is hit, BEFORE the recorder
+     *  stops its own tracks. Lets the caller tear down in order (e.g. close an
+     *  analyser-tap AudioContext before the MediaStream tracks stop). The
+     *  caller is expected to call stop()/cancel() synchronously; a guarded
+     *  self-stop is the safety net if it doesn't. */
+    onAutoStop?: () => void;
+  },
 ): Promise<VoiceRecorder> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -135,7 +149,12 @@ export async function createVoiceRecorder(
   }
 
   const autoStopTimer = setTimeout(() => {
-    if (!resolved && !cancelFlag) {
+    if (resolved || cancelFlag || stopping) return;
+    // Let the caller close its own resources (e.g. an analyser tap) in the
+    // correct order first; it should call stop()/cancel() synchronously.
+    opts?.onAutoStop?.();
+    // Safety net: if the caller did not stop/cancel, cap the recording here.
+    if (!stopping && !cancelFlag) {
       recorder.stop();
     }
   }, MAX_VOICE_MS);
@@ -207,5 +226,7 @@ export async function createVoiceRecorder(
     durationMs(): number {
       return Date.now() - startTs;
     },
+
+    stream,
   };
 }

@@ -83,7 +83,9 @@ export function defaultWaveformTheme(): WaveformTheme {
  *  recording look), `progress = 0` for "all inactive" (idle bubble). */
 export function renderStaticWaveform(
   canvas: HTMLCanvasElement,
-  peaks: ReadonlyArray<number>,
+  // ArrayLike (not ReadonlyArray) so the live composer waveform can pass its
+  // reused Float32Array bar ring directly — no per-RAF-frame allocation.
+  peaks: ArrayLike<number>,
   progress: number,
   theme: WaveformTheme,
 ): void {
