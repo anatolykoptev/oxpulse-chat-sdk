@@ -56,6 +56,12 @@ export interface VoiceRecorder {
   cancel(): void;
   /** Returns elapsed recording time in milliseconds. */
   durationMs(): number;
+  /** The live microphone MediaStream backing this recording. Exposed so a
+   *  caller can compose {@link attachAnalyserTap} onto the SAME stream the
+   *  recorder ships — driving a live composer waveform without a second
+   *  getUserMedia grant. The recorder stops these tracks on stop()/cancel();
+   *  a tap MUST close its AudioContext (tap.stop()) BEFORE that happens. */
+  readonly stream: MediaStream;
 }
 
 /** Read a Blob into a data: URL via FileReader. */
@@ -207,5 +213,7 @@ export async function createVoiceRecorder(
     durationMs(): number {
       return Date.now() - startTs;
     },
+
+    stream,
   };
 }

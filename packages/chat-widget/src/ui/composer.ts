@@ -13,9 +13,10 @@ import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { sanitizeFilename } from '../utils/attachments.js';
 import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
-import { createVoiceRecorder, validateVoiceBlob, MAX_VOICE_MS, type VoiceRecorder, type VoiceRecorderResult, extractPeaksFromBlob } from '@oxpulse/voice-core';
+import { createVoiceRecorder, validateVoiceBlob, MAX_VOICE_MS, type VoiceRecorder, type VoiceRecorderResult, extractPeaksFromBlob, attachAnalyserTap, type AnalyserTap, renderStaticWaveform, type WaveformTheme } from '@oxpulse/voice-core';
 import { formatDuration } from '../utils/list-helpers.js';
-import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
+import { createVoiceBubble, resolveToken, type VoiceBubble } from './voice-bubble.js';
+import { createVoiceGesture, type VoiceGesture } from './voice-gesture.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -104,6 +105,18 @@ export class Composer {
   #recordingTimer: ReturnType<typeof setInterval> | null = null;
   #recordingAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
   #isRecording = false;
+
+  // Live recording waveform + hold-to-record gesture (burner-parity).
+  #recordingWaveEl: HTMLCanvasElement | null = null;
+  #recordingHintEl: HTMLElement | null = null;
+  #recordingLockControlsEl: HTMLElement | null = null;
+  #voiceGesture: VoiceGesture | null = null;
+  /** Analyser tapped off the recorder's live stream — drives the waveform.
+   *  MUST be closed (tap.stop()) BEFORE the recorder stops its tracks. */
+  #voiceTap: AnalyserTap | null = null;
+  readonly #voiceBars = new Float32Array(48);
+  readonly #voiceScratch = new Uint8Array(1024);
+  #voiceRaf = 0;
 
   // P0 follow-up: voice pre-send preview
   #voicePreviewEl: HTMLElement | null = null;
@@ -275,7 +288,8 @@ export class Composer {
       micBtn.setAttribute('aria-label', t('recordVoiceMessageAria', this.#lang));
       micBtn.setAttribute('title', t('recordVoiceMessageTitle', this.#lang));
       micBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
-      micBtn.addEventListener('click', this.#onMicClick);
+      // Hold-to-record gesture (created after mount, once #micBtn is set) wires
+      // pointer + keyboard events — no click listener here.
       main.appendChild(micBtn);
     }
 
@@ -312,10 +326,29 @@ export class Composer {
     recordingTimerEl.className = 'oxp-recording-timer';
     recordingTimerEl.textContent = formatDuration(0);
 
-    const recordingControls = document.createElement('div');
-    recordingControls.style.display = 'flex';
-    recordingControls.style.flexDirection = 'row';
-    recordingControls.style.gap = 'calc(var(--oxp-spacing-unit) * 0.5)';
+    // Live waveform — painted at RAF from the recorder's analyser tap while
+    // recording. Purely decorative → aria-hidden (the timer carries the
+    // live-region announcement).
+    const recordingWave = document.createElement('canvas');
+    recordingWave.className = 'oxp-recording-wave';
+    recordingWave.setAttribute('aria-hidden', 'true');
+
+    // Slide hint — shown while held (unlocked). Hidden once locked.
+    const recordingHint = document.createElement('span');
+    recordingHint.className = 'oxp-recording-hint';
+    recordingHint.setAttribute('aria-hidden', 'true');
+    recordingHint.textContent = t('voiceSlideHint', this.#lang);
+
+    // Lock-mode controls — revealed once the gesture latches locked recording
+    // (slide-to-lock, quick tap, or keyboard start).
+    const recordingLockControls = document.createElement('div');
+    recordingLockControls.className = 'oxp-recording-lock-controls';
+    recordingLockControls.hidden = true;
+
+    const lockIcon = document.createElement('span');
+    lockIcon.className = 'oxp-recording-lock-icon';
+    lockIcon.setAttribute('aria-hidden', 'true');
+    lockIcon.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
 
     const stopBtn = document.createElement('button');
     stopBtn.type = 'button';
@@ -331,11 +364,14 @@ export class Composer {
     cancelBtn.textContent = '×';
     cancelBtn.addEventListener('click', this.#onCancelRecording);
 
-    recordingControls.appendChild(stopBtn);
-    recordingControls.appendChild(cancelBtn);
+    recordingLockControls.appendChild(lockIcon);
+    recordingLockControls.appendChild(stopBtn);
+    recordingLockControls.appendChild(cancelBtn);
     recordingEl.appendChild(recordingDot);
     recordingEl.appendChild(recordingTimerEl);
-    recordingEl.appendChild(recordingControls);
+    recordingEl.appendChild(recordingWave);
+    recordingEl.appendChild(recordingHint);
+    recordingEl.appendChild(recordingLockControls);
 
     // P0 follow-up: voice pre-send preview — hidden until recording stops.
     // Phase 2: the preview player is a VoiceBubble shell (headless player +
@@ -387,6 +423,9 @@ export class Composer {
     this.#micBtn = micBtn;
     this.#recordingEl = recordingEl;
     this.#recordingTimerEl = recordingTimerEl;
+    this.#recordingWaveEl = recordingWave;
+    this.#recordingHintEl = recordingHint;
+    this.#recordingLockControlsEl = recordingLockControls;
     this.#voicePreviewEl = voicePreviewEl;
     this.#voicePreviewBubbleHost = voicePreviewBubbleHost;
     this.#voicePreviewSend = voicePreviewSend;
@@ -441,6 +480,20 @@ export class Composer {
     this.#updateState();
     // W7: render any reply target set before mount() was called.
     this.#renderReplyTarget();
+
+    // Hold-to-record gesture: wires pointer + keyboard events on the mic
+    // button and drives lock/will-cancel UI. The composer owns the recorder,
+    // the analyser tap, and the live-waveform paint loop.
+    if (this.#micBtn) {
+      this.#voiceGesture = createVoiceGesture(this.#micBtn, {
+        start: () => this.#startRecording(),
+        stop: () => { void this.#stopRecording(); },
+        cancel: () => { this.#cancelRecording(); },
+        isRecording: () => this.#isRecording,
+        onLockChange: (locked) => this.#setRecordingLocked(locked),
+        onWillCancelChange: (willCancel) => this.#setRecordingWillCancel(willCancel),
+      });
+    }
   }
 
   destroy(): void {
@@ -448,6 +501,14 @@ export class Composer {
     this.#destroyed = true;
 
     this.#stopRecordingTimers();
+    // Voice teardown, ordered: stop the gesture listeners + paint loop, close
+    // the analyser tap's AudioContext, THEN cancel the recorder (which stops
+    // the MediaStream tracks) so the mic is released and nothing leaks.
+    this.#voiceGesture?.destroy();
+    this.#voiceGesture = null;
+    this.#stopVoicePaint();
+    this.#voiceTap?.stop();
+    this.#voiceTap = null;
     this.#voiceRecorder?.cancel();
     this.#voiceRecorder = null;
 
@@ -461,9 +522,6 @@ export class Composer {
     }
     if (this.#sendBtn) {
       this.#sendBtn.removeEventListener('click', this.#onSendClick);
-    }
-    if (this.#micBtn) {
-      this.#micBtn.removeEventListener('click', this.#onMicClick);
     }
     if (this.#root) {
       this.#root.removeEventListener('dragover', this.#onDragover);
@@ -489,6 +547,9 @@ export class Composer {
     this.#micBtn = null;
     this.#recordingEl = null;
     this.#recordingTimerEl = null;
+    this.#recordingWaveEl = null;
+    this.#recordingHintEl = null;
+    this.#recordingLockControlsEl = null;
     this.#voicePreviewEl = null;
     this.#voicePreviewBubbleHost = null;
     this.#voicePreviewSend = null;
@@ -564,25 +625,33 @@ export class Composer {
     void this.#send();
   };
 
-  // P0: voice recording handlers
-  readonly #onMicClick = (): void => {
-    void this.#startRecording();
-  };
-
+  // P0: voice recording handlers. Recording is started by the hold-to-record
+  // gesture (pointer/keyboard on the mic button), not a click. The locked-mode
+  // Stop/Cancel buttons route through the gesture so its lock state is cleared.
   readonly #onStopRecording = (): void => {
+    if (this.#voiceGesture?.locked) {
+      this.#voiceGesture.stopLocked();
+      return;
+    }
     void this.#stopRecording();
   };
 
   readonly #onCancelRecording = (): void => {
+    if (this.#voiceGesture?.locked) {
+      this.#voiceGesture.cancelLocked();
+      return;
+    }
     this.#cancelRecording();
   };
 
-  async #startRecording(): Promise<void> {
+  /** Start recording. Returns true iff a recording actually began (mic granted)
+   *  so the gesture knows whether to keep the pointer captured. */
+  async #startRecording(): Promise<boolean> {
     if (this.#isRecording || this.#sending || !this.#client.uploadAttachment || !this.#client.sendAttachmentMessage) {
-      return;
+      return false;
     }
     if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
-      return;
+      return false;
     }
 
     // If a previous voice preview is still open, discard it (and revoke its objectURL)
@@ -609,12 +678,21 @@ export class Composer {
         }),
       );
       this.#renderErrorChip(message);
-      return;
+      return false;
     }
 
     this.#voiceRecorder = recorder;
     this.#isRecording = true;
     this.#clearErrorChip();
+
+    // Live waveform: tap the SAME stream the recorder ships — no second
+    // getUserMedia grant. Null when AudioContext is unavailable (the chip
+    // then shows a flat baseline, no crash).
+    this.#voiceTap = attachAnalyserTap(recorder.stream);
+
+    // Fresh chip state — start unlocked, hint visible, not will-cancel.
+    this.#setRecordingLocked(false);
+    this.#setRecordingWillCancel(false);
 
     this.#recordingEl?.setAttribute(
       'aria-label',
@@ -627,11 +705,13 @@ export class Composer {
     if (this.#recordingEl) this.#recordingEl.hidden = false;
     if (this.#replyEl) this.#replyEl.hidden = true;
 
+    this.#startVoicePaint();
     this.#updateRecordingUI();
     this.#recordingTimer = setInterval(() => this.#updateRecordingUI(), 250);
     this.#recordingAutoStopTimer = setTimeout(() => {
       void this.#stopRecording();
     }, MAX_VOICE_MS);
+    return true;
   }
 
   async #stopRecording(): Promise<void> {
@@ -640,6 +720,13 @@ export class Composer {
     const recorder = this.#voiceRecorder;
     this.#voiceRecorder = null;
     this.#stopRecordingTimers();
+
+    // Close the analyser tap's AudioContext BEFORE recorder.stop() stops the
+    // MediaStream tracks — the MediaStreamAudioSourceNode must be released
+    // first (web/CLAUDE.md WebRTC ordering rule).
+    this.#stopVoicePaint();
+    this.#voiceTap?.stop();
+    this.#voiceTap = null;
 
     let result: VoiceRecorderResult;
     try {
@@ -677,6 +764,10 @@ export class Composer {
 
   #cancelRecording(): void {
     if (!this.#isRecording || !this.#voiceRecorder) return;
+    // Same ordering as stop: close the tap before the tracks stop.
+    this.#stopVoicePaint();
+    this.#voiceTap?.stop();
+    this.#voiceTap = null;
     this.#voiceRecorder.cancel();
     this.#voiceRecorder = null;
     this.#resetRecordingUI();
@@ -684,6 +775,15 @@ export class Composer {
 
   #resetRecordingUI(): void {
     this.#isRecording = false;
+    // Defensive teardown for paths that didn't go through stop/cancel
+    // (validation reject, destroy mid-record). Paint + tap are idempotent.
+    this.#stopVoicePaint();
+    if (this.#voiceTap) {
+      this.#voiceTap.stop();
+      this.#voiceTap = null;
+    }
+    this.#setRecordingLocked(false);
+    this.#setRecordingWillCancel(false);
     this.#stopRecordingTimers();
     this.#voiceRecorder = null;
     if (this.#recordingEl) this.#recordingEl.hidden = true;
@@ -691,6 +791,66 @@ export class Composer {
     if (this.#footer) this.#footer.hidden = false;
     this.#renderReplyTarget();
     if (!this.#destroyed) this.#updateState();
+  }
+
+  // ── Live waveform + lock/will-cancel chip state ──────────────────────────
+
+  /** Toggle the chip between held (slide-hint) and locked (Stop/Cancel). */
+  #setRecordingLocked(locked: boolean): void {
+    this.#recordingEl?.classList.toggle('oxp-recording--locked', locked);
+    if (this.#recordingHintEl) this.#recordingHintEl.hidden = locked;
+    if (this.#recordingLockControlsEl) this.#recordingLockControlsEl.hidden = !locked;
+  }
+
+  /** Toggle the will-cancel (slide-up) affordance — red chip + hint swap. */
+  #setRecordingWillCancel(willCancel: boolean): void {
+    this.#recordingEl?.classList.toggle('oxp-recording--will-cancel', willCancel);
+    if (this.#recordingHintEl) {
+      this.#recordingHintEl.textContent = t(
+        willCancel ? 'voiceReleaseToCancelHint' : 'voiceSlideHint',
+        this.#lang,
+      );
+    }
+  }
+
+  /** Build the live-wave theme from widget tokens (active = --oxp-accent). At
+   *  progress = 1 every bar is active, so `inactive` is unused during record
+   *  but kept for parity with the bubble's static waveform. */
+  #liveWaveTheme(): WaveformTheme {
+    const el = this.#recordingWaveEl ?? this.#recordingEl ?? this.#container;
+    const active = (el instanceof HTMLElement && resolveToken(el, '--oxp-accent')) || '#0088cc';
+    const inactive =
+      (el instanceof HTMLElement && resolveToken(el, '--oxp-waveform-inactive')) ||
+      'rgba(0,0,0,0.55)';
+    return { active, inactive };
+  }
+
+  /** Start the RAF paint loop feeding analyser samples into the live wave. */
+  #startVoicePaint(): void {
+    this.#voiceBars.fill(0);
+    // Resolve the theme ONCE — tokens don't change mid-recording, and reading
+    // them per frame would force a style recalc on every RAF tick.
+    const theme = this.#liveWaveTheme();
+    const loop = (): void => {
+      if (!this.#isRecording) {
+        this.#voiceRaf = 0;
+        return;
+      }
+      if (this.#voiceTap) this.#voiceTap.sampleLiveBars(this.#voiceBars, this.#voiceScratch, 0.7);
+      if (this.#recordingWaveEl) {
+        // progress = 1 → all bars active (live-recording look).
+        renderStaticWaveform(this.#recordingWaveEl, Array.from(this.#voiceBars), 1, theme);
+      }
+      this.#voiceRaf = requestAnimationFrame(loop);
+    };
+    this.#voiceRaf = requestAnimationFrame(loop);
+  }
+
+  #stopVoicePaint(): void {
+    if (this.#voiceRaf) {
+      cancelAnimationFrame(this.#voiceRaf);
+      this.#voiceRaf = 0;
+    }
   }
 
   #updateRecordingUI(): void {

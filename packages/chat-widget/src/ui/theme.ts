@@ -1029,6 +1029,11 @@ export const THEME_CSS = `
   padding: 0 calc(var(--oxp-spacing-unit) * 0.5);
   color: var(--oxp-fg-secondary);
   flex-shrink: 0;
+  /* Hold-to-record: swallow touch pan/scroll so slide-to-lock / slide-up-to-
+   * cancel pointermove events reach the gesture instead of scrolling the host. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .oxp-composer-mic-btn:hover {
@@ -1041,35 +1046,94 @@ export const THEME_CSS = `
   outline-offset: 2px;
 }
 
+/* Burner-parity recording chip: pulsing dot + tabular timer + live waveform
+ * + slide-hint (held) / lock-controls (locked), with a will-cancel red state. */
 .oxp-composer-recording {
   display: flex;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--oxp-spacing-unit);
+  gap: calc(var(--oxp-spacing-unit) * 0.75);
   min-height: 44px;
+  padding: calc(var(--oxp-spacing-unit) * 0.5) var(--oxp-spacing-unit);
+  background: color-mix(in srgb, var(--oxp-accent) 10%, transparent);
+  border-radius: var(--oxp-radius);
+  transition: background 160ms ease;
 }
 
 .oxp-recording-dot {
-  width: 10px;
-  height: 10px;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--oxp-danger);
-  flex-shrink: 0;
+  animation: oxp-rec-pulse 1s ease-in-out infinite;
+}
+
+@keyframes oxp-rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 .oxp-recording-timer {
-  font-size: 0.95rem;
+  flex: 0 0 auto;
+  font-size: 0.9rem;
   font-variant-numeric: tabular-nums;
   color: var(--oxp-fg);
-  min-width: 48px;
+  min-width: 40px;
 }
 
+/* Live waveform — fills the chip; the backing store is sized per-DPR inside
+ * renderStaticWaveform from the rendered CSS width, so this stays responsive. */
+.oxp-recording-wave {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  align-self: center;
+}
+
+.oxp-recording-hint {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--oxp-fg-secondary);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  transition: color 160ms ease;
+}
+
+/* Will-cancel (slide-up armed): red chip + red hint/timer. */
+.oxp-composer-recording.oxp-recording--will-cancel {
+  background: color-mix(in srgb, var(--oxp-danger) 14%, transparent);
+}
+.oxp-recording--will-cancel .oxp-recording-hint,
+.oxp-recording--will-cancel .oxp-recording-timer {
+  color: var(--oxp-danger);
+}
+
+/* Locked: brand-tinted, Stop/Cancel revealed. */
+.oxp-composer-recording.oxp-recording--locked {
+  background: color-mix(in srgb, var(--oxp-accent) 14%, transparent);
+}
+
+.oxp-recording-lock-controls {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  flex: 0 0 auto;
+}
+
+.oxp-recording-lock-icon {
+  display: inline-flex;
+  color: var(--oxp-accent);
+}
+
+/* Stop finalizes → preview (primary action) → accent. Cancel (×) is the ghost
+ * destructive control. Mirrors .oxp-voice-preview-send/-discard. */
 .oxp-recording-stop-btn {
-  width: 40px;
-  height: 40px;
-  background: var(--oxp-danger);
-  color: var(--oxp-on-danger);
+  width: 36px;
+  height: 36px;
+  background: var(--oxp-accent);
+  color: var(--oxp-on-accent);
   border: none;
   border-radius: 999px;
   cursor: pointer;
@@ -1077,7 +1141,11 @@ export const THEME_CSS = `
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: opacity 160ms ease, transform 120ms ease;
 }
+
+.oxp-recording-stop-btn:hover { opacity: 0.92; }
+.oxp-recording-stop-btn:active { transform: scale(0.94); }
 
 .oxp-recording-stop-btn:focus-visible {
   outline: 2px solid var(--oxp-accent);
@@ -1085,10 +1153,11 @@ export const THEME_CSS = `
 }
 
 .oxp-recording-cancel-btn {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   background: none;
   border: none;
+  border-radius: 999px;
   color: var(--oxp-fg-secondary);
   cursor: pointer;
   font-size: 1.2rem;
@@ -1097,11 +1166,26 @@ export const THEME_CSS = `
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.oxp-recording-cancel-btn:hover {
+  color: var(--oxp-fg);
+  background: color-mix(in srgb, var(--oxp-fg) 8%, transparent);
 }
 
 .oxp-recording-cancel-btn:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oxp-recording-dot { animation: none; }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .oxp-recording-stop-btn,
+  .oxp-recording-cancel-btn { min-width: 44px; min-height: 44px; }
 }
 
 /* Voice pre-send preview (P0 follow-up): card above the input row,

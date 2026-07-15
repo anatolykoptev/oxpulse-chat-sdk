@@ -1246,16 +1246,20 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     );
     const mockCtx = { imageSmoothingEnabled: false, imageSmoothingQuality: 'high', drawImage: vi.fn() };
     const compressedBlob = new Blob(['webp-bytes'], { type: 'image/webp' });
-    const mockCanvas = {
-      width: 0,
-      height: 0,
-      getContext: vi.fn().mockReturnValue(mockCtx),
-      toBlob: vi.fn().mockImplementation((cb: (b: Blob | null) => void) => cb(compressedBlob)),
-    };
     const origCreate = globalThis.document.createElement.bind(globalThis.document);
+    // Return a REAL canvas (a Node with setAttribute — the composer's live
+    // recording waveform is a canvas appended to the DOM) with only the
+    // compression entry points (getContext/toBlob) stubbed; jsdom's canvas
+    // has no 2D context otherwise.
     vi.spyOn(globalThis.document, 'createElement').mockImplementation((tag: string) => {
-      if (tag === 'canvas') return mockCanvas as unknown as HTMLElement;
-      return origCreate(tag);
+      const el = origCreate(tag);
+      if (tag === 'canvas') {
+        (el as HTMLCanvasElement).getContext = vi.fn().mockReturnValue(mockCtx) as never;
+        (el as HTMLCanvasElement).toBlob = vi
+          .fn()
+          .mockImplementation((cb: (b: Blob | null) => void) => cb(compressedBlob)) as never;
+      }
+      return el;
     });
     class FakeReader {
       onerror: (() => void) | null = null;

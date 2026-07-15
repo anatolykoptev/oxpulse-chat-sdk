@@ -63,6 +63,8 @@ export type LocaleKey =
   | 'voicePreviewLabel'
   | 'sendVoiceMessageAria'
   | 'discardVoiceMessageAria'
+  | 'voiceSlideHint'
+  | 'voiceReleaseToCancelHint'
   | 'voiceBubbleGroupAria'
   | 'voicePlayAria'
   | 'voicePauseAria'
@@ -150,6 +152,8 @@ const en: LocaleTable = {
   voicePreviewLabel: 'Voice preview',
   sendVoiceMessageAria: 'Send voice message',
   discardVoiceMessageAria: 'Discard voice message',
+  voiceSlideHint: 'Slide ◂ to lock · ▴ up to cancel',
+  voiceReleaseToCancelHint: 'Release to cancel',
   voiceBubbleGroupAria: 'Voice message',
   voicePlayAria: 'Play voice message',
   voicePauseAria: 'Pause voice message',
@@ -233,6 +237,8 @@ const ru: LocaleTable = {
   voicePreviewLabel: 'Предпросмотр голосового',
   sendVoiceMessageAria: 'Отправить голосовое',
   discardVoiceMessageAria: 'Отменить голосовое',
+  voiceSlideHint: 'Влево ◂ — зафиксировать · ▴ вверх — отмена',
+  voiceReleaseToCancelHint: 'Отпустите для отмены',
   voiceBubbleGroupAria: 'Голосовое сообщение',
   voicePlayAria: 'Воспроизвести голосовое',
   voicePauseAria: 'Пауза',

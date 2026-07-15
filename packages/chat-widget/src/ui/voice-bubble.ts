@@ -78,7 +78,7 @@ export interface VoiceBubble {
  *  Returns '' when unavailable (jsdom / overridden tokens). Canvas2D fillStyle
  *  does not resolve CSS custom properties, so the live computed value is read
  *  here. */
-function resolveToken(el: HTMLElement, token: string): string {
+export function resolveToken(el: HTMLElement, token: string): string {
   if (typeof window === 'undefined' || typeof getComputedStyle === 'undefined') {
     return '';
   }

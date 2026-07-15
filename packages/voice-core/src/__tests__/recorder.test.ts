@@ -221,6 +221,20 @@ describe('createVoiceRecorder', () => {
     }
   });
 
+  it('exposes the live getUserMedia stream so a caller can attach an analyser tap', async () => {
+    const stream = new FakeMediaStream();
+    (navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(stream as unknown as MediaStream);
+
+    const recorder = await createVoiceRecorder();
+
+    // The returned recorder must expose the SAME stream instance the
+    // recorder ships — attachAnalyserTap composes onto it without a second
+    // getUserMedia grant.
+    expect(recorder.stream).toBe(stream as unknown as MediaStream);
+    await recorder.stop();
+  });
+
   it('start → dataavailable → stop yields a blob containing the recorded chunks', async () => {
     const recorder = await createVoiceRecorder();
     const fake = FakeMediaRecorder.lastInstance!;
