@@ -568,6 +568,40 @@ describe('theme foundation', () => {
     expect(mediaBlock).toMatch(/min-width:\s*44px/);
   });
 
+  // Review fix (CRITICAL, PR #88; reopened on re-review): the 24px desktop
+  // floor and the 44px @media(hover:none),(pointer:coarse) floor have EQUAL
+  // specificity (0,1,0) and neither has !important — a media condition adds
+  // no priority, so the cascade breaks the tie by SOURCE ORDER alone. If the
+  // unconditional 24px rule were textually AFTER the media block (as an
+  // earlier version of this fix mistakenly placed it), it would still match
+  // on a coarse-pointer device and, being later in source, WIN over the
+  // 44px rule — silently re-defeating the touch-target floor with no
+  // jsdom-visible symptom (jsdom doesn't evaluate hover/pointer media
+  // features at all — verified empirically — so getComputedStyle can't
+  // catch this; only a source-order check on the CSS text can).
+  it('unconditional_24px_cancel_retry_floor_appears_before_the_44px_touch_media_block_source_order', () => {
+    const cancelIdx = THEME_CSS.indexOf('.oxp-attachment-cancel {');
+    expect(cancelIdx).toBeGreaterThanOrEqual(0);
+    const retryIdx = THEME_CSS.indexOf('.oxp-attachment-retry {');
+    expect(retryIdx).toBeGreaterThanOrEqual(0);
+    const touchMediaIdx = THEME_CSS.indexOf('@media (hover: none), (pointer: coarse)');
+    expect(touchMediaIdx).toBeGreaterThanOrEqual(0);
+
+    expect(cancelIdx).toBeLessThan(touchMediaIdx);
+    expect(retryIdx).toBeLessThan(touchMediaIdx);
+
+    // And the base rules actually declare the 24px floor (not just exist).
+    const cancelBlockEnd = THEME_CSS.indexOf('}', cancelIdx);
+    const cancelBlock = THEME_CSS.slice(cancelIdx, cancelBlockEnd);
+    expect(cancelBlock).toMatch(/min-width:\s*24px/);
+    expect(cancelBlock).toMatch(/min-height:\s*24px/);
+
+    const retryBlockEnd = THEME_CSS.indexOf('}', retryIdx);
+    const retryBlock = THEME_CSS.slice(retryIdx, retryBlockEnd);
+    expect(retryBlock).toMatch(/min-width:\s*24px/);
+    expect(retryBlock).toMatch(/min-height:\s*24px/);
+  });
+
   // ── DM2: Dragover non-color signal ───────────────────────────────────────────
 
   it('dragover_has_text_indicator_pseudo_element', async () => {

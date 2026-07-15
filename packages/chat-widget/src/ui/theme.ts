@@ -826,6 +826,37 @@ export const THEME_CSS = `
   padding: 2px;
 }
 
+/* Review fix (CRITICAL, PR #88; reopened on re-review — source-order cascade):
+ * desktop floor for .oxp-attachment-cancel (>=24px, WCAG 2.5.8 AA) MUST
+ * appear BEFORE the @media(hover:none),(pointer:coarse) block below, not
+ * after. Both rules have equal specificity (0,1,0), neither has !important,
+ * and a media condition adds NO specificity — the cascade breaks the tie by
+ * SOURCE ORDER alone. An earlier version of this fix placed this block
+ * AFTER the media query (further down the file); on a coarse-pointer
+ * device BOTH rules then matched, and being later in source, the
+ * unconditional 24px rule silently WON over the 44px touch rule — the
+ * exact bug this fix closes, reopened by fixing it in the wrong place.
+ * Base 24px here, THEN the 44px touch override cascades last and wins on
+ * touch. (cancelBtn also used to set min-width/min-height INLINE — higher
+ * specificity than any class rule, touch or not; see attachment-picker.ts.) */
+.oxp-attachment-cancel {
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* FYI fix (PR #88 re-review): .oxp-attachment-retry had no desktop floor at
+ * all. Same source-order requirement as above; kept separate from cancel's
+ * flex-centering since retry is a text pill with its own padding, not an
+ * icon button. */
+.oxp-attachment-retry {
+  min-width: 24px;
+  min-height: 24px;
+}
+
 @media (hover: none), (pointer: coarse) {
   /* P2 design-review fix (starthey demo, widget 0.8.0, 2026-07-14): the
    * heart button measured 26x22px live despite the min-width/min-height:44px
@@ -1099,21 +1130,6 @@ export const THEME_CSS = `
   padding: 2px 6px;
   color: var(--oxp-fg-secondary);
   flex-shrink: 0;
-}
-
-/* Review fix (CRITICAL, PR #88): cancelBtn used to set min-width/min-height
- * INLINE, which — being higher specificity than any class rule, including
- * the 44px touch-target rule above — pegged the ✕ at 20x20 on every device,
- * below the WCAG 2.5.8 AA 24x24 floor. The desktop floor now lives here
- * (touch already gets 44px from the shared rule above). Sized+centered
- * separately from .oxp-attachment-retry (a text pill, not an icon button). */
-.oxp-attachment-cancel {
-  min-width: 24px;
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
 }
 
 .oxp-attachment-cancel:hover,
