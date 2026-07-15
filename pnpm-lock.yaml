@@ -52,7 +52,7 @@ importers:
         specifier: workspace:^
         version: link:../chat-sdk
       '@oxpulse/voice-core':
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../voice-core
     devDependencies:
       '@types/node':

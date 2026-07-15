@@ -1,6 +1,6 @@
 {
   "name": "@oxpulse/voice-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "OxPulse voice-core — shared framework-agnostic voice primitives (recorder, waveform, player).",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
@@ -21,7 +21,6 @@
     "waveform",
     "audio"
   ],
-  "private": true,
   "type": "module",
   "sideEffects": false,
   "main": "dist/index.js",
