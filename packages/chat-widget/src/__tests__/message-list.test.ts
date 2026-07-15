@@ -912,6 +912,162 @@ describe('MessageList', () => {
 
     ml.destroy();
   });
+
+  // ── Staged attachment tray + multi-image collage slice 2: collage grid ───────
+
+  function makeImageAttachment(id: string, index: number): { id: string; url: string; mime: string; filename: string; sizeBytes: number } {
+    return {
+      id,
+      url: `https://cdn.example.com/img${index}.png`,
+      mime: 'image/png',
+      filename: `photo${index}.png`,
+      sizeBytes: 1024 + index,
+    };
+  }
+
+  function stubMatchMedia(isMobile: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: isMobile && query === '(max-width: 640px)',
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+  }
+
+  it('N=2_collage_uses_two_equal_columns_and_1_1_aspect_ratio', async () => {
+    stubMatchMedia(false);
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const grid = container.querySelector('.oxp-attachment-collage') as HTMLElement | null;
+    expect(grid).not.toBeNull();
+    expect(grid!.style.gridTemplateColumns).toBe('1fr 1fr');
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(2);
+    for (const tile of tiles) {
+      expect((tile as HTMLElement).style.aspectRatio).toBe('1 / 1');
+    }
+
+    ml.destroy();
+  });
+
+  it('N=3_collage_uses_2fr_1fr_columns_hero_spans_rows', async () => {
+    stubMatchMedia(false);
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2), makeImageAttachment('a3', 3)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const grid = container.querySelector('.oxp-attachment-collage') as HTMLElement | null;
+    expect(grid).not.toBeNull();
+    expect(grid!.style.gridTemplateColumns).toBe('2fr 1fr');
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(3);
+    const hero = tiles[0] as HTMLElement;
+    expect(hero.style.gridRow).toBe('1 / 3');
+    expect(hero.style.aspectRatio).toBe('');
+    expect((tiles[1] as HTMLElement).style.aspectRatio).toBe('1 / 1');
+    expect((tiles[2] as HTMLElement).style.aspectRatio).toBe('1 / 1');
+
+    ml.destroy();
+  });
+
+  it('N=4_collage_uses_2x2_grid_and_3_2_aspect_ratio', async () => {
+    stubMatchMedia(false);
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1), makeImageAttachment('a2', 2), makeImageAttachment('a3', 3), makeImageAttachment('a4', 4)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const grid = container.querySelector('.oxp-attachment-collage') as HTMLElement | null;
+    expect(grid).not.toBeNull();
+    expect(grid!.style.gridTemplateColumns).toBe('1fr 1fr');
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(4);
+    for (const tile of tiles) {
+      expect((tile as HTMLElement).style.aspectRatio).toBe('3 / 2');
+    }
+
+    ml.destroy();
+  });
+
+  it('N=5_collage_renders_four_tiles_with_overlay_on_fourth', async () => {
+    stubMatchMedia(false);
+    const rows = [makeRow({
+      senderUid: 'u1',
+      seq: 1,
+      attachments: [
+        makeImageAttachment('a1', 1),
+        makeImageAttachment('a2', 2),
+        makeImageAttachment('a3', 3),
+        makeImageAttachment('a4', 4),
+        makeImageAttachment('a5', 5),
+      ],
+    })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    const tiles = container.querySelectorAll('.oxp-attachment-collage-tile');
+    expect(tiles.length).toBe(4);
+
+    const fourth = tiles[3] as HTMLElement;
+    const overlay = fourth.querySelector('.oxp-attachment-collage-overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay!.textContent).toBe('+2');
+
+    const img = fourth.querySelector('img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img!.style.filter).toContain('blur');
+
+    ml.destroy();
+  });
+
+  it('N=1_image_keeps_single_attachment_path_no_collage', async () => {
+    stubMatchMedia(false);
+    const rows = [makeRow({ senderUid: 'u1', seq: 1, attachments: [makeImageAttachment('a1', 1)] })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    expect(container.querySelector('.oxp-attachment-collage')).toBeNull();
+    const img = container.querySelector('.oxp-attachment-image img') as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+
+    ml.destroy();
+  });
+
+  it('mixed_mime_row_keeps_non_collage_render_path', async () => {
+    stubMatchMedia(false);
+    const rows = [makeRow({
+      senderUid: 'u1',
+      seq: 1,
+      attachments: [
+        makeImageAttachment('a1', 1),
+        { id: 'a2', url: 'https://cdn.example.com/voice.webm', mime: 'audio/webm', filename: 'voice.webm', sizeBytes: 5000 },
+      ],
+    })];
+    const client = makeMockClient(rows);
+    const ml = new MessageList({ client, roomId: 'r1', container, lang: 'en', selfUid: 'u1' });
+    await ml.mount();
+
+    expect(container.querySelector('.oxp-attachment-collage')).toBeNull();
+    expect(container.querySelector('.oxp-attachment-image img')).not.toBeNull();
+    expect(container.querySelector('.oxp-attachment-audio audio')).not.toBeNull();
+
+    ml.destroy();
+  });
 });
 
 // ── 1D: client.list() failure UI (#1244) ─────────────────────────────────────

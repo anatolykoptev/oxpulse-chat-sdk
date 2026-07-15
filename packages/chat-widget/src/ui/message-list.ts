@@ -238,6 +238,103 @@ function hydrateMediaSrc(
     });
 }
 
+function isImageAttachment(att: AttachmentMeta): boolean {
+  return att.mime.startsWith('image/');
+}
+
+function allImageAttachments(attachments: AttachmentMeta[]): boolean {
+  return attachments.length > 0 && attachments.every(isImageAttachment);
+}
+
+/**
+ * Render a grid of image attachments as a collage.
+ * Triggered when a message has >1 image attachment.
+ * Layouts: N=2 (1x1 side-by-side), N=3 (2x1 hero + two 1x1 tiles),
+ * N=4 (2x2 3:2), N>=5 (2x2 3:2, fourth tile blurred with a +{N-3} overlay).
+ */
+function renderAttachmentCollage(
+  attachments: AttachmentMeta[],
+  lang: Locale,
+  hydrate?: (url: string, signal?: AbortSignal) => Promise<Blob>,
+  trackObjectUrl?: (url: string) => void,
+  signal?: AbortSignal,
+): HTMLElement {
+  const count = attachments.length;
+  const grid = document.createElement('div');
+  grid.className = 'oxp-attachment-collage';
+  grid.style.display = 'grid';
+  grid.style.gap = '4px';
+  grid.style.overflow = 'hidden';
+  grid.style.maxWidth = 'min(100%, 550px)';
+  grid.style.maxHeight = '400px';
+
+  if (count === 3) {
+    grid.style.gridTemplateColumns = '2fr 1fr';
+  } else {
+    grid.style.gridTemplateColumns = '1fr 1fr';
+  }
+
+  const isMobile =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(max-width: 640px)').matches;
+
+  const tileCount = Math.min(count, 4);
+  for (let i = 0; i < tileCount; i++) {
+    const att = attachments[i];
+    const tile = document.createElement('div');
+    tile.className = 'oxp-attachment-collage-tile';
+
+    if (count === 3 && i === 0) {
+      // Hero tile spans both rows; no explicit aspect-ratio so it fills the grid.
+      tile.style.gridRow = '1 / 3';
+    } else {
+      // Mobile forces every tile to square; otherwise N=2 and N=3 side tiles are square, N=4/N>=5 are 3:2.
+      tile.style.aspectRatio = isMobile ? '1 / 1' : (count === 2 || count === 3 ? '1 / 1' : '3 / 2');
+    }
+
+    if (!isSafeAttachmentUrl(att.url)) {
+      renderUnsafePlaceholder(att, tile, lang);
+      grid.appendChild(tile);
+      continue;
+    }
+
+    const img = document.createElement('img');
+    hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal);
+    img.alt = att.filename;
+    img.setAttribute('loading', 'lazy');
+    img.setAttribute(
+      'aria-label',
+      t('imageAria', lang, { name: escapeHtml(att.filename), size: formatSizeKb(att.sizeBytes) }),
+    );
+    img.style.width = '100%';
+    img.style.height = '100%';
+    img.style.objectFit = 'cover';
+    img.style.display = 'block';
+    img.style.cursor = 'pointer';
+    img.addEventListener('click', () => {
+      window.open(att.url, '_blank', 'noopener,noreferrer');
+    });
+
+    if (count >= 5 && i === 3) {
+      img.style.filter = 'blur(4px)';
+    }
+
+    tile.appendChild(img);
+
+    if (count >= 5 && i === 3) {
+      const overlay = document.createElement('div');
+      overlay.className = 'oxp-attachment-collage-overlay';
+      overlay.textContent = `+${count - 3}`;
+      tile.appendChild(overlay);
+    }
+
+    grid.appendChild(tile);
+  }
+
+  return grid;
+}
+
 /** Render a single attachment element based on its MIME type. */
 function renderAttachment(
   att: AttachmentMeta,
@@ -1589,16 +1686,28 @@ export class MessageList {
     if (!row.deletedAt && !row.unsealError && row.attachments && row.attachments.length > 0) {
       const attachmentsEl = document.createElement('div');
       attachmentsEl.className = 'oxp-bubble-attachments';
-      for (const att of row.attachments) {
+      if (allImageAttachments(row.attachments) && row.attachments.length > 1) {
         attachmentsEl.appendChild(
-          renderAttachment(
-            att,
+          renderAttachmentCollage(
+            row.attachments,
             this.#lang,
             this.#client.fetchAttachmentBlob,
             (url) => this.#trackAttachmentObjectUrl(row.msgId, url),
             this.#signal,
           ),
         );
+      } else {
+        for (const att of row.attachments) {
+          attachmentsEl.appendChild(
+            renderAttachment(
+              att,
+              this.#lang,
+              this.#client.fetchAttachmentBlob,
+              (url) => this.#trackAttachmentObjectUrl(row.msgId, url),
+              this.#signal,
+            ),
+          );
+        }
       }
       el.appendChild(attachmentsEl);
     }

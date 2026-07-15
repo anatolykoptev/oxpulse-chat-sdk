@@ -1147,6 +1147,43 @@ export const THEME_CSS = `
   border-radius: 2px;
 }
 
+/* Multi-image collage grid (staged attachment tray slice 2).
+ * N=2: 1x1 side-by-side; N=3: 2x1 hero + two 1x1 tiles;
+ * N=4: 2x2 3:2; N>=5: 2x2 3:2 with a blurred fourth tile + "+N" overlay. */
+.oxp-attachment-collage {
+  border-radius: var(--oxp-radius);
+  max-width: min(100%, 550px);
+  max-height: 400px;
+  overflow: hidden;
+}
+
+.oxp-attachment-collage-tile {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+.oxp-attachment-collage-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.oxp-attachment-collage-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 1.25rem;
+  font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
 /* ── W2.2 slice 5: Reconnect banner ──────────────────────────────────────── */
 
 /* Sticky banner above message list — z-index 5 sits above messages but below picker (10) */
