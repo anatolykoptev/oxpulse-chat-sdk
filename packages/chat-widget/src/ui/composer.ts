@@ -9,6 +9,7 @@
 import { shouldShowCounter, isCmdEnter, MAX_BODY_CHARS, autogrowHeightPx } from '../utils/textfield-helpers.js';
 import { AttachmentPicker } from './attachment-picker.js';
 import { EmojiPicker } from './emoji-picker.js';
+import { ProductPicker } from './product-picker.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
@@ -63,6 +64,9 @@ export interface ComposerOptions {
   /** MAJOR-5: Optional shadow root so the emoji picker mounts outside overflow:hidden
    *  widgetRoot — mirrors MessageList's shadowHost pattern. */
   shadowHost?: ShadowRoot;
+  /** Seller product catalog client — when present, shows a product picker
+   *  button in the toolbar. onSelect → setProductCard(ref, meta). */
+  catalogClient?: import('@oxpulse/chat-sdk').SDKCatalogClient;
 }
 
 // ── Composer ──────────────────────────────────────────────────────────────────
@@ -101,6 +105,10 @@ export class Composer {
   #attachmentPicker: AttachmentPicker | null = null;
   /** #127: emoji picker — searchable, categorized. */
   #emojiPicker: EmojiPicker | null = null;
+  /** Seller product catalog picker — searchable dropdown. */
+  #productPicker: ProductPicker | null = null;
+  /** Optional catalog client for the product picker button. */
+  #catalogClient: import('@oxpulse/chat-sdk').SDKCatalogClient | null = null;
   /** MAJOR-5: shadow root for mounting emoji picker outside overflow:hidden widgetRoot. */
   #shadowHost: ShadowRoot | undefined;
   /** W9: optional product card to attach to the next outgoing text message. */
@@ -162,6 +170,7 @@ export class Composer {
     this.#lang = resolveLocale(opts.lang);
     this.#placeholder = opts.placeholder ?? t('composerPlaceholder', this.#lang);
     this.#shadowHost = opts.shadowHost;
+    this.#catalogClient = opts.catalogClient ?? null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -374,6 +383,35 @@ export class Composer {
       this.#emojiPicker.show(emojiBtn, emojiBtn);
     });
     main.appendChild(emojiBtn);
+
+    // Seller product catalog picker button — shown only when catalogClient
+    // is provided. Opens a searchable dropdown; onSelect → setProductCard.
+    if (this.#catalogClient) {
+      const productBtn = document.createElement('button');
+      productBtn.type = 'button';
+      productBtn.className = 'oxp-composer-product-btn';
+      productBtn.setAttribute('aria-label', 'Product catalog');
+      productBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l1-5h16l1 5"/><path d="M4 9h16v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M9 13h6"/></svg>';
+      productBtn.addEventListener('click', () => {
+        if (this.#signal?.aborted) return;
+        if (this.#productPicker?.isOpen) {
+          this.#productPicker.hide();
+          return;
+        }
+        if (!this.#productPicker) {
+          this.#productPicker = new ProductPicker({
+            container: root,
+            client: this.#catalogClient!,
+            onSelect: (ref, meta) => this.setProductCard(ref, meta),
+            signal: this.#signal,
+            lang: this.#lang,
+            mountTo: this.#shadowHost ? (this.#shadowHost as unknown as HTMLElement) : undefined,
+          });
+        }
+        this.#productPicker.show(productBtn, productBtn);
+      });
+      main.appendChild(productBtn);
+    }
 
     main.appendChild(textarea);
     main.appendChild(sendBtn);
@@ -616,6 +654,7 @@ export class Composer {
     this.#attachmentPicker = null;
     this.#emojiPicker?.hide();
     this.#emojiPicker = null;
+    this.#productPicker = null;
 
     if (this.#root && this.#root.parentNode) {
       this.#root.parentNode.removeChild(this.#root);
