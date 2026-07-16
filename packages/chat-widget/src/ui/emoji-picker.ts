@@ -31,6 +31,10 @@ export interface EmojiPickerOptions {
   lang?: string;
   /** Called when the picker closes itself (Escape, outside click). */
   onHide?: () => void;
+  /** Element to append the picker to (default: constructor container).
+   *  Pass the ShadowRoot host element to escape overflow:hidden clip contexts
+   *  — mirrors ReactionQuickBar's mountTo pattern (MAJOR-5). */
+  mountTo?: HTMLElement;
 }
 
 const PICKER_WIDTH = 320;
@@ -39,6 +43,7 @@ const EMOJIS_PER_ROW = 8;
 
 export class EmojiPicker {
   #container: HTMLElement;
+  #mountTo: HTMLElement | undefined;
   #onSelect: (emoji: string) => void;
   #onHide: (() => void) | undefined;
   #signal: AbortSignal | undefined;
@@ -59,6 +64,7 @@ export class EmojiPicker {
 
   constructor(opts: EmojiPickerOptions) {
     this.#container = opts.container;
+    this.#mountTo = opts.mountTo;
     this.#onSelect = opts.onSelect;
     this.#onHide = opts.onHide;
     this.#signal = opts.signal;
@@ -74,7 +80,8 @@ export class EmojiPicker {
     this.#restoreFocusEl = restoreFocusEl ?? anchorEl;
 
     this.#pickerEl = this.#buildPicker();
-    this.#container.appendChild(this.#pickerEl);
+    const appendTarget = this.#mountTo ?? this.#container;
+    appendTarget.appendChild(this.#pickerEl);
     this.#position(anchorEl);
 
     // Focus search input
@@ -305,29 +312,58 @@ export class EmojiPicker {
   #position(anchorEl: HTMLElement): void {
     if (!this.#pickerEl) return;
     const rect = anchorEl.getBoundingClientRect();
-    const containerRect = this.#container.getBoundingClientRect();
-    const containerWidth = this.#container.offsetWidth || window.innerWidth;
-    const containerHeight = this.#container.offsetHeight || window.innerHeight;
+    const isMountedOutside = this.#mountTo !== undefined && this.#mountTo !== this.#container;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
 
-    this.#pickerEl.style.position = "absolute";
+    if (isMountedOutside) {
+      // Mounted outside container (e.g. shadow host) — use viewport coords via position:fixed.
+      // getBoundingClientRect() returns viewport-relative coords, which map directly to
+      // fixed positioning. This avoids the coordinate mismatch when container has
+      // overflow:hidden and the picker is appended to a different ancestor (MAJOR-5).
+      this.#pickerEl.style.position = "fixed";
 
-    // Horizontal: align with anchor left edge, clamp to viewport
-    const anchorLeft = rect.left - containerRect.left;
-    const clampedLeft = Math.min(
-      Math.max(0, anchorLeft),
-      Math.max(0, containerWidth - PICKER_WIDTH),
-    );
-    this.#pickerEl.style.left = `${clampedLeft}px`;
+      // Horizontal: align with anchor left edge, clamp to viewport
+      const clampedLeft = Math.min(
+        Math.max(8, rect.left),
+        Math.max(8, viewportWidth - PICKER_WIDTH - 8),
+      );
+      this.#pickerEl.style.left = `${clampedLeft}px`;
 
-    // Vertical: below anchor if room, above otherwise
-    const anchorBottom = rect.bottom - containerRect.top;
-    const spaceBelow = containerHeight - anchorBottom;
-    if (spaceBelow >= PICKER_HEIGHT || spaceBelow >= containerHeight / 2) {
-      this.#pickerEl.style.top = `${anchorBottom + 4}px`;
+      // Vertical: below anchor if room, above otherwise
+      const spaceBelow = viewportHeight - rect.bottom;
+      if (spaceBelow >= PICKER_HEIGHT || spaceBelow >= viewportHeight / 2) {
+        this.#pickerEl.style.top = `${rect.bottom + 4}px`;
+      } else {
+        // Above
+        this.#pickerEl.style.top = `${Math.max(8, rect.top - PICKER_HEIGHT - 4)}px`;
+      }
     } else {
-      // Above
-      const anchorTop = rect.top - containerRect.top;
-      this.#pickerEl.style.top = `${Math.max(0, anchorTop - PICKER_HEIGHT - 4)}px`;
+      // Inside container — offset-parent-relative coords via position:absolute.
+      const containerRect = this.#container.getBoundingClientRect();
+      const containerWidth = this.#container.offsetWidth || viewportWidth;
+      const containerHeight = this.#container.offsetHeight || viewportHeight;
+
+      this.#pickerEl.style.position = "absolute";
+
+      // Horizontal: align with anchor left edge, clamp to viewport
+      const anchorLeft = rect.left - containerRect.left;
+      const clampedLeft = Math.min(
+        Math.max(0, anchorLeft),
+        Math.max(0, containerWidth - PICKER_WIDTH),
+      );
+      this.#pickerEl.style.left = `${clampedLeft}px`;
+
+      // Vertical: below anchor if room, above otherwise
+      const anchorBottom = rect.bottom - containerRect.top;
+      const spaceBelow = containerHeight - anchorBottom;
+      if (spaceBelow >= PICKER_HEIGHT || spaceBelow >= containerHeight / 2) {
+        this.#pickerEl.style.top = `${anchorBottom + 4}px`;
+      } else {
+        // Above
+        const anchorTop = rect.top - containerRect.top;
+        this.#pickerEl.style.top = `${Math.max(0, anchorTop - PICKER_HEIGHT - 4)}px`;
+      }
     }
     this.#pickerEl.style.zIndex = "20";
   }

@@ -60,6 +60,9 @@ export interface ComposerOptions {
   placeholder?: string;
   /** BCP-47 tag or an already-resolved Locale. Optional — defaults via resolveLocale(). */
   lang?: string;
+  /** MAJOR-5: Optional shadow root so the emoji picker mounts outside overflow:hidden
+   *  widgetRoot — mirrors MessageList's shadowHost pattern. */
+  shadowHost?: ShadowRoot;
 }
 
 // ── Composer ──────────────────────────────────────────────────────────────────
@@ -98,6 +101,8 @@ export class Composer {
   #attachmentPicker: AttachmentPicker | null = null;
   /** #127: emoji picker — searchable, categorized. */
   #emojiPicker: EmojiPicker | null = null;
+  /** MAJOR-5: shadow root for mounting emoji picker outside overflow:hidden widgetRoot. */
+  #shadowHost: ShadowRoot | undefined;
   /** W9: optional product card to attach to the next outgoing text message. */
   #productRef: string | null = null;
   #productMeta: ProductMeta | null = null;
@@ -156,6 +161,7 @@ export class Composer {
     this.#signal = opts.signal;
     this.#lang = resolveLocale(opts.lang);
     this.#placeholder = opts.placeholder ?? t('composerPlaceholder', this.#lang);
+    this.#shadowHost = opts.shadowHost;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -362,6 +368,7 @@ export class Composer {
           onSelect: (emoji) => this.#insertEmoji(emoji),
           signal: this.#signal,
           lang: this.#lang,
+          mountTo: this.#shadowHost ? (this.#shadowHost as unknown as HTMLElement) : undefined,
         });
       }
       this.#emojiPicker.show(emojiBtn, emojiBtn);
@@ -467,7 +474,7 @@ export class Composer {
     voicePreviewSend.type = 'button';
     voicePreviewSend.className = 'oxp-voice-preview-send';
     voicePreviewSend.setAttribute('aria-label', t('sendVoiceMessageAria', this.#lang));
-    voicePreviewSend.textContent = t('send', this.#lang);
+    voicePreviewSend.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22,2 15,22 11,13 2,9 22,2"></polygon></svg>';
     voicePreviewSend.addEventListener('click', () => this.#sendVoicePreview());
 
     const voicePreviewDiscard = document.createElement('button');
