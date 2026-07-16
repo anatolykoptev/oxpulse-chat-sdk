@@ -231,4 +231,99 @@ describe('SDKChatClient.subscribe() reconnect + replay', () => {
     expect(onMessage).toHaveBeenCalledTimes(2);
     expect((onMessage.mock.calls[1] as [{ seq: number }])[0].seq).toBe(6);
   });
+
+  // Connect-then-drop flap: a server that ACCEPTS the SSE stream then
+  // immediately drops it must escalate the reconnect backoff. Without a
+  // monotonic attempt counter, es.onerror calls reconnect(0) every cycle →
+  // backoffMs(0)≈800-1200ms forever (~1 req/s indefinitely, no escalation).
+  it('subscribe() escalates backoff when server accepts then immediately drops the stream', async () => {
+    const { getLastController } = installMockEventSource();
+    const client = new SDKChatClient({ jwt: 'test-jwt', baseUrl: 'https://example.com' });
+
+    mockTicketResponse(fetchMock, 'ticket-1');
+    fetchMock.mockResolvedValue(makeListResponse([]));
+
+    client.subscribe('room-flap', { onMessage: vi.fn() });
+    await flushMicrotasks();
+    expect(esConstructorCallCount).toBe(1);
+
+    // Drop #1: no frames received → fast reconnect (attempt 0, ~800-1200ms).
+    fetchMock.mockResolvedValueOnce(makeListResponse([])); // replay#1
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ticket: 'ticket-2', expires_at: new Date(Date.now() + 60000).toISOString() }),
+        { status: 200 },
+      ),
+    );
+    getLastController()!.emitError();
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushMicrotasks();
+    expect(esConstructorCallCount).toBe(2);
+
+    // Drop #2: still no frames received → backoff MUST escalate past attempt 0.
+    fetchMock.mockResolvedValueOnce(makeListResponse([])); // replay#2
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ticket: 'ticket-3', expires_at: new Date(Date.now() + 60000).toISOString() }),
+        { status: 200 },
+      ),
+    );
+    getLastController()!.emitError();
+    // 1500ms covers attempt-0 backoff (max 1200ms) but NOT attempt-1 (min 1600ms).
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushMicrotasks();
+    // With the fix: ES#3 not yet created (backoff escalated past 1500ms).
+    // With the bug (reconnect(0) always): ES#3 already created → this FAILS.
+    expect(esConstructorCallCount).toBe(2);
+
+    // Advance past attempt-1 backoff (max 2400ms < 3000ms total).
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushMicrotasks();
+    expect(esConstructorCallCount).toBe(3);
+  });
+
+  // A stable connection (at least one frame received) resets the reconnect
+  // attempt counter so a subsequent drop uses a fast reconnect, not an
+  // escalated backoff.
+  it('subscribe() resets backoff attempt after a frame is received on a reconnected stream', async () => {
+    const { getLastController } = installMockEventSource();
+    const client = new SDKChatClient({ jwt: 'test-jwt', baseUrl: 'https://example.com' });
+
+    mockTicketResponse(fetchMock, 'ticket-1');
+    fetchMock.mockResolvedValue(makeListResponse([]));
+
+    client.subscribe('room-stable', { onMessage: vi.fn() });
+    await flushMicrotasks();
+    expect(esConstructorCallCount).toBe(1);
+
+    // Drop #1: no frames → reconnect(0), counter escalates to 1.
+    fetchMock.mockResolvedValueOnce(makeListResponse([]));
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ticket: 'ticket-2', expires_at: new Date(Date.now() + 60000).toISOString() }),
+        { status: 200 },
+      ),
+    );
+    getLastController()!.emitError();
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushMicrotasks();
+    expect(esConstructorCallCount).toBe(2);
+
+    // Receive a frame on ES#2 → resets the attempt counter to 0.
+    getLastController()!.emit(JSON.stringify(makeServerRow(1)));
+
+    // Drop #2: counter was reset → fast reconnect (attempt 0, ~800-1200ms).
+    fetchMock.mockResolvedValueOnce(makeListResponse([]));
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ticket: 'ticket-3', expires_at: new Date(Date.now() + 60000).toISOString() }),
+        { status: 200 },
+      ),
+    );
+    getLastController()!.emitError();
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushMicrotasks();
+    // Fast reconnect happened within 1500ms (attempt 0, max 1200ms).
+    expect(esConstructorCallCount).toBe(3);
+  });
 });

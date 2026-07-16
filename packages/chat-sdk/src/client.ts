@@ -1089,6 +1089,11 @@ export class SDKChatClient {
     let destroyed = false;
     let lastSeq = 0;
     let es: EventSource | null = null;
+    // Monotonic reconnect-attempt counter for the connect-then-drop flap.
+    // Resets to 0 when the stream delivers a frame (onmessage); increments on
+    // each es.onerror so a flapping server escalates backoff instead of
+    // reconnect(0)≈800-1200ms forever (~1 req/s indefinitely).
+    let reconnectAttempt = 0;
 
     // W6 E2EE: register this subscriber on the room's shared serial decrypt
     // chain. Refcounted so a co-subscriber (widget remount / reconnect race)
@@ -1135,6 +1140,10 @@ export class SDKChatClient {
         // queued message dispatched post-close cannot append a decrypt onto a
         // released subscriber's chain.
         if (destroyed) return;
+        // Stream is delivering frames → reset the reconnect backoff attempt
+        // counter so a subsequent drop uses a fast reconnect, not an escalated
+        // backoff.
+        reconnectAttempt = 0;
         try {
           const data = JSON.parse(ev.data) as {
             type?: string;
@@ -1270,7 +1279,10 @@ export class SDKChatClient {
         es?.close();
         es = null;
         if (destroyed) return;
-        reconnect(0);
+        // Escalate backoff across consecutive connect-then-drop flaps: pass the
+        // current attempt then increment so the next drop uses a higher delay.
+        reconnect(reconnectAttempt);
+        reconnectAttempt += 1;
       };
     };
 
