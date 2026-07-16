@@ -20,6 +20,22 @@ import { OxpulseChatElement, defineElement, mount, decodeRowAttachments } from '
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
 import { encodeAttachmentEnvelope, decodeAttachmentEnvelope } from '../utils/attachment-envelope.js';
 
+// Issue #37 ("gate first paint on roster resolution") made the element's
+// MessageList await a roster-vs-300ms race in #fetchAndRender before first
+// paint + subscribe(). The widgetClient wires getRoster -> the SDK's
+// fetchRoster UNCONDITIONALLY (element.ts), so every mount() calls it. jsdom
+// has no roster server, so the real fetchRoster never settles quickly — mount()
+// stalls past these tests' short waits (and never resolves at all under
+// vi.useFakeTimers, since the 300ms fallback timer never fires, which cascades
+// leaked fake timers into later tests). Stub fetchRoster to resolve an empty
+// roster (a legitimate empty-room state) so mount() completes deterministically
+// via microtasks, mirroring the real on-mount fetch without the network. All
+// other SDK exports stay real (importOriginal spread).
+vi.mock('@oxpulse/chat-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@oxpulse/chat-sdk')>();
+  return { ...actual, fetchRoster: vi.fn().mockResolvedValue(new Map()) };
+});
+
 // Vitest uses jsdom by default when configured. We need to ensure customElements is available.
 
 // Helper: make a valid JWT with aud_origins matching localhost
