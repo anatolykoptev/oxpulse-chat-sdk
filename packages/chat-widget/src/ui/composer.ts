@@ -1166,6 +1166,11 @@ export class Composer {
     this.#sendBtn.disabled = empty || overLimit || this.#sending;
     // Voice preview carries its own Send button; hide the main input-row send button.
     this.#sendBtn.hidden = this.#voicePreviewObjectURL !== null;
+    // Issue #98: drive the voice preview Send button disabled-state on over-limit
+    // caption too, so the user gets visual feedback instead of a silent no-op on click.
+    if (this.#voicePreviewSend) {
+      this.#voicePreviewSend.disabled = overLimit || this.#sending;
+    }
 
     // M10 / 1G: update send-hint text for screen readers.
     // During #sending=true, hint reads "Sending message…" so SR announces correct state.
