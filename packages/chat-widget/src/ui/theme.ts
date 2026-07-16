@@ -18,6 +18,8 @@ export const THEME_CSS = `
   --oxp-border: #e0e0e0;
   --oxp-bubble-self-bg: #dcf8c6;
   --oxp-bubble-other-bg: #f1f0f0;
+  --oxp-surface: #ffffff;
+  --oxp-tint: #f1f5f9;
   --oxp-radius: 12px;
   --oxp-font: system-ui, -apple-system, sans-serif;
   --oxp-spacing-unit: 8px;
@@ -88,6 +90,8 @@ export const THEME_CSS = `
   --oxp-border: #38383a;
   --oxp-bubble-self-bg: #1e4e31;
   --oxp-bubble-other-bg: #2c2c2e;
+  --oxp-surface: #2c2c2e;
+  --oxp-tint: #38383a;
   /* danger token — dark mode #ff6b6b (contrast ≥4.5:1 on #1c1c1e bg) */
   --oxp-danger: #ff6b6b;
   /* B2 (BLOCKER WCAG 1.4.3): dark on-danger — #000000 on #ff6b6b = 7.57:1 PASS.
@@ -138,6 +142,8 @@ export const THEME_CSS = `
     --oxp-border: #38383a;
     --oxp-bubble-self-bg: #1e4e31;
     --oxp-bubble-other-bg: #2c2c2e;
+  --oxp-surface: #2c2c2e;
+  --oxp-tint: #38383a;
     --oxp-danger: #ff6b6b;
     /* B2: dark on-danger matching dark theme block — #000 on #ff6b6b = 7.57:1 PASS */
     --oxp-on-danger: #000000;
@@ -555,6 +561,8 @@ export const THEME_CSS = `
   color: var(--oxp-fg-secondary, #64748b);
 }
 .oxp-composer-emoji-btn:hover {
+  background: var(--oxp-tint);
+}
 
 /* ── Thread panel (#126) ─────────────────────────────────────────────── */
 .oxp-thread-panel {
