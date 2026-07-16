@@ -1,5 +1,15 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.18.0
+
+### Minor Changes
+
+- b79ac48: Read receipts — checkmarks on own messages (#122)
+
+  Add WhatsApp-style read receipt checkmarks on own message bubbles, driven by
+  SSE read_receipt events. Delivered (double ✓ gray) → Read (double ✓ accent).
+  Auto-marks incoming messages from others as read. i18n support for en + ru.
+
 ## 0.17.0
 
 ### Minor Changes
