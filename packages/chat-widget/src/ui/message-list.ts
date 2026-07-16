@@ -2204,9 +2204,28 @@ export class MessageList {
   async #fetchAndRender(): Promise<void> {
     if (!this.#listEl || this.#signal.aborted) return;
 
+    // Issue #37: fetch roster in parallel with list() to avoid identity flash
+    // (raw epids + grey initials for ~1-2s until roster resolves). Race roster
+    // against a 300ms timeout -- if roster wins, first paint is branded with
+    // display names. If timeout wins, paint with fallback and #fetchRoster
+    // re-renders when it arrives.
+    let rosterResolved = false;
+    const rosterPromise: Promise<void> = this.#client.getRoster
+      ? this.#client.getRoster(this.#roomId).then((map) => {
+          if (this.#signal.aborted) return;
+          this.#roster = map;
+          rosterResolved = true;
+        }).catch(() => { /* non-critical */ })
+      : Promise.resolve();
+    const rosterTimeout = new Promise<void>((resolve) => setTimeout(resolve, 300));
+
     let result: { items: MessageRow[]; hasNext: boolean };
     try {
-      result = await this.#client.list(this.#roomId, { limit: 50 });
+      const [listResult] = await Promise.all([
+        this.#client.list(this.#roomId, { limit: 50 }),
+        Promise.race([rosterPromise, rosterTimeout]),
+      ]);
+      result = listResult;
     } catch (err) {
       this.#renderListError(err instanceof Error ? err.message : String(err));
       this.#dispatchError(`Failed to load messages: ${String(err)}`);
@@ -2243,8 +2262,9 @@ export class MessageList {
       void this.#fetchAllReactions();
     }
 
-    // T18: fetch roster on mount so initial history has names immediately.
-    if (this.#client.getRoster) {
+    // Issue #37: if the 300ms timeout won the race (roster still in-flight),
+    // #fetchRoster will re-render when it arrives. If roster resolved, skip.
+    if (this.#client.getRoster && !rosterResolved) {
       void this.#fetchRoster();
     }
   }
