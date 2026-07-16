@@ -76,7 +76,12 @@ export function computeFloatingPosition(args: FloatingPositionArgs): FloatingPos
   const anchorRightEdge = mountedOutside ? anchorRect.right : anchorRect.right - containerRect.left;
 
   // Vertical: prefer above if requested and room, else below.
-  const containerHeight = mountedOutside ? viewportHeight : containerRect.height;
+  // A degenerate containerRect.height (0 — e.g. a not-yet-laid-out container, or
+  // jsdom which has no layout engine) must fall back to viewportHeight, matching
+  // the pre-dedup EmojiPicker/ReactionQuickBar `offsetHeight || viewportHeight`
+  // logic. Without this, the `Math.min(rawTop, containerHeight - elemHeight -
+  // margin)` clamp below collapses a below-flip to `margin`, mis-placing the bar.
+  const containerHeight = mountedOutside ? viewportHeight : (containerRect.height || viewportHeight);
   const spaceAbove = anchorTop;
   const wantAbove = preferAbove && spaceAbove >= elemHeight + gap;
   const placement: 'above' | 'below' = wantAbove ? 'above' : 'below';
