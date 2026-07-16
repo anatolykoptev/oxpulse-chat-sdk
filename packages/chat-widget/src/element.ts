@@ -534,6 +534,7 @@ export class OxpulseChatElement extends HTMLElement {
           onMutation?: (event: SDKMutationEvent) => void;
           onReaction?: (event: SDKReactionEvent) => void;
           onTyping?: (event: { userId: string; ttlSecs?: number }) => void;
+          onPresence?: (event: { userId: string; lastSeenAt: string }) => void;
         }): () => void;
         sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
@@ -552,6 +553,10 @@ export class OxpulseChatElement extends HTMLElement {
         send?(roomId: string, args: { senderUid: string; sealed: ArrayBuffer }): Promise<{ seq: number; msgId: string }>;
         /** #120: broadcast typing indicator. Fire-and-forget. */
         sendTyping?(roomId: string, ttlSecs?: number): Promise<void>;
+        /** #121: send presence heartbeat. */
+        sendPresence?(roomId: string): Promise<void>;
+        /** #121: fetch presence snapshot. */
+        getPresence?(roomId: string): Promise<Array<{ userId: string; lastSeenAt: string }>>;
         readonly baseUrl?: string;
         readonly jwt?: string;
       }

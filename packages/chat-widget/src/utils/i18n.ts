@@ -111,7 +111,11 @@ export type LocaleKey =
   | 'typingOneUser'
   | 'typingTwoUsers'
   | 'typingMultiple'
-  | 'typingAriaLabel';
+  | 'typingAriaLabel'
+  // Presence (#121)
+  | 'presenceOnline'
+  | 'presenceLastSeen'
+  | 'presenceLastSeenAria';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -205,6 +209,9 @@ const en: LocaleTable = {
   typingTwoUsers: '{user1} and {user2} are typing…',
   typingMultiple: '{user1}, {user2} and {n} others are typing…',
   typingAriaLabel: 'Users typing: {names}',
+  presenceOnline: 'Online',
+  presenceLastSeen: 'last seen {time}',
+  presenceLastSeenAria: '{name} last seen {time}',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -296,6 +303,9 @@ const ru: LocaleTable = {
   typingTwoUsers: '{user1} и {user2} печатают…',
   typingMultiple: '{user1}, {user2} и ещё {n} печатают…',
   typingAriaLabel: 'Печатают: {names}',
+  presenceOnline: 'В сети',
+  presenceLastSeen: 'был(а) {time}',
+  presenceLastSeenAria: '{name} был(а) {time}',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };

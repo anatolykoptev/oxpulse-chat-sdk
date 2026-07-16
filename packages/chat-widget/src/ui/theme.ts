@@ -241,6 +241,22 @@ export const THEME_CSS = `
   display: block;
 }
 /* Chained rows: keep the avatar footprint but hide it so bubbles stay aligned. */
+/* ── Presence dot (#121) ─────────────────────────────────────────────── */
+.oxp-bubble-avatar { position: relative; }
+.oxp-presence-dot {
+  position: absolute;
+  bottom: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--oxp-surface, #fff);
+  background: var(--oxp-muted);
+  z-index: 1;
+}
+.oxp-presence-dot[data-status='online'] { background: #22c55e; }
+.oxp-presence-dot[data-status='away']   { background: var(--oxp-muted); }
+
 .oxp-row[data-chained='true'] .oxp-bubble-avatar {
   visibility: hidden;
 }
