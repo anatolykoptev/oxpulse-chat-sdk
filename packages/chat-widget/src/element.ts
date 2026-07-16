@@ -1012,6 +1012,7 @@ export class OxpulseChatElement extends HTMLElement {
           container: widgetRoot,
           signal: signal,
           lang,
+          shadowHost: this.#shadow ?? undefined,
         });
         this.#composer.mount();
       }
