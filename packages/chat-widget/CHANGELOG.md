@@ -1,5 +1,16 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.20.4
+
+### Patch Changes
+
+- 91e89ed: Refactor: deduplicate floating-element positioning logic into shared
+  computeFloatingPosition utility. EmojiPicker and ReactionQuickBar both
+  had identical fixed-vs-absolute + viewport-clamp code; now both use the
+  single utility. Fixes quick bar positioning jump when selecting a heart
+  reaction — the bar now anchors consistently to the heart button, not
+  the bubble.
+
 ## 0.20.3
 
 ### Patch Changes
