@@ -1,6 +1,6 @@
 {
   "name": "@oxpulse/chat-widget",
-  "version": "0.20.8",
+  "version": "0.20.9",
   "description": "OxPulse Chat embed widget — Custom Element + iframe mode",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
