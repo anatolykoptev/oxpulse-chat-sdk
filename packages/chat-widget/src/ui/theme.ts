@@ -1066,6 +1066,17 @@ export const THEME_CSS = `
   opacity: 1;
 }
 
+/* When the caller already has a ❤️ reaction, the reaction chip
+ * (“❤️ N”) is the visible indicator + toggle. Suppress the
+ * heart button on hover/focus-within so the user doesn’t see two
+ * heart icons stacked vertically. The chip click removes the reaction;
+ * once removed, the heart button reappears for re-reacting / quick-bar.
+ * Keyboard users still reach the button via Tab (focus-visible below). */
+.oxp-bubble:hover .oxp-reaction-heart-btn[aria-pressed=true],
+.oxp-bubble:focus-within .oxp-reaction-heart-btn[aria-pressed=true] {
+  opacity: 0;
+}
+
 .oxp-reaction-heart-btn:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
