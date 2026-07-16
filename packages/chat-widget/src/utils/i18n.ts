@@ -121,7 +121,13 @@ export type LocaleKey =
   | 'readReceiptDelivered'
   | 'readReceiptRead'
   | 'readReceiptReadBy'
-  | 'readReceiptAria';
+  | 'readReceiptAria'
+  // Emoji picker (#127)
+  | 'emojiPickerAria'
+  | 'emojiPickerSearch'
+  | 'emojiPickerSearchAria'
+  | 'emojiPickerNoResults'
+  | 'emojiPickerBtnAria';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -223,6 +229,11 @@ const en: LocaleTable = {
   readReceiptRead: 'Read',
   readReceiptReadBy: 'Read by {n}',
   readReceiptAria: 'Message status: {status}',
+  emojiPickerAria: 'Emoji picker',
+  emojiPickerSearch: 'Search emoji…',
+  emojiPickerSearchAria: 'Search emoji',
+  emojiPickerNoResults: 'No emoji found',
+  emojiPickerBtnAria: 'Open emoji picker',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -322,6 +333,11 @@ const ru: LocaleTable = {
   readReceiptRead: 'Прочитано',
   readReceiptReadBy: 'Прочитано {n}',
   readReceiptAria: 'Статус сообщения: {status}',
+  emojiPickerAria: 'Выбор эмодзи',
+  emojiPickerSearch: 'Поиск эмодзи…',
+  emojiPickerSearchAria: 'Поиск эмодзи',
+  emojiPickerNoResults: 'Эмодзи не найдены',
+  emojiPickerBtnAria: 'Открыть выбор эмодзи',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };
