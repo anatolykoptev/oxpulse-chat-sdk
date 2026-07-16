@@ -115,7 +115,13 @@ export type LocaleKey =
   // Presence (#121)
   | 'presenceOnline'
   | 'presenceLastSeen'
-  | 'presenceLastSeenAria';
+  | 'presenceLastSeenAria'
+  // Read receipts (#122)
+  | 'readReceiptSent'
+  | 'readReceiptDelivered'
+  | 'readReceiptRead'
+  | 'readReceiptReadBy'
+  | 'readReceiptAria';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -212,6 +218,11 @@ const en: LocaleTable = {
   presenceOnline: 'Online',
   presenceLastSeen: 'last seen {time}',
   presenceLastSeenAria: '{name} last seen {time}',
+  readReceiptSent: 'Sent',
+  readReceiptDelivered: 'Delivered',
+  readReceiptRead: 'Read',
+  readReceiptReadBy: 'Read by {n}',
+  readReceiptAria: 'Message status: {status}',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -306,6 +317,11 @@ const ru: LocaleTable = {
   presenceOnline: 'В сети',
   presenceLastSeen: 'был(а) {time}',
   presenceLastSeenAria: '{name} был(а) {time}',
+  readReceiptSent: 'Отправлено',
+  readReceiptDelivered: 'Доставлено',
+  readReceiptRead: 'Прочитано',
+  readReceiptReadBy: 'Прочитано {n}',
+  readReceiptAria: 'Статус сообщения: {status}',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };
