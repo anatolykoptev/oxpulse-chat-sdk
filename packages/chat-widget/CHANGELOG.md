@@ -1,5 +1,16 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.20.2
+
+### Patch Changes
+
+- de0bf24: Fix emoji picker clipped by widget root overflow:hidden — picker now mounts
+  to the shadow root host (position:fixed) when a shadowHost is passed, mirroring
+  the ReactionQuickBar MAJOR-5 pattern. Grid with emojis is no longer cut off.
+
+  Fix voice preview send button showing localized text (\"Отправить\"/\"Send\")
+  instead of the paper-plane SVG icon — now matches the main composer send button.
+
 ## 0.20.1
 
 ### Patch Changes
