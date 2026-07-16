@@ -8,6 +8,7 @@
 
 import { shouldShowCounter, isCmdEnter, MAX_BODY_CHARS, autogrowHeightPx } from '../utils/textfield-helpers.js';
 import { AttachmentPicker } from './attachment-picker.js';
+import { EmojiPicker } from './emoji-picker.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import type { ProductMeta } from '../types.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
@@ -95,6 +96,8 @@ export class Composer {
   #initialText = '';
   /** W2.2 slice 4: attachment picker — present when client supports uploadAttachment + sendAttachmentMessage. */
   #attachmentPicker: AttachmentPicker | null = null;
+  /** #127: emoji picker — searchable, categorized. */
+  #emojiPicker: EmojiPicker | null = null;
   /** W9: optional product card to attach to the next outgoing text message. */
   #productRef: string | null = null;
   #productMeta: ProductMeta | null = null;
@@ -341,6 +344,30 @@ export class Composer {
       main.appendChild(micBtn);
     }
 
+    // #127: emoji picker button — opens a searchable emoji grid.
+    const emojiBtn = document.createElement('button');
+    emojiBtn.type = 'button';
+    emojiBtn.className = 'oxp-composer-emoji-btn';
+    emojiBtn.setAttribute('aria-label', t('emojiPickerBtnAria', this.#lang));
+    emojiBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>';
+    emojiBtn.addEventListener('click', () => {
+      if (this.#signal?.aborted) return;
+      if (this.#emojiPicker?.isOpen) {
+        this.#emojiPicker.hide();
+        return;
+      }
+      if (!this.#emojiPicker) {
+        this.#emojiPicker = new EmojiPicker({
+          container: root,
+          onSelect: (emoji) => this.#insertEmoji(emoji),
+          signal: this.#signal,
+          lang: this.#lang,
+        });
+      }
+      this.#emojiPicker.show(emojiBtn, emojiBtn);
+    });
+    main.appendChild(emojiBtn);
+
     main.appendChild(textarea);
     main.appendChild(sendBtn);
 
@@ -580,6 +607,8 @@ export class Composer {
 
     this.#attachmentPicker?.destroy();
     this.#attachmentPicker = null;
+    this.#emojiPicker?.hide();
+    this.#emojiPicker = null;
 
     if (this.#root && this.#root.parentNode) {
       this.#root.parentNode.removeChild(this.#root);
@@ -628,6 +657,25 @@ export class Composer {
 
   // W2.2 slice 4: paste handler — forward image files to picker.
   // Typed as Event so jsdom plain Event dispatches work in tests;
+
+  /** #127: insert emoji at cursor position in textarea. */
+  #insertEmoji(emoji: string): void {
+    const ta = this.#textarea;
+    if (!ta) return;
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? ta.value.length;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    ta.value = before + emoji + after;
+    // Move cursor after the inserted emoji
+    const newCursor = start + emoji.length;
+    ta.setSelectionRange(newCursor, newCursor);
+    ta.focus();
+    this.#updateState();
+    // M8: autogrow after insert
+    ta.style.height = 'auto';
+    ta.style.height = `${autogrowHeightPx(ta.scrollHeight, 144)}px`;
+  }
   // clipboardData is accessed via a type-safe cast to handle both ClipboardEvent and test stubs.
   readonly #onPaste = (ev: Event): void => {
     const clipboardData = (ev as { clipboardData?: { files?: FileList } }).clipboardData;

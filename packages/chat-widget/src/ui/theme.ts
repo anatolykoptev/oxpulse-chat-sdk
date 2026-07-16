@@ -454,6 +454,110 @@ export const THEME_CSS = `
 .oxp-read-receipt[data-status='read'] { color: var(--oxp-accent, #3b82f6); }
 .oxp-read-receipt[data-status='read'] svg { color: var(--oxp-accent, #3b82f6); }
 
+/* ── Emoji picker (#127) ─────────────────────────────────────────────── */
+.oxp-emoji-picker {
+  background: var(--oxp-surface, #fff);
+  border: 1px solid var(--oxp-border, #e2e8f0);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 280px;
+}
+.oxp-emoji-picker-search { padding: 8px; }
+.oxp-emoji-picker-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--oxp-border, #e2e8f0);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  background: var(--oxp-surface, #fff);
+  color: var(--oxp-fg, #1a1a1a);
+}
+.oxp-emoji-picker-nav {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px 4px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.oxp-emoji-picker-tab {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+}
+.oxp-emoji-picker-tab[aria-selected='true'] {
+  opacity: 1;
+  background: var(--oxp-tint, #f1f5f9);
+}
+.oxp-emoji-picker-grid {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 8px;
+}
+.oxp-emoji-picker-category-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--oxp-fg-secondary, #64748b);
+  padding: 6px 0 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.oxp-emoji-picker-emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1.25rem;
+  padding: 0;
+}
+.oxp-emoji-picker-emoji:hover {
+  background: var(--oxp-tint, #f1f5f9);
+}
+.oxp-emoji-picker-emoji:focus-visible {
+  outline: 2px solid var(--oxp-accent, #3b82f6);
+  outline-offset: -1px;
+}
+.oxp-emoji-picker-empty {
+  text-align: center;
+  padding: 24px 0;
+  color: var(--oxp-fg-secondary, #64748b);
+  font-size: 0.8rem;
+}
+.oxp-composer-emoji-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--oxp-fg-secondary, #64748b);
+}
+.oxp-composer-emoji-btn:hover {
+  background: var(--oxp-tint, #f1f5f9);
+}
+
 .oxp-tombstone {
   color: var(--oxp-muted);
   font-style: italic;
