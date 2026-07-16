@@ -305,6 +305,23 @@ export const THEME_CSS = `
   }
 }
 
+/* Review finding (MEDIUM): data-hydrate-failed='true' is set by hydrateMediaSrc
+ * on final retry exhaustion (and on permanent 403/404/410) so CSS can show a
+ * placeholder instead of a bare broken-image icon. Reuses the existing
+ * .oxp-placeholder broken/error visual language (muted token + font + padding)
+ * — applied to the failed <img>/<audio> element itself. */
+[data-hydrate-failed='true'] {
+  font-family: var(--oxp-font);
+  color: var(--oxp-muted);
+  padding: 16px;
+  min-height: 80px;
+  background: var(--oxp-border);
+  /* Hide the browser's bare broken-image icon + alt text so the placeholder
+   * box reads as an intentional unavailable-state affordance, not a crash. */
+  font-size: 0;
+  box-sizing: border-box;
+}
+
 .oxp-error {
   font-family: var(--oxp-font);
   padding: 16px;

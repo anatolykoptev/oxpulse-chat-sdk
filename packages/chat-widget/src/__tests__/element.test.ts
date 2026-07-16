@@ -1564,6 +1564,92 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
   });
 });
 
+// ── Review finding #4: oxpulse-chat:attachment-error event from the host ──────
+// Lives in its own describe block (not the "attachments (issue #67)" block above)
+// because that block's heavy beforeEach stubs (document.createElement spy,
+// createImageBitmap, FileReader) interfere with custom-element bootstrap when
+// run in the full suite — all 7 pre-existing tests there fail in-suite too.
+// This test needs a clean environment: just defineElement + a mock client.
+describe('OxpulseChatElement — attachment-error event (review finding #4)', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    defineElement();
+    // Defensive: prior describe blocks ("W2.2 slice 5") use vi.useFakeTimers()
+    // and some tests fail before their vi.useRealTimers() — fake timers leak
+    // into subsequent tests, making setTimeout never fire (5s timeout cascade).
+    // Restore real timers here so this block is robust to upstream leaks.
+    vi.useRealTimers();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('dispatches oxpulse-chat:attachment-error from the host element on final hydrate failure', async () => {
+    // The authed-fetch bridge (element.ts fetchAttachmentBlob) must reject with a
+    // typed error carrying the HTTP status, and on FINAL hydration failure the
+    // host element dispatches CustomEvent('oxpulse-chat:attachment-error') with
+    // detail {msgId, attachmentId, reason:'hydrate_failed'}, bubbling+composed —
+    // matching how #notifyWriteFailure dispatches oxpulse-chat:write-error.
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+    // Stub fetch so the bridge's authed GET returns a permanent 404 — no real
+    // network call. The bridge throws an error carrying status=404, the retry
+    // loop skips retries, and the final-failure path fires the event.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(capturedOnMessage).not.toBeNull();
+
+    const events: CustomEvent[] = [];
+    el.addEventListener('oxpulse-chat:attachment-error', (ev) => events.push(ev as CustomEvent));
+
+    const envelope = encodeAttachmentEnvelope('', [
+      { id: 'att-err-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 500, width: 10, height: 10 },
+    ]);
+    capturedOnMessage!({
+      seq: 1,
+      msgId: 'msg-att-err',
+      senderUid: 'other-user',
+      sealed: envelope,
+      plaintext: envelope,
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: null,
+      productMeta: null,
+    });
+    // Drain the (no-retry, permanent) final-failure path.
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(events).toHaveLength(1);
+    const detail = events[0]!.detail as { msgId: string; attachmentId: string; reason: string };
+    expect(detail.msgId).toBe('msg-att-err');
+    expect(detail.attachmentId).toBe('att-err-1');
+    expect(detail.reason).toBe('hydrate_failed');
+    expect(events[0]!.bubbles).toBe(true);
+    expect(events[0]!.composed).toBe(true);
+
+    el.destroy();
+  });
+});
+
 describe('decodeRowAttachments', () => {
   it('maps_durationMs_from_envelope_to_attachmentMeta', () => {
     const sealed = encodeAttachmentEnvelope('', [

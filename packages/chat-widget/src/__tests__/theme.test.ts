@@ -118,6 +118,27 @@ describe('theme foundation', () => {
     expect(css).toMatch(/\.oxp-error[^}]*var\(--oxp-danger\)/s);
   });
 
+  it('hydrate_failed_attribute_has_placeholder_css_consumer', async () => {
+    // Review finding (MEDIUM): hydrateMediaSrc sets data-hydrate-failed='true' on
+    // final retry exhaustion and the CHANGELOG promises "CSS can show a placeholder
+    // instead of a bare broken-image icon" — but THEME_CSS had no selector for it.
+    // Fix: a [data-hydrate-failed='true'] selector reusing the .oxp-placeholder
+    // broken/error visual language (muted token + padding + font). Anchored regex
+    // on the selector, not a loose substring, so it can't silently regress.
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const shadow = el.shadowRoot;
+    expect(shadow).not.toBeNull();
+    const css = shadow!.querySelector('style')!.textContent ?? '';
+    // Selector must exist and reuse the .oxp-placeholder muted-token visual language.
+    expect(css).toMatch(/\[data-hydrate-failed='true'\][^{]*\{[^}]*var\(--oxp-muted\)/s);
+  });
+
   it('unseal_error_has_distinct_danger_affordance_from_tombstone', async () => {
     // review-fix HIGH#2: .oxp-unseal-error must carry a distinct danger
     // affordance, not the plain-italic-muted treatment .oxp-tombstone uses
