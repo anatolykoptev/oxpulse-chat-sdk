@@ -18,6 +18,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement, selfUidFromJwt } from '../element.js';
 import type { MessageListClient } from '../ui/message-list.js';
 
+// Issue #37 ("gate first paint on roster resolution") made mount() await a
+// roster-vs-300ms race before rows render. The element wires getRoster -> the
+// SDK's fetchRoster unconditionally (element.ts), and jsdom has no roster
+// server, so the real fetchRoster never settles before these tests' 80ms wait —
+// the rows under assertion never render in time. Stub fetchRoster to resolve an
+// empty roster (a legitimate empty-room state) so mount() completes via
+// microtasks, mirroring the real on-mount fetch. Other SDK exports stay real.
+vi.mock('@oxpulse/chat-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@oxpulse/chat-sdk')>();
+  return { ...actual, fetchRoster: vi.fn().mockResolvedValue(new Map()) };
+});
+
 // Helper: make a valid JWT with aud_origins matching localhost (same shape
 // as element-anon-read.test.ts).
 function makeJwt(payload: Record<string, unknown>): string {
