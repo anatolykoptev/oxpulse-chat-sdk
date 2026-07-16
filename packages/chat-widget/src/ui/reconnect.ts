@@ -151,6 +151,19 @@ export class Reconnector {
       },
     });
     this.#maybeFocusBtn();
+    // Observability: a permanently-dead room is invisible to host monitoring
+    // (notifyAuthExpired dispatches oxpulse-chat:token-expired; this is the
+    // network-exhaustion counterpart). Dispatch from the host so an integrator
+    // can alert/telemetry a room that gave up reconnecting. Auth errors branch
+    // to notifyAuthExpired (stopping the loop) before reaching MAX_ATTEMPTS,
+    // so this path is only reached for non-auth (network) failures — no
+    // `reason` field is included because it would always be 'network',
+    // providing no distinguishing value.
+    this.#host.dispatchEvent(new CustomEvent('oxpulse-chat:reconnect-exhausted', {
+      bubbles: true,
+      composed: true,
+      detail: { roomId: this.#roomId, attempts: this.#attempt },
+    }));
   }
 
   clear(): void {

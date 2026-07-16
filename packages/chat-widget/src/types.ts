@@ -196,6 +196,22 @@ export interface WidgetEventMap {
    * composed. Deduped to once per attachment per final failure (not per retry).
    */
   'oxpulse-chat:attachment-error': CustomEvent<{ msgId: string; attachmentId: string; reason: 'hydrate_failed' }>;
+  /**
+   * Observability: fired when a row carrying an `unsealError` (chat-sdk's
+   * classifyUnsealError reason 'replay' | 'auth' | 'unknown') is rendered —
+   * a replay-attack signature and a benign timeout are otherwise
+   * indistinguishable to the host. Dispatched from the host element, bubbling +
+   * composed. Deduped to once per msgId per widget lifetime (not per re-render).
+   * The replay reason is the one that matters most on an untrusted server.
+   */
+  'oxpulse-chat:decrypt-error': CustomEvent<{ roomId: string; msgId: string; seq: number; reason: 'replay' | 'auth' | 'unknown' }>;
+  /**
+   * Observability: fired when the Reconnector exhausts all retry attempts
+   * (MAX_ATTEMPTS=10) — a permanently-dead room is otherwise invisible to host
+   * monitoring (contrast oxpulse-chat:token-expired which fires on auth
+   * expiry). Dispatched from the host element, bubbling + composed.
+   */
+  'oxpulse-chat:reconnect-exhausted': CustomEvent<{ roomId: string; attempts: number }>;
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────

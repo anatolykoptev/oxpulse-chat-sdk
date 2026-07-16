@@ -401,4 +401,43 @@ describe('Reconnector', () => {
     r.clear();
     vi.useRealTimers();
   });
+
+  // ── Observability: oxpulse-chat:reconnect-exhausted event ───────────────────
+
+  it('notifyGivenUp_dispatches_reconnect_exhausted_event_with_roomId_and_attempts', () => {
+    // After MAX_ATTEMPTS (10) the Reconnector gives up. notifyGivenUp() must
+    // dispatch 'oxpulse-chat:reconnect-exhausted' on the host with detail
+    // {roomId, attempts} so a permanently-dead room is host-visible (contrast
+    // notifyAuthExpired which dispatches oxpulse-chat:token-expired).
+    vi.useFakeTimers();
+    const events: CustomEvent[] = [];
+    host.addEventListener('oxpulse-chat:reconnect-exhausted', (e) => events.push(e as CustomEvent));
+
+    // subscribe fn that always THROWS synchronously with a non-auth error →
+    // drives the loop to exhaustion (10 attempts) → notifyGivenUp → event.
+    // A synchronous throw is used (not async onError) because a subscribe fn
+    // that returns synchronously triggers notifyReconnected() + attempt=0
+    // reset, preventing the loop from ever reaching MAX_ATTEMPTS.
+    const subscribe = vi.fn().mockImplementation(() => {
+      throw { status: 503 };
+    });
+
+    const r = new Reconnector({ container, host });
+    r.startReconnectLoop(subscribe, 'room-exhausted');
+
+    // Drive the full retry sequence: attempt 0 (delay 0) + 9 more attempts
+    // with escalating backoff (1s,2s,4s,8s,8s,8s,8s,8s,8s). Advancing past
+    // the sum of all delays (~57s) fires every scheduled attempt.
+    vi.advanceTimersByTime(100_000);
+
+    expect(events).toHaveLength(1);
+    const detail = events[0]!.detail as { roomId: string; attempts: number };
+    expect(detail.roomId).toBe('room-exhausted');
+    expect(detail.attempts).toBe(10);
+    expect(events[0]!.bubbles).toBe(true);
+    expect(events[0]!.composed).toBe(true);
+
+    r.clear();
+    vi.useRealTimers();
+  });
 });

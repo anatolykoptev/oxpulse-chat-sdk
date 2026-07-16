@@ -1680,3 +1680,172 @@ describe('decodeRowAttachments', () => {
     expect(decoded.attachments![0].url).toBe('https://chat.example.com/api/sdk/attachments/att-voice');
   });
 });
+
+// ── Observability: oxpulse-chat:decrypt-error event from the host ─────────────
+// Mirrors the attachment-error test block's clean-environment discipline (own
+// describe, real timers, mock client only) so prior blocks' fake-timer / stub
+// leaks don't interfere with custom-element bootstrap.
+describe('OxpulseChatElement — decrypt-error event (observability)', () => {
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    defineElement();
+    vi.useRealTimers();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('dispatches oxpulse-chat:decrypt-error from the host on rendering an unsealError row', async () => {
+    // chat-sdk's classifyUnsealError distinguishes reason 'replay'|'auth'|'unknown'
+    // and attaches it as row.unsealError. On rendering such a row the host element
+    // must dispatch CustomEvent('oxpulse-chat:decrypt-error') with detail
+    // {roomId, msgId, seq, reason}, bubbling+composed — mirroring
+    // oxpulse-chat:attachment-error's wiring. The replay reason is the one that
+    // matters most on an untrusted server (replay-attack signature).
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room-decrypt');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(capturedOnMessage).not.toBeNull();
+
+    const events: CustomEvent[] = [];
+    el.addEventListener('oxpulse-chat:decrypt-error', (ev) => events.push(ev as CustomEvent));
+
+    capturedOnMessage!({
+      seq: 42,
+      msgId: 'msg-replay-1',
+      senderUid: 'other-user',
+      sealed: new ArrayBuffer(0),
+      // plaintext undefined — unsealError rows carry no plaintext
+      unsealError: 'replay',
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: null,
+      productMeta: null,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(events).toHaveLength(1);
+    const detail = events[0]!.detail as { roomId: string; msgId: string; seq: number; reason: string };
+    expect(detail.roomId).toBe('room-decrypt');
+    expect(detail.msgId).toBe('msg-replay-1');
+    expect(detail.seq).toBe(42);
+    expect(detail.reason).toBe('replay');
+    expect(events[0]!.bubbles).toBe(true);
+    expect(events[0]!.composed).toBe(true);
+
+    el.destroy();
+  });
+
+  it('decrypt-error is deduped once per msgId per widget lifetime across re-renders', async () => {
+    // A re-delivery of the same msgId (mutation SSE / dedupe upsert) re-renders
+    // the bubble via #updateBubble → #populateBubble, hitting the unsealError
+    // branch again. The event must fire only ONCE per msgId per widget lifetime.
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room-decrypt');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(capturedOnMessage).not.toBeNull();
+
+    const events: CustomEvent[] = [];
+    el.addEventListener('oxpulse-chat:decrypt-error', (ev) => events.push(ev as CustomEvent));
+
+    const row: MessageRow = {
+      seq: 7,
+      msgId: 'msg-dedup-1',
+      senderUid: 'other-user',
+      sealed: new ArrayBuffer(0),
+      unsealError: 'auth',
+      createdAt: new Date().toISOString(),
+      threadRootMsgId: null,
+      productRef: null,
+      productMeta: null,
+    };
+    capturedOnMessage!(row);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toHaveLength(1);
+
+    // Re-deliver the same msgId — #handleNewMessage upserts → #updateBubble
+    // re-renders → #populateBubble hits the unsealError branch again, but the
+    // dedup guard must suppress the second event.
+    capturedOnMessage!(row);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toHaveLength(1);
+
+    el.destroy();
+  });
+
+  it('decrypt-error fires for each distinct reason (replay, auth, unknown)', async () => {
+    let capturedOnMessage: ((row: MessageRow) => void) | null = null;
+    const client = makeMockClient();
+    (client.subscribe as ReturnType<typeof vi.fn>).mockImplementation(
+      (_roomId: string, args: { onMessage: (row: MessageRow) => void }) => {
+        capturedOnMessage = args.onMessage;
+        return () => {};
+      },
+    );
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room-decrypt');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(capturedOnMessage).not.toBeNull();
+
+    const reasons: string[] = [];
+    el.addEventListener('oxpulse-chat:decrypt-error', (ev) => {
+      reasons.push((ev as CustomEvent).detail.reason);
+    });
+
+    for (const reason of ['replay', 'auth', 'unknown'] as const) {
+      capturedOnMessage!({
+        seq: 1,
+        msgId: `msg-${reason}`,
+        senderUid: 'other-user',
+        sealed: new ArrayBuffer(0),
+        unsealError: reason,
+        createdAt: new Date().toISOString(),
+        threadRootMsgId: null,
+        productRef: null,
+        productMeta: null,
+      });
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(reasons).toEqual(['replay', 'auth', 'unknown']);
+
+    el.destroy();
+  });
+});
