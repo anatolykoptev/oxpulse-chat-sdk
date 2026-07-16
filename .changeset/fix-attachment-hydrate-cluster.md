@@ -1,5 +1,5 @@
 ---
-"@oxpulse/chat-widget": patch
+"@oxpulse/chat-widget": minor
 ---
 
 Attachment hydration cluster from the repo review council:
