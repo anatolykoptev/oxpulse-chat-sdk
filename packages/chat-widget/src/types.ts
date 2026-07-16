@@ -189,6 +189,13 @@ export interface WidgetEventMap {
   'oxpulse-chat:message-sent': CustomEvent<{ roomId: string; msgId: string }>;
   /** Fired when a named-write send attempt fails (non-recoverable, after error chip shown). */
   'oxpulse-chat:write-error': CustomEvent<WidgetError>;
+  /**
+   * Review finding #4: fired when an attachment's authenticated hydration
+   * reaches FINAL failure (after retries exhaust, or immediately for a
+   * permanent HTTP 403/404/410). Dispatched from the host element, bubbling +
+   * composed. Deduped to once per attachment per final failure (not per retry).
+   */
+  'oxpulse-chat:attachment-error': CustomEvent<{ msgId: string; attachmentId: string; reason: 'hydrate_failed' }>;
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────

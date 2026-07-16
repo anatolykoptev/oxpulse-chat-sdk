@@ -21,7 +21,7 @@ import {
   type WriteFailureReason,
 } from './types.js';
 import { THEME_CSS, applyTheme } from './ui/theme.js';
-import { MessageList } from './ui/message-list.js';
+import { MessageList, AttachmentFetchError } from './ui/message-list.js';
 import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEvent, ReactionEvent as WidgetReactionEvent } from './ui/message-list.js';
 import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
@@ -417,6 +417,24 @@ export class OxpulseChatElement extends HTMLElement {
     if (this.#config?.onWriteError) {
       this.#config.onWriteError({ op, reason });
     }
+  }
+
+  /**
+   * Review finding #4: dispatches `oxpulse-chat:attachment-error` from the
+   * widget host element when an attachment's authenticated hydration reaches
+   * FINAL failure (after retries exhaust, or immediately for a permanent
+   * 403/404/410). Mirrors #notifyWriteFailure's wiring (host-dispatched,
+   * bubbles+composed so an integrator on the embedding page can observe it).
+   * Dedup happens inside MessageList (once per attachment per final failure).
+   */
+  #notifyAttachmentError(msgId: string, attachmentId: string): void {
+    this.dispatchEvent(
+      new CustomEvent('oxpulse-chat:attachment-error', {
+        bubbles: true,
+        composed: true,
+        detail: { msgId, attachmentId, reason: 'hydrate_failed' },
+      }),
+    );
   }
 
   async #bootstrap(signal: AbortSignal): Promise<void> {
@@ -816,7 +834,12 @@ export class OxpulseChatElement extends HTMLElement {
             signal,
           });
           if (!resp.ok) {
-            throw new Error(`attachment fetch failed: HTTP ${resp.status}`);
+            // Review finding #2: throw a TYPED error carrying the HTTP status so
+            // hydrateMediaSrc's retry loop can skip retries for permanent statuses
+            // (403/404/410) exactly as its comment promises — a plain Error left
+            // the status only in the message string, uninspectable, so a gone/
+            // forbidden attachment triggered 3 pointless authed fetches.
+            throw new AttachmentFetchError(resp.status);
           }
           return resp.blob();
         },
@@ -1095,6 +1118,10 @@ export class OxpulseChatElement extends HTMLElement {
         // than re-implemented inside MessageList.
         onAuthExpired: () => this.#notifyTokenExpired(config.roomId),
         onWriteFailure: (op, reason, message) => this.#notifyWriteFailure(op, reason, message),
+        // Review finding #4: final attachment-hydration failure → dispatch
+        // `oxpulse-chat:attachment-error` from the host element (mirrors
+        // #notifyWriteFailure's oxpulse-chat:write-error wiring).
+        onAttachmentError: (msgId, attachmentId) => this.#notifyAttachmentError(msgId, attachmentId),
       });
 
       await this.#messageList.mount();

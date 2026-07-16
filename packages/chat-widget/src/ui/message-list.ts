@@ -26,6 +26,7 @@ import { TypingIndicator } from './typing-indicator.js';
 import { PresenceOverlay } from './presence-overlay.js';
 import { ReadReceipts } from './read-receipts.js';
 import { ThreadPanel, type ThreadRow } from './thread-panel.js';
+import { BackoffStrategy } from './reconnect.js';
 import type { ProductMeta, WriteFailureOp, WriteFailureReason } from '../types.js';
 import { classifyWriteFailureReason } from '../utils/auth.js';
 
@@ -190,6 +191,15 @@ export interface MessageListOptions {
    * integrator can count silent write failures.
    */
   onWriteFailure?: (op: WriteFailureOp, reason: WriteFailureReason, message: string) => void;
+  /**
+   * Review finding #4: fires when an attachment's authenticated hydration
+   * reaches FINAL failure (after retries exhaust, or immediately for a
+   * permanent HTTP status 403/404/410) — once per attachment per final
+   * failure, NOT per retry. The host element (element.ts) wires this to
+   * dispatch `oxpulse-chat:attachment-error` from the widget host element so
+   * an integrator can surface/telemetry a dead attachment.
+   */
+  onAttachmentError?: (msgId: string, attachmentId: string) => void;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -233,10 +243,41 @@ function renderUnsafePlaceholder(att: AttachmentMeta, container: HTMLElement, la
  * trackObjectUrl lets the caller revoke the created blob: URL on teardown.
  */
 // Issue #91: retry with backoff on transient authed-fetch failures (429/401/network).
-// Up to 3 attempts with 500ms / 1000ms / 2000ms backoff. On final failure, set a
-// data attribute so CSS can show a placeholder instead of a bare broken-image icon.
+// Up to 3 retries. Delays come from the shared BackoffStrategy (reconnect.ts) — the
+// same class the widget's Reconnector uses — replacing a hardcoded [500,1000,2000]
+// array. On final failure, set a data attribute so CSS can show a placeholder
+// instead of a bare broken-image icon, and notify the host via onHydrateFailed.
 const HYDRATE_MAX_RETRIES = 3;
-const HYDRATE_BACKOFF_MS = [500, 1000, 2000];
+const HYDRATE_BACKOFF = new BackoffStrategy();
+
+/**
+ * Review finding #2: typed error carrying the HTTP status from the authed
+ * attachment fetch, so the retry loop can distinguish permanent (403/404/410 —
+ * the attachment is gone/forbidden) from transient (429/401/network) failures
+ * and skip pointless retries. Thrown by the host element's fetchAttachmentBlob
+ * bridge (element.ts); the retry loop inspects it via isPermanentHydrateError().
+ */
+export class AttachmentFetchError extends Error {
+  readonly status: number;
+  constructor(status: number, message?: string) {
+    super(message ?? `attachment fetch failed: HTTP ${status}`);
+    this.name = 'AttachmentFetchError';
+    this.status = status;
+  }
+}
+
+/** Permanent HTTP statuses — retrying won't help (the resource is gone/forbidden). */
+const PERMANENT_HYDRATE_STATUSES = new Set([403, 404, 410]);
+
+/** True when `err` carries a permanent HTTP status (AttachmentFetchError or any
+ *  duck-typed error with a numeric `status` property in the permanent set). */
+function isPermanentHydrateError(err: unknown): boolean {
+  if (err && typeof err === 'object' && 'status' in err) {
+    const status = (err as { status: unknown }).status;
+    if (typeof status === 'number') return PERMANENT_HYDRATE_STATUSES.has(status);
+  }
+  return false;
+}
 
 function hydrateMediaSrc(
   el: HTMLImageElement | HTMLAudioElement,
@@ -244,13 +285,17 @@ function hydrateMediaSrc(
   hydrate: ((url: string, signal?: AbortSignal) => Promise<Blob>) | undefined,
   trackObjectUrl: ((url: string) => void) | undefined,
   signal: AbortSignal | undefined,
+  msgId: string,
+  onHydrateFailed?: (msgId: string, attachmentId: string) => void,
 ): void {
   if (!hydrate) {
     el.src = att.url;
     return;
   }
 
-  const attempt = (retriesLeft: number): void => {
+  // attemptNum: 0 = initial call (immediate), 1..N = scheduled retries.
+  // BackoffStrategy.delayMs(n) gives the delay BEFORE the n-th attempt.
+  const attempt = (retriesLeft: number, attemptNum: number): void => {
     hydrate(att.url, signal)
       .then((blob) => {
         if (signal?.aborted) return;
@@ -262,24 +307,28 @@ function hydrateMediaSrc(
       .catch((err: unknown) => {
         if (signal?.aborted) return;
         // Issue #91: retry on transient failures (429/401/network), but not on
-        // aborts or permanent errors (404/403 — the attachment is gone/forbidden).
+        // aborts or permanent errors (404/403/410 — the attachment is gone/forbidden).
         const isAbort = err instanceof DOMException && err.name === 'AbortError';
         if (isAbort) return;
 
-        if (retriesLeft > 0) {
-          const backoff = HYDRATE_BACKOFF_MS[HYDRATE_MAX_RETRIES - retriesLeft] ?? 1000;
-          setTimeout(() => attempt(retriesLeft - 1), backoff);
+        const permanent = isPermanentHydrateError(err);
+        if (!permanent && retriesLeft > 0) {
+          const backoff = HYDRATE_BACKOFF.delayMs(attemptNum + 1);
+          setTimeout(() => attempt(retriesLeft - 1, attemptNum + 1), backoff);
         } else {
           // Final failure — mark for CSS placeholder + fall back to direct URL
           // (may work for non-authed endpoints; worst case shows broken-image
-          // but with a data attribute for styling).
+          // but with a data attribute for styling). Notify the host once per
+          // attachment per final failure (not per retry) so an integrator can
+          // surface/telemetry the dead attachment.
           el.setAttribute('data-hydrate-failed', 'true');
           el.src = att.url;
+          onHydrateFailed?.(msgId, att.id);
         }
       });
   };
 
-  attempt(HYDRATE_MAX_RETRIES);
+  attempt(HYDRATE_MAX_RETRIES, 0);
 }
 
 function isImageAttachment(att: AttachmentMeta): boolean {
@@ -309,11 +358,13 @@ function buildAttachmentImg(
   hydrate?: (url: string, signal?: AbortSignal) => Promise<Blob>,
   trackObjectUrl?: (url: string) => void,
   signal?: AbortSignal,
+  msgId?: string,
+  onHydrateFailed?: (msgId: string, attachmentId: string) => void,
 ): HTMLImageElement | null {
   if (!isSafeAttachmentUrl(att.url)) return null;
 
   const img = document.createElement('img');
-  hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal);
+  hydrateMediaSrc(img, att, hydrate, trackObjectUrl, signal, msgId ?? '', onHydrateFailed);
   // CM1: alt is a DOM property — text-safe, no escaping needed
   img.alt = att.filename;
   img.setAttribute('loading', 'lazy');
@@ -330,11 +381,17 @@ function buildAttachmentImg(
       window.open(att.url, '_blank', 'noopener,noreferrer');
       return;
     }
-    hydrate(att.url).then((blob) => {
+    // Review finding #3: thread the SAME AbortSignal hydrateMediaSrc uses and
+    // guard signal.aborted before trackObjectUrl/window.open — a click resolving
+    // AFTER destroy() would otherwise push a fresh blob: URL into the already-
+    // swept #attachmentObjectUrls map (never revoked) and open a stale tab.
+    hydrate(att.url, signal).then((blob) => {
+      if (signal?.aborted) return;
       const objectUrl = URL.createObjectURL(blob);
       trackObjectUrl?.(objectUrl);
       window.open(objectUrl, '_blank', 'noopener,noreferrer');
     }).catch(() => {
+      if (signal?.aborted) return;
       // Fallback to direct URL (may 401, but better than silent no-op)
       window.open(att.url, '_blank', 'noopener,noreferrer');
     });
@@ -354,6 +411,8 @@ function renderAttachmentCollage(
   hydrate?: (url: string, signal?: AbortSignal) => Promise<Blob>,
   trackObjectUrl?: (url: string) => void,
   signal?: AbortSignal,
+  msgId?: string,
+  onHydrateFailed?: (msgId: string, attachmentId: string) => void,
 ): HTMLElement {
   const count = attachments.length;
   const grid = document.createElement('div');
@@ -394,7 +453,7 @@ function renderAttachmentCollage(
       );
     }
 
-    const img = buildAttachmentImg(att, lang, hydrate, trackObjectUrl, signal);
+    const img = buildAttachmentImg(att, lang, hydrate, trackObjectUrl, signal, msgId, onHydrateFailed);
     if (!img) {
       renderUnsafePlaceholder(att, tile, lang);
       grid.appendChild(tile);
@@ -428,6 +487,8 @@ function renderAttachment(
   trackObjectUrl?: (url: string) => void,
   signal?: AbortSignal,
   trackVoiceBubble?: (bubble: VoiceBubble) => void,
+  msgId?: string,
+  onHydrateFailed?: (msgId: string, attachmentId: string) => void,
 ): HTMLElement {
   // CM1: use raw att.filename for DOM property/textContent assignments — these treat
   // the value as text, not HTML. escapeHtml() is only needed for innerHTML/setAttribute.
@@ -439,7 +500,7 @@ function renderAttachment(
     const wrap = document.createElement('div');
     wrap.className = 'oxp-attachment-image';
 
-    const img = buildAttachmentImg(att, lang, hydrate, trackObjectUrl, signal);
+    const img = buildAttachmentImg(att, lang, hydrate, trackObjectUrl, signal, msgId, onHydrateFailed);
     if (!img) {
       renderUnsafePlaceholder(att, wrap, lang);
       return wrap;
@@ -523,7 +584,12 @@ function renderAttachment(
       window.open(att.url, '_blank', 'noopener,noreferrer');
       return;
     }
-    hydrate(att.url).then((blob) => {
+    // Review finding #3: thread the AbortSignal + guard signal.aborted before
+    // trackObjectUrl/the synthetic download click — a click resolving AFTER
+    // destroy() would push a fresh blob: URL into the already-swept
+    // #attachmentObjectUrls map (never revoked) and trigger a stale download.
+    hydrate(att.url, signal).then((blob) => {
+      if (signal?.aborted) return;
       const objectUrl = URL.createObjectURL(blob);
       trackObjectUrl?.(objectUrl);
       const tmpLink = document.createElement('a');
@@ -533,6 +599,7 @@ function renderAttachment(
       tmpLink.click();
       document.body.removeChild(tmpLink);
     }).catch(() => {
+      if (signal?.aborted) return;
       // Fallback to direct URL (may 401, but better than silent no-op)
       window.open(att.url, '_blank', 'noopener,noreferrer');
     });
@@ -774,6 +841,12 @@ export class MessageList {
   /** Write-401 fix (issue #78): failure-counter hook — fires on every write
    *  failure (not just auth), classified by op + reason. */
   #onWriteFailure?: (op: WriteFailureOp, reason: WriteFailureReason, message: string) => void;
+  /** Review finding #4: host callback for final attachment-hydration failure. */
+  #onAttachmentError?: (msgId: string, attachmentId: string) => void;
+  /** Review finding #4: dedup set — fire onAttachmentError once per (msgId,
+   *  attachmentId) per final failure, not per retry or per re-render of the
+   *  same attachment. Cleared in destroy(). */
+  #firedAttachmentErrors: Set<string> = new Set();
   /** issue #67: blob: object URLs created by hydrateMediaSrc() (authenticated
    *  attachment fetch), keyed by msgId — revoked in #evictOldMessages() (same
    *  lifecycle as #teardownReactionTrigger/#pulseTimers for an evicted row) so
@@ -801,6 +874,7 @@ export class MessageList {
     this.#onSetReply = opts.onSetReply;
     this.#onAuthExpired = opts.onAuthExpired;
     this.#onWriteFailure = opts.onWriteFailure;
+    this.#onAttachmentError = opts.onAttachmentError;
     this.#reactionsEnabled = opts.reactionsEnabled ?? true;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
@@ -975,6 +1049,8 @@ export class MessageList {
       for (const url of urls) URL.revokeObjectURL(url);
     }
     this.#attachmentObjectUrls.clear();
+    // Review finding #4: clear the attachment-error dedup set on teardown.
+    this.#firedAttachmentErrors.clear();
     // Phase 2: destroy every surviving VoiceBubble player (revoke its
     // objectURL + null audio handlers) — same final-backstop contract.
     for (const bubbles of this.#voiceBubbles.values()) {
@@ -991,6 +1067,15 @@ export class MessageList {
     const existing = this.#attachmentObjectUrls.get(msgId);
     if (existing) existing.push(url);
     else this.#attachmentObjectUrls.set(msgId, [url]);
+  };
+  /** Review finding #4: bound callback for hydrateMediaSrc's final-failure path.
+   *  Dedupes per (msgId, attachmentId) so a re-render of the same attachment
+   *  (mutation SSE) doesn't re-fire, then forwards to the host callback. */
+  readonly #notifyAttachmentError = (msgId: string, attachmentId: string): void => {
+    const key = `${msgId}:${attachmentId}`;
+    if (this.#firedAttachmentErrors.has(key)) return;
+    this.#firedAttachmentErrors.add(key);
+    this.#onAttachmentError?.(msgId, attachmentId);
   };
   /** Phase 2: records a VoiceBubble for a msgId so eviction/destroy can
    *  destroy its headless player (revoke objectURL + null audio handlers).
@@ -2022,6 +2107,8 @@ export class MessageList {
             this.#client.fetchAttachmentBlob,
             (url) => this.#trackAttachmentObjectUrl(row.msgId, url),
             this.#signal,
+            row.msgId,
+            this.#notifyAttachmentError,
           ),
         );
       } else {
@@ -2034,6 +2121,8 @@ export class MessageList {
               (url) => this.#trackAttachmentObjectUrl(row.msgId, url),
               this.#signal,
               (bubble) => this.#trackVoiceBubble(row.msgId, bubble),
+              row.msgId,
+              this.#notifyAttachmentError,
             ),
           );
         }

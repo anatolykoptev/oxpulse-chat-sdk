@@ -135,6 +135,13 @@ element.addEventListener('oxpulse-chat:token-expired', async (ev) => {
   const newJwt = await fetchFreshToken(ev.detail.roomId);
   element.refreshToken(newJwt);
 });
+
+element.addEventListener('oxpulse-chat:attachment-error', (ev) => {
+  // Fired when an authenticated attachment fetch reaches final failure (after
+  // retries exhaust, or immediately for a permanent 403/404/410). Fires once
+  // per attachment per final failure — not per retry.
+  console.warn('Attachment unavailable:', ev.detail.msgId, ev.detail.attachmentId, ev.detail.reason);
+});
 ```
 
 ## Origin allowlist
