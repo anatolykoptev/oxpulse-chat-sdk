@@ -535,6 +535,7 @@ export class OxpulseChatElement extends HTMLElement {
           onReaction?: (event: SDKReactionEvent) => void;
           onTyping?: (event: { userId: string; ttlSecs?: number }) => void;
           onPresence?: (event: { userId: string; lastSeenAt: string }) => void;
+          onReadReceipt?: (event: { userId: string; lastSeq: number }) => void;
         }): () => void;
         sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
@@ -557,6 +558,8 @@ export class OxpulseChatElement extends HTMLElement {
         sendPresence?(roomId: string): Promise<void>;
         /** #121: fetch presence snapshot. */
         getPresence?(roomId: string): Promise<Array<{ userId: string; lastSeenAt: string }>>;
+        /** #122: mark messages up to seq as read. */
+        markRead?(roomId: string, seq: number): Promise<void>;
         readonly baseUrl?: string;
         readonly jwt?: string;
       }

@@ -24,6 +24,7 @@ import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
 import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
 import { TypingIndicator } from './typing-indicator.js';
 import { PresenceOverlay } from './presence-overlay.js';
+import { ReadReceipts } from './read-receipts.js';
 import type { ProductMeta, WriteFailureOp, WriteFailureReason } from '../types.js';
 import { classifyWriteFailureReason } from '../utils/auth.js';
 
@@ -106,6 +107,7 @@ export interface MessageListClient {
     onRosterSignal?: () => void;
     onTyping?: (event: { userId: string; ttlSecs?: number }) => void;
     onPresence?: (event: { userId: string; lastSeenAt: string }) => void;
+    onReadReceipt?: (event: { userId: string; lastSeq: number }) => void;
   }): () => void;
   /** Optional — reactions support. If absent, reactions are disabled. */
   getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
@@ -120,6 +122,8 @@ export interface MessageListClient {
   getPresence?(roomId: string): Promise<Array<{ userId: string; lastSeenAt: string }>>;
   /** #121: send presence heartbeat. Fire-and-forget. */
   sendPresence?(roomId: string): Promise<void>;
+  /** #122: mark messages up to seq as read. */
+  markRead?(roomId: string, seq: number): Promise<void>;
   /**
    * issue #67: fetch an attachment blob WITH authentication. The attachment
    * GET route is JWT-authenticated (Authorization: Bearer only — no signed
@@ -639,6 +643,8 @@ export class MessageList {
   #typingIndicator: TypingIndicator | null = null;
   /** #121: presence overlay — tracks online users + renders avatar dots. */
   #presenceOverlay: PresenceOverlay | null = null;
+  /** #122: read receipts — checkmarks on own messages. */
+  #readReceipts: ReadReceipts | null = null;
   /**
    * P2 design-empirical review 2026-07-14: re-pins scroll to bottom when
    * #listEl's own clientHeight shrinks (the composer — a sibling in the
@@ -774,6 +780,12 @@ export class MessageList {
         if (this.#signal.aborted) return;
         this.#presenceOverlay?.setSnapshot(entries);
       }).catch(() => {});
+    // #122: mount read receipts overlay for own-message checkmarks.
+    this.#readReceipts = new ReadReceipts({
+      lang: this.#lang,
+      selfUid: this.#selfUid,
+      signal: this.#signal,
+    });
     }
 
     // P2: re-pin to bottom when a composer resize (reply-bar toggle) shrinks
@@ -868,6 +880,9 @@ export class MessageList {
     // #121: destroy presence overlay (clears heartbeat + dots).
     this.#presenceOverlay?.destroy();
     this.#presenceOverlay = null;
+    // #122: destroy read receipts overlay.
+    this.#readReceipts?.destroy();
+    this.#readReceipts = null;
     // issue #67: final backstop — revoke every blob: URL still tracked (any
     // row that survived to destroy() without being evicted first). Per-row
     // revocation on eviction happens in #evictOldMessages().
@@ -1064,6 +1079,10 @@ export class MessageList {
     }
 
     if (wasPinned) this.#scrollToBottom();
+    // #122: mark new messages from others as read (auto-read on view).
+    if (!isSelfMatch(row.senderUid, this.#selfUid) && this.#client.markRead && row.seq > 0) {
+      void this.#client.markRead(this.#roomId, row.seq).catch(() => {});
+    }
   }
 
   /**
@@ -1719,6 +1738,10 @@ export class MessageList {
       this.#presenceOverlay?.registerAvatar(row.senderUid, rowEl.querySelector('.oxp-bubble-avatar') as HTMLElement);
     }
     rowEl.appendChild(el);
+    // #122: register own-message bubbles for read receipt checkmarks.
+    if (isSelf && row.seq > 0) {
+      this.#readReceipts?.registerBubble(row.msgId, row.seq, el);
+    }
     return rowEl;
   }
 
@@ -2131,6 +2154,8 @@ export class MessageList {
       onTyping: this.#typingIndicator ? (event) => this.#typingIndicator!.addTyping(event.userId, event.ttlSecs) : undefined,
       // #121: presence — forward SSE presence events to the overlay.
       onPresence: this.#presenceOverlay ? (event) => this.#presenceOverlay!.updatePresence(event.userId, event.lastSeenAt) : undefined,
+      // #122: read receipts — forward SSE read_receipt events to the overlay.
+      onReadReceipt: this.#readReceipts ? (event) => this.#readReceipts!.onReadReceipt(event.userId, event.lastSeq) : undefined,
     });
 
     if (this.#client.getReactions && this.#order.length > 0) {

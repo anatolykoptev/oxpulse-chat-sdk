@@ -435,6 +435,25 @@ export const THEME_CSS = `
   margin-top: 2px;
 }
 
+/* ── Read receipts (#122) ────────────────────────────────────────────── */
+.oxp-read-receipt {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.65rem;
+  color: var(--oxp-fg-secondary);
+  align-self: flex-end;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+.oxp-read-receipt svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.oxp-read-receipt[data-status='read'] { color: var(--oxp-accent, #3b82f6); }
+.oxp-read-receipt[data-status='read'] svg { color: var(--oxp-accent, #3b82f6); }
+
 .oxp-tombstone {
   color: var(--oxp-muted);
   font-style: italic;
