@@ -26,7 +26,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster } from '@oxpulse/chat-sdk';
+import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
@@ -538,6 +538,8 @@ export class OxpulseChatElement extends HTMLElement {
           onReadReceipt?: (event: { userId: string; lastSeq: number }) => void;
         }): () => void;
         sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
+        // Issue #115: optional — enables optimistic echo for E2EE consumers.
+        sendTextOptimistic?(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: unknown }): { msgId: string; done: Promise<{ seq: number; msgId: string }>; onPending(cb: () => void): unknown; onSucceeded(cb: (r: { seq: number; msgId: string }) => void): unknown; onFailed(cb: (e: unknown) => void): unknown };
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
@@ -967,11 +969,35 @@ export class OxpulseChatElement extends HTMLElement {
           }
         }
 
+        // Issue #115: Optimistic echo — insert a local row into the message list
+        // BEFORE the server round-trip so the user sees their message instantly.
+        // When the server SSE event arrives with the same msgId, #handleNewMessage
+        // deduplicates by msgId and updates the row in place (seq, createdAt, etc.).
+        const optimisticEcho = (roomId: string, text: string, args: SendTextArgs | undefined, msgId: string): void => {
+          if (!self.#messageList) return;
+          const optimisticRow: MessageRow = {
+            seq: 0,
+            msgId,
+            senderUid: resolvedSelfUid ?? '',
+            sealed: new ArrayBuffer(0),
+            plaintext: new TextEncoder().encode(text).buffer as ArrayBuffer,
+            createdAt: new Date().toISOString(),
+            threadRootMsgId: args?.threadRootMsgId ?? null,
+            productRef: args?.productRef ?? null,
+            productMeta: args?.productMeta ?? null,
+            text,
+          };
+          self.#messageList.handleMessage(optimisticRow);
+        };
+
         const composerClient = {
-          sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> =>
+          sendText: (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> => {
+            // Issue #115: generate msgId client-side for optimistic echo dedup.
+            const msgId = generateUUID();
+            optimisticEcho(roomId, text, args, msgId);
             // Noted (PR #88 review, same class as sendAttachmentMessage below):
             // spread args first so senderUid/text can't be silently overridden.
-            capturedSendClient.sendText(roomId, { ...args, senderUid: resolvedSelfUid ?? '', text }).then((res) => {
+            return capturedSendClient.sendText(roomId, { ...args, msgId, senderUid: resolvedSelfUid ?? '', text }).then((res) => {
               // Dispatch message-sent event on success
               self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                 bubbles: true,
@@ -995,7 +1021,8 @@ export class OxpulseChatElement extends HTMLElement {
               }
               // Re-throw so the Composer's catch path fires (renders error chip + generic error event).
               throw err;
-            }),
+            });
+          },
           // issue #67: attachments wired end-to-end. Split into uploadAttachment
           // (presign+PUT only) and sendAttachmentMessage (encode+send) so the
           // attachmentId(s) can be staged before the composer sends the message.
@@ -1003,6 +1030,32 @@ export class OxpulseChatElement extends HTMLElement {
           // present); paperclip/paste/drag-drop in composer.ts feature-detect this.
           uploadAttachment: attachmentClient ? uploadAttachment : undefined,
           sendAttachmentMessage: attachmentClient ? sendAttachmentMessage : undefined,
+          // Issue #115: wire sendTextOptimistic for E2EE consumers. The SDK returns
+          // an OptimisticHandle (callback chain + .done promise), but the Composer
+          // expects Promise<{ msgId: string }>. Wrap it: resolve on success, reject
+          // on failure. The optimistic row is already inserted by the SDK's outbox
+          // path — no need for a separate optimisticEcho call here.
+          sendTextOptimistic: typeof capturedSendClient.sendTextOptimistic === 'function'
+            ? (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> => {
+                const handle = capturedSendClient.sendTextOptimistic!(roomId, { ...args, senderUid: resolvedSelfUid ?? '', text });
+                return handle.done.then((res) => {
+                  self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
+                    bubbles: true,
+                    composed: true,
+                    detail: { roomId, msgId: res.msgId },
+                  }));
+                  return { msgId: res.msgId };
+                }).catch((err: unknown) => {
+                  const reason = classifyWriteFailureReason(err);
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  self.#notifyWriteFailure('send', reason, errMsg);
+                  if (reason === 'auth_expired') {
+                    self.#notifyTokenExpired(config!.roomId);
+                  }
+                  throw err;
+                });
+              }
+            : undefined,
           // #120: typing indicator — forward to the SDK client's sendTyping.
           sendTyping: capturedSendClient.sendTyping?.bind(capturedSendClient),
         };
