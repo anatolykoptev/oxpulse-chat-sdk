@@ -8,6 +8,8 @@
  * All validation is pure — no DOM access — so tests run under jsdom without stubs.
  */
 
+import { readBlobAsDataUrl } from '@oxpulse/voice-core';
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /** Whitelist of accepted image MIME types. */
@@ -164,20 +166,6 @@ export function computeResizedDimensions(
     width: Math.round(srcWidth * ratio),
     height: Math.round(srcHeight * ratio),
   };
-}
-
-/** Read a Blob into a data: URL via FileReader. */
-function readBlobAsDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));
-    reader.onload = () => {
-      const r = reader.result;
-      if (typeof r === 'string') resolve(r);
-      else reject(new Error('FileReader returned non-string'));
-    };
-    reader.readAsDataURL(blob);
-  });
 }
 
 /**

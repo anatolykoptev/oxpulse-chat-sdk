@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Composer } from '../ui/composer.js';
 import { MAX_BODY_CHARS } from '../utils/textfield-helpers.js';
 import { createVoiceRecorder, type VoiceRecorder } from '@oxpulse/voice-core';
+import { makeStubClient } from './helpers.js';
 
 vi.mock('@oxpulse/voice-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@oxpulse/voice-core')>();
@@ -27,32 +28,6 @@ vi.mock('@oxpulse/voice-core', async (importOriginal) => {
 });
 
 // ── Stub client ────────────────────────────────────────────────────────────────
-
-function makeStubClient(opts: {
-  sendTextResolve?: { msgId: string };
-  sendTextReject?: Error;
-  hasE2ee?: boolean;
-  sendTextOptimisticResolve?: { msgId: string };
-}) {
-  return {
-    list: (_roomId: string, _args: { limit: number }) =>
-      Promise.resolve({ items: [], hasNext: false }),
-    subscribe: (_roomId: string, _args: unknown) => () => {},
-    sendText: vi.fn(() =>
-      opts.sendTextReject
-        ? Promise.reject(opts.sendTextReject)
-        : Promise.resolve(opts.sendTextResolve ?? { msgId: 'msg1' }),
-    ),
-    ...(opts.hasE2ee
-      ? {
-          sendTextOptimistic: vi.fn(() =>
-            Promise.resolve(opts.sendTextOptimisticResolve ?? { msgId: 'opt1' }),
-          ),
-          e2ee: true,
-        }
-      : {}),
-  };
-}
 
 /**
  * Slice 4/5: stage-then-send attachment stubs. uploadAttachment resolves

@@ -7,6 +7,7 @@ export {
   validateVoiceBlob,
   pickMime,
   createVoiceRecorder,
+  readBlobAsDataUrl,
 } from './recorder.ts';
 export type {
   VoiceRecorderResult,
