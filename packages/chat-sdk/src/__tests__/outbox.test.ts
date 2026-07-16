@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
 import { SDKChatError } from '../errors.js';
 import { enqueue, pending, dequeue } from '../outbox.js';
+import type { PendingMessage } from '../outbox.js';
 import type { CryptoProvider, SealContext } from '../types.js';
 
 const BASE_URL = 'http://x';
@@ -81,6 +82,65 @@ describe('outbox', () => {
     const after = await pending('room1');
     expect(after).toHaveLength(1);
     expect(after[0]!.msgId).toBe('msg-b');
+  });
+
+  // Council finding (HIGH, merge-gating): enqueue/dequeue each do a separate
+  // get() -> modify -> set() over two independent idb-keyval transactions, with no
+  // serialization. Two un-awaited sendTextOptimistic calls for the same room (Enter
+  // hit twice fast) both read the same stale array, then the second set() clobbers
+  // the first — one message is silently dropped from the outbox forever.
+  it('two concurrent enqueues for the same room do not lose a message (lost-update race)', async () => {
+    const msgA: PendingMessage = {
+      msgId: 'race-a',
+      roomId: 'room-race',
+      senderUid: 'u1',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    };
+    const msgB: PendingMessage = {
+      msgId: 'race-b',
+      roomId: 'room-race',
+      senderUid: 'u1',
+      sealedB64: 'BB==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    };
+
+    // Fire both without awaiting either individually first — the un-awaited
+    // double-Enter interleave the council flagged.
+    await Promise.all([enqueue('room-race', msgA), enqueue('room-race', msgB)]);
+
+    const queued = await pending('room-race');
+    expect(queued.map((m) => m.msgId).sort()).toEqual(['race-a', 'race-b']);
+  });
+
+  it('concurrent enqueue + dequeue of different messages does not drop the surviving message', async () => {
+    await enqueue('room-race2', {
+      msgId: 'existing',
+      roomId: 'room-race2',
+      senderUid: 'u1',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+
+    // Concurrently remove 'existing' and add 'new-msg' — neither op should clobber
+    // the other's write.
+    await Promise.all([
+      dequeue('room-race2', 'existing'),
+      enqueue('room-race2', {
+        msgId: 'new-msg',
+        roomId: 'room-race2',
+        senderUid: 'u1',
+        sealedB64: 'BB==',
+        attempts: 0,
+        enqueuedAt: Date.now(),
+      }),
+    ]);
+
+    const queued = await pending('room-race2');
+    expect(queued.map((m) => m.msgId)).toEqual(['new-msg']);
   });
 
   it('fails after MAX_RETRIES on persistent network error', async () => {
