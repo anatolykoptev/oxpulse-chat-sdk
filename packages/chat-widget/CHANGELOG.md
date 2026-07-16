@@ -1,5 +1,58 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.21.0
+
+### Minor Changes
+
+- 88e9ec3: Host-visible observability events from the review council (observability lens):
+
+  - new `oxpulse-chat:decrypt-error` CustomEvent (deduped once per msgId per
+    widget lifetime) fires when a row carrying an `unsealError` is rendered,
+    with detail `{roomId, msgId, seq, reason}` where reason is chat-sdk's
+    classifyUnsealError class `'replay' | 'auth' | 'unknown'` — a
+    replay-attack signature and a benign timeout are no longer
+    indistinguishable to the host;
+  - new `oxpulse-chat:reconnect-exhausted` CustomEvent fires when the
+    Reconnector gives up after MAX_ATTEMPTS (10) retries, with detail
+    `{roomId, attempts}` — a permanently-dead room is no longer invisible to
+    host monitoring (contrast `oxpulse-chat:token-expired` which fires on
+    auth expiry; this is the network-exhaustion counterpart);
+  - README Events section backfilled with the previously-undocumented
+    `oxpulse-chat:write-error` and `oxpulse-chat:message-sent` events plus
+    the two new events, and an events reference table.
+
+- e31cb3a: Attachment hydration cluster from the repo review council:
+
+  - final hydration failure now renders a styled placeholder
+    (`[data-hydrate-failed='true']` selector was shipped without any CSS
+    consumer — the PR #91 placeholder feature was a silent no-op);
+  - permanent 403/404/410 responses no longer burn 3 pointless authed
+    retries before the direct-URL fallback (typed `AttachmentFetchError`
+    carries the HTTP status);
+  - authed download / open-in-tab click handlers now thread the widget's
+    `AbortSignal`, so a click resolving after `destroy()` no longer leaks a
+    `blob:` URL;
+  - a new `oxpulse-chat:attachment-error` CustomEvent (deduped per
+    attachment) fires on final hydration failure, documented in the README;
+  - hydration retry timing now reuses the shared `BackoffStrategy` instead
+    of a third hand-rolled backoff curve.
+
+### Patch Changes
+
+- 236e387: `readBlobAsDataUrl` is now exported from `@oxpulse/voice-core`'s public
+  surface; `@oxpulse/chat-widget` consumes it from there instead of carrying
+  a byte-identical private copy (drift-vector dedup). No behavior change.
+- 1f02d4f: Restore the `offsetHeight || viewportHeight` fallback in
+  `computeFloatingPosition` that the floating-position dedup (PR #157)
+  dropped: with a zero-height (not-yet-laid-out or collapsed) container the
+  below-flip clamp collapsed popover placement to the margin. Real rendered
+  containers are unaffected.
+- Updated dependencies [236e387]
+- Updated dependencies [00960c0]
+- Updated dependencies [e7cfbdf]
+  - @oxpulse/voice-core@0.3.0
+  - @oxpulse/chat-sdk@3.0.4
+
 ## 0.20.10
 
 ### Patch Changes

@@ -1,5 +1,22 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.0.4
+
+### Patch Changes
+
+- 00960c0: Make outbox enqueue/dequeue atomic. Both previously did a read-modify-write
+  over two separate idb-keyval transactions, so two concurrent un-awaited
+  sends for the same room could silently drop a queued message from the
+  outbox (lost-update race) — if that message's send then failed
+  transiently, it was never retried after reload (silent E2EE message
+  loss). Now uses idb-keyval `update()` — a single readwrite IndexedDB
+  transaction, atomic within a tab and across tabs.
+- e7cfbdf: Escalate reconnect backoff on a connect-then-drop flap. `es.onerror`
+  previously re-entered at attempt 0 every cycle, so a server that accepts
+  the SSE stream and immediately drops it was retried at ~1 request/second
+  indefinitely. Consecutive drops now escalate the backoff; a stream that
+  delivers a frame resets the counter so a genuine recovery reconnects fast.
+
 ## 3.0.3
 
 ### Patch Changes

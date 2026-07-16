@@ -1,5 +1,13 @@
 # @oxpulse/voice-core
 
+## 0.3.0
+
+### Minor Changes
+
+- 236e387: `readBlobAsDataUrl` is now exported from `@oxpulse/voice-core`'s public
+  surface; `@oxpulse/chat-widget` consumes it from there instead of carrying
+  a byte-identical private copy (drift-vector dedup). No behavior change.
+
 ## 0.2.0
 
 ### Minor Changes

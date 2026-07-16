@@ -1,6 +1,6 @@
 {
   "name": "@oxpulse/voice-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OxPulse voice-core — shared framework-agnostic voice primitives (recorder, waveform, player).",
   "license": "AGPL-3.0-or-later",
   "author": "Anatoly Koptev",
