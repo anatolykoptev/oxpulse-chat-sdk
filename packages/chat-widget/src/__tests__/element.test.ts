@@ -951,6 +951,9 @@ describe('OxpulseChatElement — W2.2 slice 5 token refresh + reconnect', () => 
   });
 
   afterEach(() => {
+    // Restore real timers even if a fake-timer test throws mid-body — a leaked
+    // fake-timer state cascades 5s timeouts into every later timer-dependent test.
+    vi.useRealTimers();
     if (container.parentNode) container.parentNode.removeChild(container);
   });
 
