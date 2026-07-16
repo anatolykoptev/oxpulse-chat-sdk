@@ -324,8 +324,20 @@ function buildAttachmentImg(
   );
   img.style.cursor = 'pointer';
   img.addEventListener('click', () => {
-    // CB1: URL already validated above — safe to use
-    window.open(att.url, '_blank', 'noopener,noreferrer');
+    // Issue #84: window.open can't attach auth headers — use authed fetch + blob.
+    // When no hydrate bridge is wired, fall back to direct window.open (test envs).
+    if (!hydrate) {
+      window.open(att.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    hydrate(att.url).then((blob) => {
+      const objectUrl = URL.createObjectURL(blob);
+      trackObjectUrl?.(objectUrl);
+      window.open(objectUrl, '_blank', 'noopener,noreferrer');
+    }).catch(() => {
+      // Fallback to direct URL (may 401, but better than silent no-op)
+      window.open(att.url, '_blank', 'noopener,noreferrer');
+    });
   });
   return img;
 }
@@ -488,6 +500,9 @@ function renderAttachment(
 
   const link = document.createElement('a');
   link.className = 'oxp-attachment-file';
+  // Issue #84: keep href as att.url for non-authed environments (test mocks,
+  // non-JWT endpoints). When hydrate is wired, the click is intercepted and
+  // the authed fetch + blob download replaces the default navigation.
   link.href = att.url;
   // CM1: download is a DOM property — text-safe, no escaping needed
   link.download = filename;
@@ -500,6 +515,28 @@ function renderAttachment(
   );
   // CM1: textContent is text-safe — assign raw filename (no escapeHtml)
   link.textContent = `${filename} (${formatSizeKb(att.sizeBytes)})`;
+  // Issue #84: intercept click for authed download
+  link.addEventListener('click', (ev: MouseEvent) => {
+    ev.preventDefault();
+    // When no hydrate bridge is wired, fall back to direct URL (test envs)
+    if (!hydrate) {
+      window.open(att.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    hydrate(att.url).then((blob) => {
+      const objectUrl = URL.createObjectURL(blob);
+      trackObjectUrl?.(objectUrl);
+      const tmpLink = document.createElement('a');
+      tmpLink.href = objectUrl;
+      tmpLink.download = filename;
+      document.body.appendChild(tmpLink);
+      tmpLink.click();
+      document.body.removeChild(tmpLink);
+    }).catch(() => {
+      // Fallback to direct URL (may 401, but better than silent no-op)
+      window.open(att.url, '_blank', 'noopener,noreferrer');
+    });
+  });
   wrap.appendChild(link);
   return wrap;
 }
