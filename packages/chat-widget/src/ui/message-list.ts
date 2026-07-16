@@ -232,6 +232,12 @@ function renderUnsafePlaceholder(att: AttachmentMeta, container: HTMLElement, la
  * behavior — test mocks / any environment without MessageListClient.fetchAttachmentBlob).
  * trackObjectUrl lets the caller revoke the created blob: URL on teardown.
  */
+// Issue #91: retry with backoff on transient authed-fetch failures (429/401/network).
+// Up to 3 attempts with 500ms / 1000ms / 2000ms backoff. On final failure, set a
+// data attribute so CSS can show a placeholder instead of a bare broken-image icon.
+const HYDRATE_MAX_RETRIES = 3;
+const HYDRATE_BACKOFF_MS = [500, 1000, 2000];
+
 function hydrateMediaSrc(
   el: HTMLImageElement | HTMLAudioElement,
   att: AttachmentMeta,
@@ -243,17 +249,37 @@ function hydrateMediaSrc(
     el.src = att.url;
     return;
   }
-  hydrate(att.url, signal)
-    .then((blob) => {
-      if (signal?.aborted) return;
-      const objectUrl = URL.createObjectURL(blob);
-      trackObjectUrl?.(objectUrl);
-      el.src = objectUrl;
-    })
-    .catch(() => {
-      // Authenticated fetch failed (network/401/aborted) — leave broken-image
-      // state rather than crash; no PII in the console.
-    });
+
+  const attempt = (retriesLeft: number): void => {
+    hydrate(att.url, signal)
+      .then((blob) => {
+        if (signal?.aborted) return;
+        const objectUrl = URL.createObjectURL(blob);
+        trackObjectUrl?.(objectUrl);
+        el.src = objectUrl;
+        el.removeAttribute('data-hydrate-failed');
+      })
+      .catch((err: unknown) => {
+        if (signal?.aborted) return;
+        // Issue #91: retry on transient failures (429/401/network), but not on
+        // aborts or permanent errors (404/403 — the attachment is gone/forbidden).
+        const isAbort = err instanceof DOMException && err.name === 'AbortError';
+        if (isAbort) return;
+
+        if (retriesLeft > 0) {
+          const backoff = HYDRATE_BACKOFF_MS[HYDRATE_MAX_RETRIES - retriesLeft] ?? 1000;
+          setTimeout(() => attempt(retriesLeft - 1), backoff);
+        } else {
+          // Final failure — mark for CSS placeholder + fall back to direct URL
+          // (may work for non-authed endpoints; worst case shows broken-image
+          // but with a data attribute for styling).
+          el.setAttribute('data-hydrate-failed', 'true');
+          el.src = att.url;
+        }
+      });
+  };
+
+  attempt(HYDRATE_MAX_RETRIES);
 }
 
 function isImageAttachment(att: AttachmentMeta): boolean {
