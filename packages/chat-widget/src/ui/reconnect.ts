@@ -130,8 +130,14 @@ export class Reconnector {
 
   notifyReconnected(): void {
     if (this.#destroyed || this.#signal?.aborted) return;
-    // Design M4: stop loop so reconnected state isn't overwritten by a late tick
-    this.stopReconnectLoop();
+    // Design M4: cancel the pending retry TIMER so a late tick can't overwrite the
+    // reconnected state. Must NOT tear down #unsubscribe: on a successful reconnect
+    // the fresh subscription was just established (by #scheduleAttempt / #onOnline)
+    // and #unsubscribe holds its live teardown — calling stopReconnectLoop() here
+    // would immediately kill it, leaving a permanently-dead room behind a false
+    // 'connected' banner (freeze_stall). Subscription teardown belongs only to the
+    // genuine-teardown callers (clear / destroy / notifyAuthExpired).
+    this.#cancelRetryTimer();
     this.#updateBanner('connected', 'status', 'polite', t('connected', this.#lang));
     this.#clearTimer = setTimeout(() => {
       this.#removeBannerFromDom();
@@ -204,12 +210,39 @@ export class Reconnector {
     this.#scheduleAttempt();
   }
 
+  /**
+   * Genuine teardown: cancel the pending retry timer AND tear down the live
+   * subscription. Callers that want the subscription gone — clear() (room-change /
+   * reset), destroy(), notifyAuthExpired() (the current sub is invalid). A caller
+   * that only wants to stop the retry timer (notifyReconnected) uses
+   * #cancelRetryTimer() instead — tearing down here would kill the fresh sub.
+   */
   stopReconnectLoop(): void {
-    if (this.#reconnectTimer !== null) { clearTimeout(this.#reconnectTimer); this.#reconnectTimer = null; }
+    this.#cancelRetryTimer();
     if (this.#unsubscribe) { this.#unsubscribe(); this.#unsubscribe = null; }
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
+
+  /** Cancel only the pending retry timer; leaves the live subscription (#unsubscribe) intact. */
+  #cancelRetryTimer(): void {
+    if (this.#reconnectTimer !== null) { clearTimeout(this.#reconnectTimer); this.#reconnectTimer = null; }
+  }
+
+  /**
+   * Store the freshly-established subscription, tearing down any previous one first.
+   * On a flap (reconnect → drop → reconnect) each success overwrites #unsubscribe;
+   * without releasing the prior sub its teardown is dropped on the floor — the SDK
+   * decrypt-chain refcount never hits 0 and the orphaned SDK subscription keeps
+   * self-reconnecting (duplicate onMessage/onReaction delivery + request fan-out
+   * that defeats the reconnect backoff). teardownSubscriber is idempotent, so
+   * releasing the stale one here is safe. The fresh `unsub` is assigned AFTER the
+   * release, so the subscription established THIS pass is never the one torn down.
+   */
+  #replaceSubscription(unsub: () => void): void {
+    if (this.#unsubscribe) this.#unsubscribe();
+    this.#unsubscribe = unsub;
+  }
 
   #scheduleAttempt(): void {
     if (this.#destroyed || this.#signal?.aborted || !this.#subscribeFn) return;
@@ -228,7 +261,7 @@ export class Reconnector {
       };
       try {
         const unsub = this.#subscribeFn(this.#roomId, onError);
-        this.#unsubscribe = unsub;
+        this.#replaceSubscription(unsub);
         this.notifyReconnected();
         this.#attempt = 0;
       } catch (err) {
@@ -260,7 +293,7 @@ export class Reconnector {
         };
         try {
           const unsub = this.#subscribeFn(this.#roomId, onError);
-          this.#unsubscribe = unsub;
+          this.#replaceSubscription(unsub);
           this.notifyReconnected();
           this.#attempt = 0;
         } catch (err) {

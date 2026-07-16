@@ -343,6 +343,120 @@ describe('Reconnector', () => {
     vi.useRealTimers();
   });
 
+  // ── Regression (freeze_stall): a successful reconnect must NOT tear down the
+  //    subscription it just established. Prior bug: notifyReconnected() called
+  //    stopReconnectLoop(), whose unsubscribe branch immediately killed the fresh
+  //    SSE sub — leaving a permanently-dead room behind a false 'connected' banner.
+  //    These use a NON-noop unsub spy so the teardown is observable (the old suite
+  //    mocked unsub as a no-op, masking the bug).
+  it('reconnect_success_keeps_the_fresh_subscription_live', () => {
+    vi.useFakeTimers();
+    const unsub = vi.fn();
+    let subscribeCalls = 0;
+    const subscribe = vi.fn().mockImplementation((_roomId: string, _onError: (err: unknown) => void) => {
+      subscribeCalls++;
+      return unsub; // NON-noop spy — a real SSE teardown is observable
+    });
+    const r = new Reconnector({ container, host });
+    r.startReconnectLoop(subscribe, 'r1');
+    vi.advanceTimersByTime(0); // fire attempt 0 → subscribe() succeeds → notifyReconnected()
+
+    expect(subscribeCalls).toBe(1);
+    // The fresh subscription MUST stay live — unsub must NOT have been called.
+    expect(unsub).not.toHaveBeenCalled();
+
+    // …and it must still be live after the 'connected' toast auto-hides (2s).
+    vi.advanceTimersByTime(2_000);
+    expect(unsub).not.toHaveBeenCalled();
+
+    r.clear();
+    vi.useRealTimers();
+  });
+
+  it('online_retry_success_keeps_the_fresh_subscription_live', () => {
+    // Same freeze_stall regression on the #onOnline immediate-retry path.
+    vi.useFakeTimers();
+    const unsubs: Array<ReturnType<typeof vi.fn>> = [];
+    let capturedOnError: ((err: unknown) => void) | null = null;
+    const subscribe = vi.fn().mockImplementation((_roomId: string, onError: (err: unknown) => void) => {
+      capturedOnError = onError;
+      const u = vi.fn();
+      unsubs.push(u);
+      return u;
+    });
+    const r = new Reconnector({ container, host });
+    r.startReconnectLoop(subscribe, 'r1');
+    vi.advanceTimersByTime(0); // attempt 0 succeeds (sub #0)
+    // Network drop → reschedule (state → reconnecting)
+    capturedOnError!({ status: 503 });
+    // Browser back online → immediate retry establishes a fresh sub
+    window.dispatchEvent(new Event('online'));
+    vi.advanceTimersByTime(0); // #onOnline retry succeeds (sub #1)
+
+    const latest = unsubs[unsubs.length - 1]!;
+    expect(latest).not.toHaveBeenCalled(); // fresh sub from the online-retry stays live
+    // …and the STALE sub (sub0) must have been torn down before sub1 replaced it —
+    // else its SDK decrypt-chain release is dropped and it self-reconnects (orphan leak).
+    expect(unsubs[0]).toHaveBeenCalledTimes(1);
+    r.clear();
+    vi.useRealTimers();
+  });
+
+  it('reconnect_flap_via_timer_tears_down_stale_sub_before_replacing', () => {
+    // #scheduleAttempt (timer-path) analog of the online flap: reconnect → drop →
+    // backoff-timer retry reconnect. The stale sub must be released before the fresh
+    // one replaces it, else the overwrite drops the prior teardown on the floor.
+    vi.useFakeTimers();
+    const unsubs: Array<ReturnType<typeof vi.fn>> = [];
+    let capturedOnError: ((err: unknown) => void) | null = null;
+    const subscribe = vi.fn().mockImplementation((_roomId: string, onError: (err: unknown) => void) => {
+      capturedOnError = onError;
+      const u = vi.fn();
+      unsubs.push(u);
+      return u;
+    });
+    const r = new Reconnector({ container, host });
+    r.startReconnectLoop(subscribe, 'r1');
+    vi.advanceTimersByTime(0); // attempt 0 succeeds (sub #0)
+    capturedOnError!({ status: 503 }); // network drop → reschedule (attempt 1 → delay 1000ms)
+    vi.advanceTimersByTime(1_000); // backoff timer fires → retry succeeds (sub #1)
+
+    expect(unsubs).toHaveLength(2);
+    expect(unsubs[0]).toHaveBeenCalledTimes(1); // stale sub0 released before sub1 replaced it
+    expect(unsubs[1]).not.toHaveBeenCalled();   // fresh sub1 stays live
+    r.clear();
+    vi.useRealTimers();
+  });
+
+  it('destroy_tears_down_the_live_subscription', () => {
+    // Genuine-teardown path must STILL work: destroy() → clear() → stopReconnectLoop()
+    // → unsubscribe(). The fix only stops notifyReconnected() from doing this.
+    vi.useFakeTimers();
+    const unsub = vi.fn();
+    const subscribe = vi.fn().mockImplementation(() => unsub);
+    const r = new Reconnector({ container, host });
+    r.startReconnectLoop(subscribe, 'r1');
+    vi.advanceTimersByTime(0); // establish a live sub
+    expect(unsub).not.toHaveBeenCalled();
+    r.destroy();
+    expect(unsub).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('clear_tears_down_the_live_subscription', () => {
+    // Genuine-teardown path (room-change / reset): clear() → stopReconnectLoop() → unsubscribe().
+    vi.useFakeTimers();
+    const unsub = vi.fn();
+    const subscribe = vi.fn().mockImplementation(() => unsub);
+    const r = new Reconnector({ container, host });
+    r.startReconnectLoop(subscribe, 'r1');
+    vi.advanceTimersByTime(0); // establish a live sub
+    expect(unsub).not.toHaveBeenCalled();
+    r.clear();
+    expect(unsub).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   // ── Design M3: conditional focus seizure ─────────────────────────────────────
 
   it('notifyAuthExpired_does_not_seize_focus_when_unrelated_element_focused', () => {
