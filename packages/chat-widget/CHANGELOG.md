@@ -1,5 +1,14 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.20.7
+
+### Patch Changes
+
+- 9019765: Fix pre-resolution identity flash — raw epids + grey initials for ~1-2s
+  until /roster resolves. Roster is now fetched in parallel with list()
+  and the first render waits for roster (or a 300ms timeout fallback)
+  before painting, so initial messages show display names immediately.
+
 ## 0.20.6
 
 ### Patch Changes
