@@ -392,4 +392,88 @@ describe('DurableReplayGuard in-memory cache bound (SEC-CR-F4)', () => {
       restoreNav();
     }
   });
+
+  /**
+   * A Web Locks stub whose `request` NEVER settles until the test explicitly calls `release()`
+   * — lets a test genuinely hold a `persistMerged` call in flight (and therefore its key
+   * `persisting`) across other guard operations, instead of racing real microtask timing.
+   */
+  function installControllableLocksStub(): {
+    pending: Array<{ name: string }>;
+    release: () => void;
+  } {
+    const pending: Array<{ name: string; run: () => void }> = [];
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        locks: {
+          request: (name: string, _opts: unknown, cb: () => unknown): Promise<unknown> =>
+            new Promise((resolve, reject) => {
+              pending.push({
+                name,
+                run: () => {
+                  Promise.resolve().then(cb).then(resolve, reject);
+                },
+              });
+            }),
+        },
+      },
+      configurable: true,
+    });
+    return {
+      pending,
+      release: () => pending.splice(0, pending.length).forEach((entry) => entry.run()),
+    };
+  }
+
+  /** Poll (macrotask ticks — fake-indexeddb's IDBRequest events resolve on a task, not a microtask). */
+  async function waitUntil(cond: () => boolean, maxTicks = 500): Promise<void> {
+    for (let i = 0; i < maxTicks; i++) {
+      if (cond()) return;
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+    if (!cond()) throw new Error('waitUntil: condition never became true');
+  }
+
+  it('SEC-CR-189-01: a key with an in-flight persist survives trim (even though oldest); self-heals once it drains', async () => {
+    const { pending, release } = installControllableLocksStub();
+    try {
+      const guard = new DurableReplayGuard({ warnIfUnavailable: false });
+      expect(guard.available).toBe(true); // anti-vacuous
+
+      const CAP = 256;
+      const holdKey = 'sframe-replay|default|room-hold|sender';
+
+      // Start an accept() whose persistMerged reaches navigator.locks.request and BLOCKS there
+      // (the stub above never auto-resolves) — this is the oldest entry, with `persisting` set,
+      // genuinely in flight (not merely "not yet awaited") for the entire test until release().
+      const holdPromise = guard.accept('room-hold', 'sender', 1n);
+      await waitUntil(() => pending.some((p) => p.name.includes('room-hold')));
+      expect(memSize(guard)).toBe(1);
+
+      // Push CAP more DISTINCT keys through check() (hydrate-only — never touches `persisting`,
+      // so each becomes immediately evictable once no longer the freshest). Sequential awaits so
+      // each hydrate (and any trim it triggers) fully settles before the next.
+      for (let i = 0; i < CAP; i++) {
+        await guard.check(`room-fill-${i}`, 'sender', 1n);
+      }
+
+      // mem holds hold + CAP fills = 257 > cap. Trim must have evicted the oldest NON-persisting
+      // entry (room-fill-0) each time it ran — room-hold (still persisting) must have SURVIVED,
+      // proving the `persisting.has(key)` skip in trimMemCache is load-bearing.
+      expect(memSize(guard)).toBeLessThanOrEqual(CAP);
+      expect((guard as unknown as { mem: Map<string, unknown> }).mem.has(holdKey)).toBe(true);
+
+      // Release the held lock — room-hold's persist completes, `persisting` drains.
+      release();
+      await holdPromise;
+      expect((guard as unknown as { persisting: Map<string, number> }).persisting.size).toBe(0);
+
+      // Self-heal: room-hold is now the oldest AND no longer persisting — the next trim evicts it.
+      await guard.check('room-fill-256', 'sender', 1n);
+      expect(memSize(guard)).toBeLessThanOrEqual(CAP);
+      expect((guard as unknown as { mem: Map<string, unknown> }).mem.has(holdKey)).toBe(false);
+    } finally {
+      restoreNav();
+    }
+  });
 });
