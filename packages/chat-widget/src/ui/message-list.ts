@@ -200,6 +200,18 @@ export interface MessageListOptions {
    * an integrator can surface/telemetry a dead attachment.
    */
   onAttachmentError?: (msgId: string, attachmentId: string) => void;
+  /**
+   * Observability: fires when a row carrying an `unsealError` (chat-sdk's
+   * classifyUnsealError reason 'replay' | 'auth' | 'unknown') is rendered —
+   * a replay-attack signature and a benign timeout are otherwise
+   * indistinguishable to the host. Deduped once per msgId per widget lifetime
+   * (a re-render via #updateBubble does not re-fire). The host element
+   * (element.ts) wires this to dispatch `oxpulse-chat:decrypt-error` from the
+   * widget host element so an integrator can telemetry/alert on decrypt
+   * failures by class — the replay reason is the one that matters most on an
+   * untrusted server.
+   */
+  onDecryptError?: (msgId: string, seq: number, reason: 'replay' | 'auth' | 'unknown') => void;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -847,6 +859,12 @@ export class MessageList {
    *  attachmentId) per final failure, not per retry or per re-render of the
    *  same attachment. Cleared in destroy(). */
   #firedAttachmentErrors: Set<string> = new Set();
+  /** Observability: host callback fired when an unsealError row is rendered. */
+  #onDecryptError?: (msgId: string, seq: number, reason: 'replay' | 'auth' | 'unknown') => void;
+  /** Observability: dedup set — fire onDecryptError once per msgId per widget
+   *  lifetime (a re-render via #updateBubble does not re-fire). Cleared in
+   *  destroy(). */
+  #firedDecryptErrors: Set<string> = new Set();
   /** issue #67: blob: object URLs created by hydrateMediaSrc() (authenticated
    *  attachment fetch), keyed by msgId — revoked in #evictOldMessages() (same
    *  lifecycle as #teardownReactionTrigger/#pulseTimers for an evicted row) so
@@ -875,6 +893,7 @@ export class MessageList {
     this.#onAuthExpired = opts.onAuthExpired;
     this.#onWriteFailure = opts.onWriteFailure;
     this.#onAttachmentError = opts.onAttachmentError;
+    this.#onDecryptError = opts.onDecryptError;
     this.#reactionsEnabled = opts.reactionsEnabled ?? true;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
@@ -1051,6 +1070,8 @@ export class MessageList {
     this.#attachmentObjectUrls.clear();
     // Review finding #4: clear the attachment-error dedup set on teardown.
     this.#firedAttachmentErrors.clear();
+    // Observability: clear the decrypt-error dedup set on teardown.
+    this.#firedDecryptErrors.clear();
     // Phase 2: destroy every surviving VoiceBubble player (revoke its
     // objectURL + null audio handlers) — same final-backstop contract.
     for (const bubbles of this.#voiceBubbles.values()) {
@@ -1076,6 +1097,14 @@ export class MessageList {
     if (this.#firedAttachmentErrors.has(key)) return;
     this.#firedAttachmentErrors.add(key);
     this.#onAttachmentError?.(msgId, attachmentId);
+  };
+  /** Observability: deduped callback for the unsealError render path. Fires
+   *  once per msgId per widget lifetime, forwarding {msgId, seq, reason} to
+   *  the host (element.ts dispatches oxpulse-chat:decrypt-error). */
+  readonly #notifyDecryptError = (msgId: string, seq: number, reason: 'replay' | 'auth' | 'unknown'): void => {
+    if (this.#firedDecryptErrors.has(msgId)) return;
+    this.#firedDecryptErrors.add(msgId);
+    this.#onDecryptError?.(msgId, seq, reason);
   };
   /** Phase 2: records a VoiceBubble for a msgId so eviction/destroy can
    *  destroy its headless player (revoke objectURL + null audio handlers).
@@ -2067,6 +2096,11 @@ export class MessageList {
       unsealEl.className = 'oxp-unseal-error';
       unsealEl.textContent = unsealErrorText(this.#lang);
       bodyEl.appendChild(unsealEl);
+      // Observability: fire the deduped decrypt-error callback so the host can
+      // telemetry/alert by reason class. #populateBubble runs on both initial
+      // render (#createBubble) and live re-render (#updateBubble), so the
+      // dedup guard in #notifyDecryptError suppresses repeat fires.
+      this.#notifyDecryptError(row.msgId, row.seq, row.unsealError);
     } else {
       const text = decodeText(row);
       bodyEl.innerHTML = renderMarkdown(text);

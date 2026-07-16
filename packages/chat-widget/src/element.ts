@@ -437,6 +437,26 @@ export class OxpulseChatElement extends HTMLElement {
     );
   }
 
+  /**
+   * Observability: dispatches `oxpulse-chat:decrypt-error` from the widget
+   * host element when a row carrying an `unsealError` (chat-sdk's
+   * classifyUnsealError reason 'replay' | 'auth' | 'unknown') is rendered.
+   * Mirrors #notifyAttachmentError's wiring (host-dispatched, bubbles+composed
+   * so an integrator on the embedding page can observe it). Dedup happens
+   * inside MessageList (once per msgId per widget lifetime). The replay reason
+   * is the one that matters most on an untrusted server (replay-attack
+   * signature vs a benign auth/timeout).
+   */
+  #notifyDecryptError(roomId: string, msgId: string, seq: number, reason: 'replay' | 'auth' | 'unknown'): void {
+    this.dispatchEvent(
+      new CustomEvent('oxpulse-chat:decrypt-error', {
+        bubbles: true,
+        composed: true,
+        detail: { roomId, msgId, seq, reason },
+      }),
+    );
+  }
+
   async #bootstrap(signal: AbortSignal): Promise<void> {
     // Ensure shadow root exists
     if (!this.#shadow) {
@@ -1122,6 +1142,11 @@ export class OxpulseChatElement extends HTMLElement {
         // `oxpulse-chat:attachment-error` from the host element (mirrors
         // #notifyWriteFailure's oxpulse-chat:write-error wiring).
         onAttachmentError: (msgId, attachmentId) => this.#notifyAttachmentError(msgId, attachmentId),
+        // Observability: unsealError row rendered → dispatch
+        // `oxpulse-chat:decrypt-error` from the host element (mirrors
+        // onAttachmentError's wiring). Deduped once per msgId per widget
+        // lifetime inside MessageList.
+        onDecryptError: (msgId, seq, reason) => this.#notifyDecryptError(config.roomId, msgId, seq, reason),
       });
 
       await this.#messageList.mount();

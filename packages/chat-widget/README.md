@@ -142,7 +142,51 @@ element.addEventListener('oxpulse-chat:attachment-error', (ev) => {
   // per attachment per final failure — not per retry.
   console.warn('Attachment unavailable:', ev.detail.msgId, ev.detail.attachmentId, ev.detail.reason);
 });
+
+element.addEventListener('oxpulse-chat:write-error', (ev) => {
+  // Fired when a named-write send or reaction op fails (non-recoverable, after
+  // the inline error chip is shown). ev.detail is a WidgetError with .op
+  // ('send' | 'reaction_add' | 'reaction_remove') and .reason
+  // ('auth_expired' | 'network' | 'other').
+  console.warn('Write failed:', ev.detail.op, ev.detail.reason, ev.detail.message);
+});
+
+element.addEventListener('oxpulse-chat:message-sent', (ev) => {
+  // Fired after a named-write message is successfully sent to the server.
+  console.log('Message sent:', ev.detail.roomId, ev.detail.msgId);
+});
+
+element.addEventListener('oxpulse-chat:decrypt-error', (ev) => {
+  // Fired when a row that failed end-to-end decryption is rendered. chat-sdk's
+  // classifyUnsealError distinguishes reason 'replay' | 'auth' | 'unknown' —
+  // a replay-attack signature and a benign timeout are otherwise
+  // indistinguishable to the host. Deduped once per msgId per widget lifetime.
+  // The 'replay' reason is the one that matters most on an untrusted server.
+  console.warn('Decrypt failed:', ev.detail.roomId, ev.detail.msgId, ev.detail.seq, ev.detail.reason);
+});
+
+element.addEventListener('oxpulse-chat:reconnect-exhausted', (ev) => {
+  // Fired when the Reconnector gives up after MAX_ATTEMPTS (10) retries — a
+  // permanently-dead room is otherwise invisible to host monitoring. Contrast
+  // oxpulse-chat:token-expired which fires on auth expiry. This event is only
+  // reached for non-auth (network) failures; auth errors branch to
+  // token-expired before exhaustion.
+  console.error('Reconnect exhausted:', ev.detail.roomId, 'attempts:', ev.detail.attempts);
+});
 ```
+
+### Events reference
+
+| Event | detail | When |
+|---|---|---|
+| `oxpulse-chat:ready` | `{ roomId }` | Widget connected and passed origin check |
+| `oxpulse-chat:error` | `WidgetError` | Unrecoverable error (origin mismatch, bad JWT, etc) |
+| `oxpulse-chat:token-expired` | `{ roomId }` | Server returned 401; call `element.refreshToken()` |
+| `oxpulse-chat:write-error` | `WidgetError` (`.op`, `.reason`) | A named-write send or reaction op failed |
+| `oxpulse-chat:message-sent` | `{ roomId, msgId }` | A named-write message was successfully sent |
+| `oxpulse-chat:attachment-error` | `{ msgId, attachmentId, reason }` | Attachment hydration reached final failure |
+| `oxpulse-chat:decrypt-error` | `{ roomId, msgId, seq, reason }` | An undecryptable row was rendered (deduped per msgId) |
+| `oxpulse-chat:reconnect-exhausted` | `{ roomId, attempts }` | Reconnector gave up after 10 retries (network death) |
 
 ## Origin allowlist
 
