@@ -19,6 +19,7 @@
 
 import { EMOJI_CATEGORIES, searchEmojis, type EmojiEntry } from "../utils/emoji-data.js";
 import { t, resolveLocale, type Locale } from "../utils/i18n.js";
+import { computeFloatingPosition } from "../utils/floating-position.js";
 
 export interface EmojiPickerOptions {
   /** Container element to render the picker inside. */
@@ -313,58 +314,23 @@ export class EmojiPicker {
     if (!this.#pickerEl) return;
     const rect = anchorEl.getBoundingClientRect();
     const isMountedOutside = this.#mountTo !== undefined && this.#mountTo !== this.#container;
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-
-    if (isMountedOutside) {
-      // Mounted outside container (e.g. shadow host) — use viewport coords via position:fixed.
-      // getBoundingClientRect() returns viewport-relative coords, which map directly to
-      // fixed positioning. This avoids the coordinate mismatch when container has
-      // overflow:hidden and the picker is appended to a different ancestor (MAJOR-5).
-      this.#pickerEl.style.position = "fixed";
-
-      // Horizontal: align with anchor left edge, clamp to viewport
-      const clampedLeft = Math.min(
-        Math.max(8, rect.left),
-        Math.max(8, viewportWidth - PICKER_WIDTH - 8),
-      );
-      this.#pickerEl.style.left = `${clampedLeft}px`;
-
-      // Vertical: below anchor if room, above otherwise
-      const spaceBelow = viewportHeight - rect.bottom;
-      if (spaceBelow >= PICKER_HEIGHT || spaceBelow >= viewportHeight / 2) {
-        this.#pickerEl.style.top = `${rect.bottom + 4}px`;
-      } else {
-        // Above
-        this.#pickerEl.style.top = `${Math.max(8, rect.top - PICKER_HEIGHT - 4)}px`;
-      }
-    } else {
-      // Inside container — offset-parent-relative coords via position:absolute.
-      const containerRect = this.#container.getBoundingClientRect();
-      const containerWidth = this.#container.offsetWidth || viewportWidth;
-      const containerHeight = this.#container.offsetHeight || viewportHeight;
-
-      this.#pickerEl.style.position = "absolute";
-
-      // Horizontal: align with anchor left edge, clamp to viewport
-      const anchorLeft = rect.left - containerRect.left;
-      const clampedLeft = Math.min(
-        Math.max(0, anchorLeft),
-        Math.max(0, containerWidth - PICKER_WIDTH),
-      );
-      this.#pickerEl.style.left = `${clampedLeft}px`;
-
-      // Vertical: below anchor if room, above otherwise
-      const anchorBottom = rect.bottom - containerRect.top;
-      const spaceBelow = containerHeight - anchorBottom;
-      if (spaceBelow >= PICKER_HEIGHT || spaceBelow >= containerHeight / 2) {
-        this.#pickerEl.style.top = `${anchorBottom + 4}px`;
-      } else {
-        // Above
-        const anchorTop = rect.top - containerRect.top;
-        this.#pickerEl.style.top = `${Math.max(0, anchorTop - PICKER_HEIGHT - 4)}px`;
-      }
-    }
+    const containerRect = isMountedOutside ? undefined : this.#container.getBoundingClientRect();
+    const pos = computeFloatingPosition({
+      anchorRect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+      elemWidth: PICKER_WIDTH,
+      elemHeight: PICKER_HEIGHT,
+      mountedOutside: isMountedOutside,
+      containerRect: containerRect
+        ? { top: containerRect.top, left: containerRect.left, width: this.#container.offsetWidth, height: this.#container.offsetHeight }
+        : undefined,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      margin: 8,
+      gap: 4,
+    });
+    this.#pickerEl.style.position = pos.position;
+    this.#pickerEl.style.top = `${pos.top}px`;
+    if (pos.left !== undefined) this.#pickerEl.style.left = `${pos.left}px`;
     this.#pickerEl.style.zIndex = "20";
   }
 }

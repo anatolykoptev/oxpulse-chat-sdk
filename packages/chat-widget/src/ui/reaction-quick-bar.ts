@@ -13,6 +13,7 @@
 import { REACTION_EMOJIS, reactionAriaLabel } from '../utils/reaction-types.js';
 import { t, resolveLocale, type Locale } from '../utils/i18n.js';
 import { computeQuickBarPosition } from '../utils/reaction-quick-bar-position.js';
+import { computeFloatingPosition } from '../utils/floating-position.js';
 
 // ── Constructor options ───────────────────────────────────────────────────────
 
@@ -302,78 +303,62 @@ export class ReactionQuickBar {
   }
 
   /**
-   * Placement (above/below flip) and left-vs-right anchor SIDE are decided by
-   * computeQuickBarPosition (reuse-update 2026-07-14, ported from
-   * oxpulse-chat web's computePopoverPosition). The actual pixel math —
-   * fixed-vs-absolute coordinate frame switch and the left/right-edge
-   * viewport-width clamp — stays this file's own pre-existing logic (F2/4C/
-   * DM3); web has no shadow-DOM coordinate-frame split or narrow-viewport
-   * clamp equivalent to port.
+   * Placement uses computeFloatingPosition (shared with EmojiPicker) for the
+   * fixed-vs-absolute coordinate frame + viewport clamp. The above/below flip
+   * and left-vs-right anchor side decision is delegated to
+   * computeQuickBarPosition (ported from oxpulse-chat web's
+   * computePopoverPosition) which feeds preferAbove + anchorRight into the
+   * shared utility.
    */
   #position(anchorEl: HTMLElement): void {
     if (!this.#barEl) return;
     const rect = anchorEl.getBoundingClientRect();
     const isMountedOutside = this.#mountTo !== undefined && this.#mountTo !== this.#container;
     // DM3 (design MAJOR): CSS sets explicit width: 256px on .oxp-reaction-quick-bar so offsetWidth
-    // returns a stable non-zero value pre-paint. Fallback 256 guards jsdom (no layout engine)
-    // and any edge case where CSS width isn't applied.
+    // returns a stable non-zero value pre-paint. Fallback 256 guards jsdom (no layout engine).
     const barWidth = this.#barEl.offsetWidth || 256;
     const barHeight = this.#barEl.offsetHeight;
     const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
 
-    if (isMountedOutside) {
-      // Mounted outside container (e.g. shadow host) — use viewport coords via position:fixed.
-      // getBoundingClientRect() returns viewport-relative coords, which map directly to
-      // fixed positioning. This avoids the coordinate mismatch when container has
-      // overflow:hidden and the bar is appended to a different ancestor (F2/M5).
-      this.#barEl.style.position = 'fixed';
-      const pos = computeQuickBarPosition({
-        anchorRect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
-        barHeight,
-        viewportTop: 0,
-        isOwn: this.#isOwnMessage,
-      });
-      this.#applyPlacementClass(pos.placement);
-      this.#barEl.style.top = `${Math.max(8, pos.top)}px`;
-      if (pos.right !== undefined) {
-        // Own message — anchor by right edge (CSS `right` is measured from
-        // the containing block's right edge, so convert).
-        const cssRight = viewportWidth - pos.right;
-        const clampedRight = Math.min(Math.max(8, cssRight), viewportWidth - barWidth - 8);
-        this.#barEl.style.right = `${clampedRight}px`;
-      } else {
-        // 4C: clamp right edge — prevent overflow on narrow viewports (320px)
-        const clampedLeft = Math.min(Math.max(8, pos.left ?? rect.left), viewportWidth - barWidth - 8);
-        this.#barEl.style.left = `${clampedLeft}px`;
-      }
-    } else {
-      // Inside container — offset-parent-relative coords via position:absolute.
-      const containerRect = this.#container.getBoundingClientRect();
-      this.#barEl.style.position = 'absolute';
-      const anchorRect = {
-        top: rect.top - containerRect.top,
-        bottom: rect.bottom - containerRect.top,
-        left: rect.left - containerRect.left,
-        right: rect.right - containerRect.left,
-      };
-      const pos = computeQuickBarPosition({
-        anchorRect,
-        barHeight,
-        viewportTop: 0,
-        isOwn: this.#isOwnMessage,
-      });
-      this.#applyPlacementClass(pos.placement);
-      this.#barEl.style.top = `${Math.max(0, pos.top)}px`;
-      const containerWidth = this.#container.offsetWidth || viewportWidth;
-      if (pos.right !== undefined) {
-        const cssRight = containerWidth - pos.right;
-        const clampedRight = Math.min(Math.max(0, cssRight), containerWidth - barWidth - 8);
-        this.#barEl.style.right = `${clampedRight}px`;
-      } else {
-        // 4C: clamp right edge relative to container
-        const clampedLeft = Math.min(Math.max(0, pos.left ?? anchorRect.left), containerWidth - barWidth - 8);
-        this.#barEl.style.left = `${clampedLeft}px`;
-      }
+    // Delegate above/below + left/right-side decision to computeQuickBarPosition.
+    const containerRect = isMountedOutside ? undefined : this.#container.getBoundingClientRect();
+    const anchorRectForDecision = containerRect
+      ? { top: rect.top - containerRect.top, bottom: rect.bottom - containerRect.top, left: rect.left - containerRect.left, right: rect.right - containerRect.left }
+      : { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+    const decision = computeQuickBarPosition({
+      anchorRect: anchorRectForDecision,
+      barHeight,
+      viewportTop: 0,
+      isOwn: this.#isOwnMessage,
+    });
+
+    // Use the shared floating-position utility for the actual pixel math.
+    const pos = computeFloatingPosition({
+      anchorRect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right },
+      elemWidth: barWidth,
+      elemHeight: barHeight,
+      mountedOutside: isMountedOutside,
+      containerRect: containerRect
+        ? { top: containerRect.top, left: containerRect.left, width: this.#container.offsetWidth, height: this.#container.offsetHeight }
+        : undefined,
+      viewportWidth,
+      viewportHeight,
+      margin: 8,
+      gap: 8,
+      preferAbove: decision.placement === 'above',
+      anchorRight: this.#isOwnMessage,
+    });
+
+    this.#barEl.style.position = pos.position;
+    this.#applyPlacementClass(pos.placement);
+    this.#barEl.style.top = `${pos.top}px`;
+    if (pos.right !== undefined) {
+      this.#barEl.style.right = `${pos.right}px`;
+      this.#barEl.style.left = '';
+    } else if (pos.left !== undefined) {
+      this.#barEl.style.left = `${pos.left}px`;
+      this.#barEl.style.right = '';
     }
     this.#barEl.style.zIndex = '10';
   }
