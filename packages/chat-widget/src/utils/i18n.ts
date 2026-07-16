@@ -127,7 +127,17 @@ export type LocaleKey =
   | 'emojiPickerSearch'
   | 'emojiPickerSearchAria'
   | 'emojiPickerNoResults'
-  | 'emojiPickerBtnAria';
+  | 'emojiPickerBtnAria'
+  // Threads (#126)
+  | 'threadTitle'
+  | 'threadReplies'
+  | 'threadReplyCount'
+  | 'threadCloseAria'
+  | 'threadSendReply'
+  | 'threadReplyPlaceholder'
+  | 'threadLoading'
+  | 'threadEmpty'
+  | 'threadError';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -234,6 +244,15 @@ const en: LocaleTable = {
   emojiPickerSearchAria: 'Search emoji',
   emojiPickerNoResults: 'No emoji found',
   emojiPickerBtnAria: 'Open emoji picker',
+  threadTitle: 'Thread',
+  threadReplies: '{n} replies',
+  threadReplyCount: '{n} reply',
+  threadCloseAria: 'Close thread',
+  threadSendReply: 'Send reply',
+  threadReplyPlaceholder: 'Reply to thread…',
+  threadLoading: 'Loading thread…',
+  threadEmpty: 'No replies yet',
+  threadError: 'Failed to load thread',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -338,6 +357,15 @@ const ru: LocaleTable = {
   emojiPickerSearchAria: 'Поиск эмодзи',
   emojiPickerNoResults: 'Эмодзи не найдены',
   emojiPickerBtnAria: 'Открыть выбор эмодзи',
+  threadTitle: 'Тред',
+  threadReplies: '{n} ответов',
+  threadReplyCount: '{n} ответ',
+  threadCloseAria: 'Закрыть тред',
+  threadSendReply: 'Отправить ответ',
+  threadReplyPlaceholder: 'Ответить в тред…',
+  threadLoading: 'Загрузка треда…',
+  threadEmpty: 'Пока нет ответов',
+  threadError: 'Не удалось загрузить тред',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };

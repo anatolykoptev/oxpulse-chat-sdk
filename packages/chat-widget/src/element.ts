@@ -560,6 +560,8 @@ export class OxpulseChatElement extends HTMLElement {
         getPresence?(roomId: string): Promise<Array<{ userId: string; lastSeenAt: string }>>;
         /** #122: mark messages up to seq as read. */
         markRead?(roomId: string, seq: number): Promise<void>;
+        /** #126: fetch thread replies. */
+        getThread?(roomId: string, rootMsgId: string): Promise<import('./ui/thread-panel.js').ThreadRow[]>;
         readonly baseUrl?: string;
         readonly jwt?: string;
       }
