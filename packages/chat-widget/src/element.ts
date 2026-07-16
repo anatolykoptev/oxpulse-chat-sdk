@@ -135,6 +135,14 @@ export function decodeRowAttachments(row: MessageRow, baseUrl: string): MessageR
 
 // ── OxpulseChatElement ────────────────────────────────────────────────────────
 
+// F3/F5 INTERIM: mode='iframe' is experimental — the iframe is created but no
+// real chat client is constructed inside it, and in-place JWT refresh writes
+// liveConfig.jwt with no consumer (W2.2 TODO). Emit a one-time console.warn per
+// page load so an integrator who selects iframe mode is surfaced the gap
+// without spamming on every (re)mount. The full iframe build is tracked
+// separately; this is an interim safety notice only.
+let __iframeExperimentalWarned = false;
+
 /**
  * <oxpulse-chat> Custom Element.
  *
@@ -538,6 +546,12 @@ export class OxpulseChatElement extends HTMLElement {
 
     // Origin check passed — dispatch ready event
     if (config.mode === 'iframe') {
+      // F3/F5 INTERIM: one-time experimental notice (see __iframeExperimentalWarned).
+      if (!__iframeExperimentalWarned) {
+        __iframeExperimentalWarned = true;
+        // eslint-disable-next-line no-console
+        console.warn('[oxpulse-chat] mode=iframe is experimental and not production-ready — the iframe is created but no real chat client is constructed inside it. Use mode="inline" for production.');
+      }
       // M6: iframe mode — create sandboxed iframe inside shadow root
       if (config.allowWrite) {
         // Named-write in iframe mode is not yet implemented (W5).

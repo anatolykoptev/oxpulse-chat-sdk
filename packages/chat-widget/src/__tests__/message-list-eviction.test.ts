@@ -377,4 +377,121 @@ describe('MessageList — live-message eviction', () => {
     createSpy.mockRestore();
     revokeSpy.mockRestore();
   }, 30_000); // MAX_LIVE_MESSAGES filler messages, same headroom as the sibling tests above.
+
+  // ── F12: dedup-Set eviction sweep (#firedDecryptErrors + #firedAttachmentErrors) ──
+  // These two Sets accumulated one entry per failed msgId and were cleared ONLY
+  // in destroy() — unlike every sibling per-msgId Map which is swept in
+  // #evictOldMessages. Without eviction sweeping, a long-lived busy room leaks
+  // one Set entry per evicted failed message (unbounded — exactly the class
+  // the eviction caps exist to bound), AND a msgId recycled after eviction
+  // (re-entering #order as a new message) would be wrongly suppressed by the
+  // stale dedup entry. The fix: delete the evicted msgId's entries from both
+  // Sets in #evictOldMessages, matching how the sibling Maps are pruned. The
+  // dedup contract is preserved: a still-live message's entry is never touched
+  // here, so it never re-fires on re-render.
+
+  it('sweeps #firedDecryptErrors entry for an evicted msgId; re-entry re-fires, retained still dedupes', async () => {
+    container = makeContainer();
+    const decryptErrors: Array<{ msgId: string; seq: number; reason: string }> = [];
+    const client = makeMockClient([]);
+    const ml = new MessageList({
+      client, roomId: 'r1', container, lang: 'en', selfUid: 'u1',
+      onDecryptError: (msgId, seq, reason) => decryptErrors.push({ msgId, seq, reason: String(reason) }),
+    });
+    await ml.mount();
+
+    // 1. Send a message with unsealError → callback fires once.
+    const evicteeId = 'msg-decrypt-evictee';
+    capturedOnMessage!(makeRow({ senderUid: 'u2', msgId: evicteeId, seq: 1, unsealError: 'replay' }));
+    await drainMicrotasks();
+    expect(decryptErrors).toHaveLength(1);
+    expect(decryptErrors[0]!.msgId).toBe(evicteeId);
+
+    // 2. Re-deliver the same msgId (mutation SSE / dedupe upsert) → deduped.
+    capturedOnMessage!(makeRow({ senderUid: 'u2', msgId: evicteeId, seq: 1, unsealError: 'replay' }));
+    await drainMicrotasks();
+    expect(decryptErrors).toHaveLength(1);
+
+    // 3. Push past the cap — evicts evicteeId (the oldest).
+    pushMessages('filler', MAX_LIVE_MESSAGES, 2);
+    await drainMicrotasks();
+    expect(container.querySelector(`[data-msg-id="${evicteeId}"]`)).toBeNull();
+
+    // 4. Re-deliver the same msgId as a NEW message (re-entering #order) →
+    //    the dedup entry was swept on eviction, so the callback MUST fire again.
+    //    Reverting the eviction sweep makes this assertion fail (stale entry
+    //    suppresses the re-fire) — the falsifiable RED-on-revert guard.
+    capturedOnMessage!(makeRow({ senderUid: 'u2', msgId: evicteeId, seq: MAX_LIVE_MESSAGES + 2, unsealError: 'replay' }));
+    await drainMicrotasks();
+    expect(decryptErrors).toHaveLength(2);
+    expect(decryptErrors[1]!.msgId).toBe(evicteeId);
+
+    // 5. A distinct retained msgId still dedupes correctly (contract preserved).
+    const retainedId = 'msg-decrypt-retained';
+    capturedOnMessage!(makeRow({ senderUid: 'u2', msgId: retainedId, seq: MAX_LIVE_MESSAGES + 3, unsealError: 'auth' }));
+    await drainMicrotasks();
+    expect(decryptErrors).toHaveLength(3);
+    capturedOnMessage!(makeRow({ senderUid: 'u2', msgId: retainedId, seq: MAX_LIVE_MESSAGES + 3, unsealError: 'auth' }));
+    await drainMicrotasks();
+    expect(decryptErrors).toHaveLength(3); // deduped — retained entry NOT swept
+
+    ml.destroy();
+  }, 30_000);
+
+  it('sweeps #firedAttachmentErrors entry for an evicted msgId; re-entry re-fires, retained still dedupes', async () => {
+    container = makeContainer();
+    const attErrors: Array<{ msgId: string; attachmentId: string }> = [];
+    const client = makeMockClient([]);
+    // Permanent 404 → exactly 1 fetch, no retry, onAttachmentError fires in the
+    // .catch microtask (no setTimeout involved for permanent failures).
+    client.fetchAttachmentBlob = async () => {
+      const err = Object.assign(new Error('HTTP 404'), { status: 404 });
+      throw err;
+    };
+    const attachment = {
+      id: 'att-evict-1', url: 'https://x.example/api/sdk/attachments/att-evict-1',
+      mime: 'image/png', filename: 'f.png', sizeBytes: 10,
+    };
+    const ml = new MessageList({
+      client, roomId: 'r1', container, lang: 'en', selfUid: 'u1',
+      onAttachmentError: (msgId, attachmentId) => attErrors.push({ msgId, attachmentId }),
+    });
+    await ml.mount();
+
+    // 1. Send a message with an attachment that fails hydration (404) → fires once.
+    const evicteeId = 'msg-att-evictee';
+    capturedOnMessage!(makeRow({ senderUid: 'u1', msgId: evicteeId, seq: 1, attachments: [attachment] }));
+    await drainMicrotasks(20);
+    expect(attErrors).toHaveLength(1);
+    expect(attErrors[0]!.msgId).toBe(evicteeId);
+
+    // 2. Re-deliver the same msgId → deduped.
+    capturedOnMessage!(makeRow({ senderUid: 'u1', msgId: evicteeId, seq: 1, attachments: [attachment] }));
+    await drainMicrotasks(20);
+    expect(attErrors).toHaveLength(1);
+
+    // 3. Push past the cap — evicts evicteeId (the oldest).
+    pushMessages('filler', MAX_LIVE_MESSAGES, 2);
+    await drainMicrotasks();
+    expect(container.querySelector(`[data-msg-id="${evicteeId}"]`)).toBeNull();
+
+    // 4. Re-deliver the same msgId as a NEW message → the dedup entry was swept
+    //    on eviction, so the callback MUST fire again. Reverting the eviction
+    //    sweep makes this assertion fail — the falsifiable RED-on-revert guard.
+    capturedOnMessage!(makeRow({ senderUid: 'u1', msgId: evicteeId, seq: MAX_LIVE_MESSAGES + 2, attachments: [attachment] }));
+    await drainMicrotasks(20);
+    expect(attErrors).toHaveLength(2);
+    expect(attErrors[1]!.msgId).toBe(evicteeId);
+
+    // 5. A distinct retained msgId still dedupes correctly (contract preserved).
+    const retainedId = 'msg-att-retained';
+    capturedOnMessage!(makeRow({ senderUid: 'u1', msgId: retainedId, seq: MAX_LIVE_MESSAGES + 3, attachments: [attachment] }));
+    await drainMicrotasks(20);
+    expect(attErrors).toHaveLength(3);
+    capturedOnMessage!(makeRow({ senderUid: 'u1', msgId: retainedId, seq: MAX_LIVE_MESSAGES + 3, attachments: [attachment] }));
+    await drainMicrotasks(20);
+    expect(attErrors).toHaveLength(3); // deduped — retained entry NOT swept
+
+    ml.destroy();
+  }, 30_000);
 });
