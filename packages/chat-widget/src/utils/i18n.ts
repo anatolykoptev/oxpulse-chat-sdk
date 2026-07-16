@@ -106,7 +106,12 @@ export type LocaleKey =
   | 'chatLoading'
   // Roster role badge (P5)
   | 'roleBadgeModerator'
-  | 'roleBadgeOwner';
+  | 'roleBadgeOwner'
+  // Typing indicator (#120)
+  | 'typingOneUser'
+  | 'typingTwoUsers'
+  | 'typingMultiple'
+  | 'typingAriaLabel';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -196,6 +201,10 @@ const en: LocaleTable = {
 
   roleBadgeModerator: 'mod',
   roleBadgeOwner: 'owner',
+  typingOneUser: '{user} is typing…',
+  typingTwoUsers: '{user1} and {user2} are typing…',
+  typingMultiple: '{user1}, {user2} and {n} others are typing…',
+  typingAriaLabel: 'Users typing: {names}',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -283,6 +292,10 @@ const ru: LocaleTable = {
 
   roleBadgeModerator: 'модератор',
   roleBadgeOwner: 'владелец',
+  typingOneUser: '{user} печатает…',
+  typingTwoUsers: '{user1} и {user2} печатают…',
+  typingMultiple: '{user1}, {user2} и ещё {n} печатают…',
+  typingAriaLabel: 'Печатают: {names}',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };

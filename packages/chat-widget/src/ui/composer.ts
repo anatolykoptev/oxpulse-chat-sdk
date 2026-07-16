@@ -32,6 +32,8 @@ export interface SendTextArgs {
 interface ComposerClient {
   sendText(roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }>;
   sendTextOptimistic?(roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }>;
+  /** #120: broadcast typing indicator. Fire-and-forget. */
+  sendTyping?(roomId: string, ttlSecs?: number): Promise<void>;
   e2ee?: unknown;
   /** Stage-then-send split (slice 4): upload an attachment and return its id + envelope metadata. */
   uploadAttachment?(
@@ -76,6 +78,12 @@ export class Composer {
   #sendBtn: HTMLButtonElement | null = null;
   #counter: HTMLElement | null = null;
   #errorChip: HTMLElement | null = null;
+  /** #120: typing indicator throttle — last sendTyping POST timestamp. */
+  #lastTypingSent = 0;
+  /** #120: typing throttle interval (ms) — Stream-proven 2s cadence. */
+  readonly #typingThrottleMs = 2000;
+  /** #120: typing TTL (seconds) sent to server — auto-clears after this. */
+  readonly #typingTtlSec = 3;
 
   /** Tracks in-flight send so destroy can suppress clear. */
   #sending = false;
@@ -606,6 +614,15 @@ export class Composer {
     if (this.#textarea) {
       this.#textarea.style.height = 'auto';
       this.#textarea.style.height = `${autogrowHeightPx(this.#textarea.scrollHeight, 144)}px`;
+    }
+    // #120: typing indicator — throttled sendTyping on keystroke.
+    // Fire-and-forget; errors are swallowed (typing is best-effort UX).
+    if (this.#client.sendTyping && this.#textarea && this.#textarea.value.trim()) {
+      const now = Date.now();
+      if (now - this.#lastTypingSent >= this.#typingThrottleMs) {
+        this.#lastTypingSent = now;
+        void this.#client.sendTyping(this.#roomId, this.#typingTtlSec).catch(() => {});
+      }
     }
   };
 

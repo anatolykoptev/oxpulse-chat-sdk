@@ -318,6 +318,45 @@ export const THEME_CSS = `
   min-width: 64px;
 }
 
+/* ── Typing indicator (#120) ───────────────────────────────────────────── */
+.oxp-typing-indicator {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 16px 8px;
+  font-size: 12px;
+  color: var(--oxp-muted);
+  font-family: var(--oxp-font);
+  min-height: 24px;
+}
+.oxp-typing-dots {
+  display: inline-flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.oxp-typing-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--oxp-muted);
+  animation: oxp-typing-bounce 1.4s infinite ease-in-out both;
+}
+.oxp-typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.oxp-typing-dot:nth-child(2) { animation-delay: -0.16s; }
+.oxp-typing-dot:nth-child(3) { animation-delay: 0s; }
+@keyframes oxp-typing-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+}
+.oxp-typing-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (prefers-reduced-motion: reduce) {
+  .oxp-typing-dot { animation: none; opacity: 0.7; }
+}
+
 .oxp-message-list-error button:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;

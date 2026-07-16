@@ -22,6 +22,7 @@ import { ReactionTrigger } from './reaction-trigger.js';
 import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
 import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
+import { TypingIndicator } from './typing-indicator.js';
 import type { ProductMeta, WriteFailureOp, WriteFailureReason } from '../types.js';
 import { classifyWriteFailureReason } from '../utils/auth.js';
 
@@ -102,6 +103,7 @@ export interface MessageListClient {
     onMutation?: (event: MutationEvent) => void;
     onReaction?: (event: ReactionEvent) => void;
     onRosterSignal?: () => void;
+    onTyping?: (event: { userId: string; ttlSecs?: number }) => void;
   }): () => void;
   /** Optional — reactions support. If absent, reactions are disabled. */
   getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
@@ -627,6 +629,8 @@ export class MessageList {
   #order: string[] = [];
   /** Inner scrollable list element. */
   #listEl: HTMLElement | null = null;
+  /** #120: typing indicator instance — mounted below #listEl. */
+  #typingIndicator: TypingIndicator | null = null;
   /**
    * P2 design-empirical review 2026-07-14: re-pins scroll to bottom when
    * #listEl's own clientHeight shrinks (the composer — a sibling in the
@@ -735,6 +739,14 @@ export class MessageList {
     this.#listEl.setAttribute('aria-live', 'polite');
     this.#listEl.className = 'oxp-message-list';
     this.#container.appendChild(this.#listEl);
+    // #120: mount typing indicator below the message list.
+    this.#typingIndicator = new TypingIndicator({
+      container: this.#container,
+      lang: this.#lang,
+      selfUid: this.#selfUid,
+      signal: this.#signal,
+      resolveName: (uid) => this.#roster.get(uid)?.displayName,
+    });
 
     // P2: re-pin to bottom when a composer resize (reply-bar toggle) shrinks
     // #listEl's clientHeight out from under a pinned reader. See #resizeObserver
@@ -822,6 +834,9 @@ export class MessageList {
       this.#listEl.parentNode.removeChild(this.#listEl);
     }
     this.#listEl = null;
+    // #120: destroy typing indicator (clears all timers + removes DOM).
+    this.#typingIndicator?.destroy();
+    this.#typingIndicator = null;
     // issue #67: final backstop — revoke every blob: URL still tracked (any
     // row that survived to destroy() without being evicted first). Per-row
     // revocation on eviction happens in #evictOldMessages().
@@ -2079,6 +2094,8 @@ export class MessageList {
       onReaction: this.#reactionsEnabled ? (event) => this.#handleReaction(event) : undefined,
       // T18: roster SSE invalidation signal — re-fetch roster on debounce.
       onRosterSignal: () => this.#scheduleRosterRefresh(),
+      // #120: typing indicator — forward SSE typing events to the indicator.
+      onTyping: this.#typingIndicator ? (event) => this.#typingIndicator!.addTyping(event.userId, event.ttlSecs) : undefined,
     });
 
     if (this.#client.getReactions && this.#order.length > 0) {
