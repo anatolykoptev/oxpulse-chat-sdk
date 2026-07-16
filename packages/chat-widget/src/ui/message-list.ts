@@ -2025,7 +2025,7 @@ export class MessageList {
         // Review fix CRITICAL#2: a hover-sourced open must not steal focus
         // (the user could be typing elsewhere) — hold/keyboard opens still
         // focus the bar.
-        onOpenBar: (source) => this.#showQuickBar(row.msgId, el, heartBtn, source !== 'hover'),
+        onOpenBar: (source) => this.#showQuickBar(row.msgId, heartBtn, heartBtn, source !== 'hover'),
         signal: this.#signal,
       });
       this.#reactionTriggers.set(row.msgId, trigger);
