@@ -65,7 +65,7 @@ export interface VoiceRecorder {
 }
 
 /** Read a Blob into a data: URL via FileReader. */
-function readBlobAsDataUrl(blob: Blob): Promise<string> {
+export function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));

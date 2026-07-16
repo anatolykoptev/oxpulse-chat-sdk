@@ -9,65 +9,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AttachmentPicker } from '../ui/attachment-picker.js';
 import { THEME_CSS } from '../ui/theme.js';
 import type { EnvelopeAttachment } from '../utils/attachment-envelope.js';
+import { makeStubClient as sharedMakeStubClient, type MakeStubClientOpts } from './helpers.js';
 
 // ── Stub SDK client ───────────────────────────────────────────────────────────
 
-function makeStubAttachment(args: {
-  attachmentId?: string;
-  blob?: Blob;
-  mimeType?: string;
-  filename?: string;
-  width?: number;
-  height?: number;
-} = {}): { attachmentId: string; attachment: EnvelopeAttachment } {
-  const attachmentId = args.attachmentId ?? 'att-1';
-  const blob = args.blob ?? new Blob(['x'], { type: 'image/png' });
-  return {
-    attachmentId,
-    attachment: {
-      id: attachmentId,
-      mime: args.mimeType ?? blob.type,
-      filename: args.filename ?? 'file',
-      sizeBytes: blob.size,
-      width: args.width,
-      height: args.height,
-    },
-  };
-}
-
-function makeStubClient(opts: {
-  resolveWith?: { attachmentId: string; attachment: EnvelopeAttachment };
-  rejectWith?: Error;
-  delayMs?: number;
-} = {}) {
-  return {
-    uploadAttachment: vi.fn((_roomId: string, blob: Blob, args: unknown) => {
-      const a = args as {
-        mimeType?: string;
-        filename?: string;
-        width?: number;
-        height?: number;
-      };
-      const result = opts.resolveWith ?? makeStubAttachment({
-        blob,
-        mimeType: a.mimeType,
-        filename: a.filename,
-        width: a.width,
-        height: a.height,
-      });
-      if (opts.delayMs) {
-        return new Promise<typeof result>((resolve, reject) => {
-          setTimeout(() => {
-            if (opts.rejectWith) reject(opts.rejectWith);
-            else resolve(result);
-          }, opts.delayMs);
-        });
-      }
-      if (opts.rejectWith) return Promise.reject(opts.rejectWith);
-      return Promise.resolve(result);
-    }),
-    sendAttachmentMessage: vi.fn(),
-  };
+// Thin wrapper: every attachment-picker test needs the upload surface, so
+// default withAttachments=true (the shared helper defaults to false to avoid
+// breaking composer tests that rely on its absence).
+function makeStubClient(opts: Omit<MakeStubClientOpts, 'withAttachments'> = {}) {
+  return sharedMakeStubClient({ ...opts, withAttachments: true });
 }
 
 function makePngFile(name = 'photo.png', sizeBytes = 1024): File {
