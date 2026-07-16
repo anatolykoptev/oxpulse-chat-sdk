@@ -1,5 +1,16 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.17.0
+
+### Minor Changes
+
+- f3fcab5: Presence overlay — avatar online dots + heartbeat (#121)
+
+  Add green presence dot on avatars for online users, driven by SSE presence
+  events. Includes 30s heartbeat interval, initial presence snapshot fetch,
+  and 120s freshness window (matches server SDK_PRESENCE_FRESHNESS_SECS).
+  i18n support for en + ru.
+
 ## 0.16.0
 
 ### Minor Changes
