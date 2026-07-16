@@ -1411,8 +1411,11 @@ export class MessageList {
       // destroy()), unbounded in a long-lived busy room — exactly the class
       // the eviction caps exist to bound. A msgId recycled after eviction
       // (re-entering #order as a new message) would also be wrongly
-      // suppressed by the stale dedup entry. The dedup contract is
-      // preserved: a still-live message's entry is never touched here.
+      // suppressed by the stale dedup entry. For well-formed (UUID) msgIds a
+      // still-live message's entry is never touched here; a crafted msgId
+      // containing ':' can make the prefix match below over-delete a live
+      // sibling's dedup entry (harmless — at worst one duplicate host error
+      // event). Root fix = validating inbound msg_id format on receipt (#191).
       this.#firedDecryptErrors.delete(evictedId);
       // #firedAttachmentErrors is keyed by `${msgId}:${attachmentId}`
       // (composite) — delete every key whose msgId component matches the
