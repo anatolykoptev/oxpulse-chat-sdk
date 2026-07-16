@@ -555,6 +555,149 @@ export const THEME_CSS = `
   color: var(--oxp-fg-secondary, #64748b);
 }
 .oxp-composer-emoji-btn:hover {
+
+/* ── Thread panel (#126) ─────────────────────────────────────────────── */
+.oxp-thread-panel {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 320px;
+  max-width: 100%;
+  background: var(--oxp-surface, #fff);
+  border-left: 1px solid var(--oxp-border, #e2e8f0);
+  display: flex;
+  flex-direction: column;
+  z-index: 30;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.08);
+}
+.oxp-thread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--oxp-border, #e2e8f0);
+  flex-shrink: 0;
+}
+.oxp-thread-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--oxp-fg, #1a1a1a);
+}
+.oxp-thread-close {
+  border: none;
+  background: transparent;
+  font-size: 1.3rem;
+  cursor: pointer;
+  color: var(--oxp-fg-secondary, #64748b);
+  padding: 0 4px;
+  line-height: 1;
+}
+.oxp-thread-close:hover { color: var(--oxp-fg, #1a1a1a); }
+.oxp-thread-root {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--oxp-border, #e2e8f0);
+  flex-shrink: 0;
+}
+.oxp-thread-root-sender {
+  display: block;
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--oxp-fg, #1a1a1a);
+  margin-bottom: 2px;
+}
+.oxp-thread-root-body {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--oxp-fg-secondary, #64748b);
+  line-height: 1.4;
+}
+.oxp-thread-replies {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+}
+.oxp-thread-bubble {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--oxp-tint, #f1f5f9);
+  max-width: 85%;
+}
+.oxp-thread-bubble[data-self='true'] {
+  margin-left: auto;
+  background: var(--oxp-accent-bg, #dbeafe);
+}
+.oxp-thread-bubble-sender {
+  display: block;
+  font-weight: 600;
+  font-size: 0.75rem;
+  color: var(--oxp-fg, #1a1a1a);
+}
+.oxp-thread-bubble-body {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--oxp-fg, #1a1a1a);
+  margin-top: 2px;
+  word-wrap: break-word;
+}
+.oxp-thread-bubble-time {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--oxp-fg-secondary, #94a3b8);
+  margin-top: 2px;
+}
+.oxp-thread-composer {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--oxp-border, #e2e8f0);
+  flex-shrink: 0;
+}
+.oxp-thread-input {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--oxp-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  background: var(--oxp-surface, #fff);
+  color: var(--oxp-fg, #1a1a1a);
+}
+.oxp-thread-send {
+  flex: 0 0 auto;
+  border: none;
+  background: var(--oxp-accent, #3b82f6);
+  color: #fff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+.oxp-thread-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.oxp-thread-loading, .oxp-thread-empty, .oxp-thread-error {
+  text-align: center;
+  padding: 24px 0;
+  color: var(--oxp-fg-secondary, #64748b);
+  font-size: 0.8rem;
+}
+.oxp-thread-error { color: var(--oxp-danger, #ef4444); }
+.oxp-thread-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.65rem;
+  color: var(--oxp-fg-secondary, #64748b);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.oxp-thread-indicator:hover {
   background: var(--oxp-tint, #f1f5f9);
 }
 

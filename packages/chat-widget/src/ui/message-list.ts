@@ -25,6 +25,7 @@ import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
 import { TypingIndicator } from './typing-indicator.js';
 import { PresenceOverlay } from './presence-overlay.js';
 import { ReadReceipts } from './read-receipts.js';
+import { ThreadPanel, type ThreadRow } from './thread-panel.js';
 import type { ProductMeta, WriteFailureOp, WriteFailureReason } from '../types.js';
 import { classifyWriteFailureReason } from '../utils/auth.js';
 
@@ -124,6 +125,10 @@ export interface MessageListClient {
   sendPresence?(roomId: string): Promise<void>;
   /** #122: mark messages up to seq as read. */
   markRead?(roomId: string, seq: number): Promise<void>;
+  /** #126: fetch thread replies. */
+  getThread?(roomId: string, rootMsgId: string): Promise<ThreadRow[]>;
+  /** #126: send a text message (used for thread replies). */
+  sendText?(roomId: string, args: { senderUid: string; text: string; threadRootMsgId?: string }): Promise<void>;
   /**
    * issue #67: fetch an attachment blob WITH authentication. The attachment
    * GET route is JWT-authenticated (Authorization: Bearer only — no signed
@@ -645,6 +650,8 @@ export class MessageList {
   #presenceOverlay: PresenceOverlay | null = null;
   /** #122: read receipts — checkmarks on own messages. */
   #readReceipts: ReadReceipts | null = null;
+  /** #126: thread panel — shows thread replies in a side panel. */
+  #threadPanel: ThreadPanel | null = null;
   /**
    * P2 design-empirical review 2026-07-14: re-pins scroll to bottom when
    * #listEl's own clientHeight shrinks (the composer — a sibling in the
@@ -786,6 +793,18 @@ export class MessageList {
       selfUid: this.#selfUid,
       signal: this.#signal,
     });
+    // #126: mount thread panel for thread reply view.
+    if (this.#client.getThread) {
+      this.#threadPanel = new ThreadPanel({
+        container: this.#container,
+        getThread: (rootMsgId) => this.#client.getThread!(this.#roomId, rootMsgId),
+        sendReply: (text, rootMsgId) => this.#sendThreadReply(text, rootMsgId),
+        resolveName: (uid) => this.#roster.get(uid)?.displayName,
+        selfUid: this.#selfUid,
+        signal: this.#signal,
+        lang: this.#lang,
+      });
+    }
     }
 
     // P2: re-pin to bottom when a composer resize (reply-bar toggle) shrinks
@@ -883,6 +902,9 @@ export class MessageList {
     // #122: destroy read receipts overlay.
     this.#readReceipts?.destroy();
     this.#readReceipts = null;
+    // #126: destroy thread panel.
+    this.#threadPanel?.close();
+    this.#threadPanel = null;
     // issue #67: final backstop — revoke every blob: URL still tracked (any
     // row that survived to destroy() without being evicted first). Per-row
     // revocation on eviction happens in #evictOldMessages().
@@ -968,6 +990,48 @@ export class MessageList {
    * W7: Render a compact quote preview inside a bubble for a thread reply.
    * Looks up the root row in #rows; if unavailable, shows a fallback placeholder.
    */
+  /**
+   * #126: Render a "N replies" thread indicator button on root messages.
+   * Clicking opens the ThreadPanel for this message.
+   */
+  #renderThreadIndicator(el: HTMLElement, row: MessageRow): void {
+    // Count how many messages in #rows have this msgId as their threadRootMsgId
+    let replyCount = 0;
+    for (const r of this.#rows.values()) {
+      if (r.threadRootMsgId === row.msgId) replyCount++;
+    }
+    if (replyCount === 0) return;
+
+    // Remove existing indicator if re-rendering
+    const existing = el.querySelector('.oxp-thread-indicator');
+    if (existing) existing.remove();
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'oxp-thread-indicator';
+    const countText = replyCount === 1
+      ? t('threadReplyCount', this.#lang, { n: String(replyCount) })
+      : t('threadReplies', this.#lang, { n: String(replyCount) });
+    btn.textContent = `💬 ${countText}`;
+    btn.setAttribute('aria-label', countText);
+    btn.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      if (this.#threadPanel?.isOpen) {
+        this.#threadPanel.close();
+        return;
+      }
+      const threadRow: ThreadRow = {
+        msgId: row.msgId,
+        senderUid: row.senderUid,
+        text: row.text ?? decodeText(row),
+        createdAt: row.createdAt,
+        threadRootMsgId: null,
+      };
+      void this.#threadPanel?.open(threadRow);
+    });
+    el.appendChild(btn);
+  }
+
   #renderReplyQuote(el: HTMLElement, row: MessageRow): void {
     const rootRow = row.threadRootMsgId ? this.#rows.get(row.threadRootMsgId) : undefined;
     const quote = document.createElement('button');
@@ -1083,6 +1147,19 @@ export class MessageList {
     if (!isSelfMatch(row.senderUid, this.#selfUid) && this.#client.markRead && row.seq > 0) {
       void this.#client.markRead(this.#roomId, row.seq).catch(() => {});
     }
+  }
+
+  /**
+   * #126: Send a thread reply via the SDK.
+   * Delegates to client.sendText with threadRootMsgId set.
+   */
+  async #sendThreadReply(text: string, rootMsgId: string): Promise<void> {
+    if (!this.#client.sendText) throw new Error('sendText not available');
+    await this.#client.sendText(this.#roomId, {
+      senderUid: this.#selfUid,
+      text,
+      threadRootMsgId: rootMsgId,
+    });
   }
 
   /**
@@ -1851,6 +1928,10 @@ export class MessageList {
       this.#renderReplyQuote(el, row);
     }
     el.appendChild(bodyEl);
+    // #126: If this message has thread replies, render a thread indicator button.
+    if (!row.threadRootMsgId) {
+      this.#renderThreadIndicator(el, row);
+    }
 
     // W9: Render product card when a productRef + productMeta are present.
     // review-fix LOW: gate on !deletedAt && !unsealError so product card never
