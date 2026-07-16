@@ -19,6 +19,7 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get, keys, clear } from 'idb-keyval';
 import { createSFrameProvider } from '../sframe.js';
+import { DurableReplayGuard } from '../sframe-replay.js';
 import { ReplayError } from 'sframe-ratchet/chat';
 import type { CryptoProvider } from '../types.js';
 
@@ -328,5 +329,67 @@ describe('SFrame durable cross-reload anti-replay (SEC-CR-003)', () => {
     await expect(
       provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
     ).rejects.toBeInstanceOf(ReplayError);
+  });
+});
+
+/**
+ * SEC-CR-F4: the in-memory `mem` cache must be bounded — one MemWindow per distinct
+ * (namespace, room, sender) was created on hydrate and never released, so a long-lived
+ * always-open widget seeing many distinct senders/rooms grew `mem` without bound.
+ *
+ * These tests install a minimal Web Locks stub so the guard is `available` deterministically
+ * on ANY platform (node has no Web Locks API — the 6 cross-reload tests above are no-ops here
+ * and are the known darwin/node baseline failures). The `available === true` assertion + the
+ * re-hydrate assertion below both guard against a vacuous (no-op guard) pass.
+ */
+describe('DurableReplayGuard in-memory cache bound (SEC-CR-F4)', () => {
+  const savedNavDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+
+  function installLocksStub(): void {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        locks: {
+          request: (_name: string, _opts: unknown, cb: () => unknown): Promise<unknown> =>
+            Promise.resolve().then(() => cb()),
+        },
+      },
+      configurable: true,
+    });
+  }
+  function restoreNav(): void {
+    if (savedNavDesc) Object.defineProperty(globalThis, 'navigator', savedNavDesc);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+
+  /** Read the private `mem` size to assert the internal cache invariant (no public size API). */
+  const memSize = (g: DurableReplayGuard): number =>
+    (g as unknown as { mem: Map<string, unknown> }).mem.size;
+
+  it('caps mem via FIFO eviction; an evicted (room,sender) re-hydrates correctly from IDB', async () => {
+    installLocksStub();
+    try {
+      // fake-indexeddb (auto-imported) + the locks stub → the guard is durable-available.
+      const guard = new DurableReplayGuard({ warnIfUnavailable: false });
+      expect(guard.available).toBe(true); // anti-vacuous: a no-op guard would never grow `mem`
+
+      const CAP = 256;
+      const OVERFLOW = 10;
+      const CTR = 5n;
+      // Accept one CTR per distinct (room, sender) key. Sequential awaits ⇒ each persist
+      // settles (drains `persisting`) before the next accept, so the oldest is always evictable.
+      for (let i = 0; i < CAP + OVERFLOW; i++) {
+        await guard.accept(`room-${i}`, 'sender', CTR);
+      }
+
+      // FIX: mem never exceeds the cap. RED pre-fix: it is CAP + OVERFLOW (266) — unbounded growth.
+      expect(memSize(guard)).toBeLessThanOrEqual(CAP);
+
+      // room-0 (oldest) was evicted, but its CTR is durably persisted: a re-check re-hydrates from
+      // IDB and STILL rejects the replay, and a genuinely-new CTR is accepted (no false reject).
+      expect(await guard.check('room-0', 'sender', CTR)).toBe(false); // already seen → replay
+      expect(await guard.check('room-0', 'sender', 999n)).toBe(true); // never seen → accept
+    } finally {
+      restoreNav();
+    }
   });
 });

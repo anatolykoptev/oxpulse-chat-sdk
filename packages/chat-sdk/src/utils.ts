@@ -100,23 +100,32 @@ export function backoffMs(attempt: number): number {
 }
 
 /**
- * Generate a UUID v4, with a safe fallback for environments where `crypto.randomUUID`
- * is unavailable (Node 18 without `--experimental-global-webcrypto`, non-secure HTTP,
- * test environments, etc.).
+ * Generate a UUID v4 using a cryptographically-secure RNG.
+ *
+ * F13 (fail-closed CSPRNG): `crypto.randomUUID` is preferred; otherwise the 16 random bytes
+ * come from `crypto.getRandomValues`. When NEITHER is available we THROW rather than fall back
+ * to `Math.random()` — a non-CSPRNG would be a SILENT security downgrade for any caller that
+ * treats the id as unpredictable, and this is a public export (index.ts) usable for nonces /
+ * session ids, not only message ids. On every supported runtime — a browser secure origin, or
+ * Node >= 18 with WebCrypto (`globalThis.crypto`) — `getRandomValues` is present, so the throw
+ * is unreachable in practice; it converts an unsupported/insecure runtime into a loud error
+ * instead of weak randomness.
  */
 export function generateUUID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
 
-  const bytes = new Uint8Array(16);
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') {
+    throw new Error(
+      'generateUUID: no cryptographically-secure RNG available (crypto.randomUUID and ' +
+        'crypto.getRandomValues are both absent). Refusing to fall back to Math.random() — ' +
+        'run on a secure origin / a runtime with WebCrypto.',
+    );
   }
+
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
 
   // RFC 4122 variant/version bits.
   bytes.set([((bytes[6] ?? 0) & 0x0f) | 0x40], 6);

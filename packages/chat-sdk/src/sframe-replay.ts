@@ -39,6 +39,24 @@ import { get, set } from 'idb-keyval';
 const KEY_PREFIX = 'sframe-replay';
 const DEFAULT_WINDOW = 1024;
 
+/**
+ * SEC-CR-F4 (availability): upper bound on the number of per-(room, sender) `MemWindow`
+ * entries retained in the in-memory `mem` cache. One entry is created per distinct
+ * (namespace, roomId, senderUid) on first hydrate and never released otherwise, so a
+ * long-lived always-open widget that sees many distinct rooms/senders would grow `mem`
+ * without bound (slow memory leak). When the cache exceeds this cap the OLDEST evictable
+ * entry (insertion-order FIFO) is dropped; the DURABLE IndexedDB store is the source of
+ * truth, so an evicted pair simply re-hydrates from IDB on its next use — correctness is
+ * preserved (no false replay-accept/reject), only an in-memory read is forgone.
+ *
+ * Mirrors `ACTIVE_CRYPTO_MODE_MAP_CAP = 256` in client.ts (the shipped FIFO cap for exactly
+ * this class): 256 distinct (room, sender) pairs is already generous for a chat widget, and
+ * re-hydration on eviction is a cheap async IDB read. Like the sibling this is bounded-FIFO,
+ * NOT LRU — a re-used pair does not move to the back, so a genuinely hot-but-old pair is not
+ * specially protected (acceptable: it re-resolves from IDB on its next message).
+ */
+const REPLAY_MEM_CACHE_CAP = 256;
+
 /** Persisted shape for one (room, sender) replay window. `seen` is oldest-first. */
 interface PersistedWindow {
   v: 1;
@@ -128,6 +146,14 @@ export class DurableReplayGuard {
   private readonly window: number;
   private readonly mem = new Map<string, MemWindow>();
   private readonly hydrating = new Map<string, Promise<MemWindow>>();
+  /**
+   * Per-key count of in-flight persists (SEC-CR-F4). A key with a queued/running persist has
+   * an accepted CTR that is NOT yet in the durable store, so evicting it from `mem` and then
+   * re-hydrating from IDB would read a STALE window and false-ACCEPT that very CTR as new.
+   * `trimMemCache` therefore never evicts a key present here. A counter (not a Set) because two
+   * overlapping unseals of one (room, sender) can schedule two persists concurrently.
+   */
+  private readonly persisting = new Map<string, number>();
   /** Serializes persist writes so interleaved snapshots cannot clobber each other. */
   private persistTail: Promise<void> = Promise.resolve();
   private warnedPersistFail = false;
@@ -200,6 +226,11 @@ export class DurableReplayGuard {
       const win: MemWindow = { set: new Set(order), order };
       this.mem.set(key, win);
       this.hydrating.delete(key);
+      // SEC-CR-F4: bound the in-memory cache. Runs after the insert so the freshest read
+      // (this `key`) is protected; evicts the oldest safe entry (never mid-hydration nor an
+      // entry with an in-flight persist). The durable store is authoritative, so an evicted
+      // pair re-hydrates correctly on next use.
+      this.trimMemCache(key);
       return win;
     })();
     this.hydrating.set(key, p);
@@ -227,6 +258,12 @@ export class DurableReplayGuard {
     const ctrStr = ctr.toString();
     if (win.set.has(ctrStr)) return;
 
+    // SEC-CR-F4: mark this key as having an in-flight mutation+persist BEFORE mutating `win`, so a
+    // concurrent hydrate-triggered `trimMemCache` cannot evict it mid-persist (which would let a
+    // fresh hydrate re-read stale IDB and false-accept this very CTR). Cleared once the persist
+    // settles (the appended `.then` — the chain is already resolved by the preceding `.catch`).
+    this.persisting.set(key, (this.persisting.get(key) ?? 0) + 1);
+
     win.set.add(ctrStr);
     win.order.push(ctrStr);
     this.trim(win);
@@ -236,8 +273,47 @@ export class DurableReplayGuard {
     this.persistTail = this.persistTail
       .catch(() => undefined)
       .then(() => this.persistMerged(key, win))
-      .catch((err: unknown) => this.warnPersistFail(err));
+      .catch((err: unknown) => this.warnPersistFail(err))
+      .then(() => this.releasePersisting(key));
     await this.persistTail;
+  }
+
+  /** Decrement the in-flight-persist count for a key, deleting it at zero (SEC-CR-F4). */
+  private releasePersisting(key: string): void {
+    const next = (this.persisting.get(key) ?? 1) - 1;
+    if (next <= 0) this.persisting.delete(key);
+    else this.persisting.set(key, next);
+  }
+
+  /**
+   * SEC-CR-F4 (availability): keep the in-memory `mem` cache bounded by REPLAY_MEM_CACHE_CAP,
+   * evicting the OLDEST evictable (room, sender) entry (insertion-order FIFO). Mirrors
+   * client.ts's `#boundActiveCryptoModeMap`. The durable IDB store is authoritative, so an
+   * evicted entry re-hydrates on next use with no correctness loss.
+   *
+   * Never evicts:
+   *   - `justHydratedKey` — the freshest read that just triggered this call;
+   *   - a key still in `hydrating` — its mem entry is mid-load;
+   *   - a key in `persisting` — it holds an accepted CTR not yet durably written; evicting it
+   *     then re-hydrating from IDB would read a stale window and false-accept that CTR (replay).
+   *
+   * If every over-cap entry is protected the loop stops (temporarily over cap); it self-heals
+   * once the in-flight persists settle and `persisting` drains.
+   */
+  private trimMemCache(justHydratedKey: string): void {
+    while (this.mem.size > REPLAY_MEM_CACHE_CAP) {
+      let evicted = false;
+      // Map iteration is insertion-order → the first eligible key is the oldest.
+      for (const key of this.mem.keys()) {
+        if (key === justHydratedKey) continue;
+        if (this.hydrating.has(key)) continue;
+        if (this.persisting.has(key)) continue;
+        this.mem.delete(key);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
+    }
   }
 
   /** Drop oldest CTRs until the in-memory window is within bound. */
