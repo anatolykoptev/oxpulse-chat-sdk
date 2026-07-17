@@ -25,6 +25,7 @@ import type { ProductMeta } from './types.js';
 export type SDKCatalogErrorCode =
 	| 'invalid_args'
 	| 'network'
+	| 'aborted'
 	| 'server_4xx'
 	| 'server_5xx'
 	| 'not_found'
@@ -221,6 +222,14 @@ export class SDKCatalogClient {
 				signal,
 			});
 		} catch (err) {
+			// Distinguish intentional abort from network failure.
+			if (err instanceof DOMException && err.name === 'AbortError') {
+				throw new SDKCatalogError(
+					'aborted',
+					`catalog ${method} ${path} aborted`,
+					err,
+				);
+			}
 			throw new SDKCatalogError(
 				'network',
 				`catalog ${method} ${path} network error`,

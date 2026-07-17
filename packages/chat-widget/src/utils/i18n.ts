@@ -102,6 +102,7 @@ export type LocaleKey =
   | 'productPickerNoProducts'
   | 'productPickerNoMatches'
   | 'productPickerBtnAria'
+  | 'productPickerList'
   // Reconnect banner
   | 'sessionExpired'
   | 'refresh'
@@ -241,6 +242,7 @@ const en: LocaleTable = {
   productPickerNoProducts: 'No products in catalog',
   productPickerNoMatches: 'No matches',
   productPickerBtnAria: 'Open product catalog',
+  productPickerList: 'Product list',
 
   sessionExpired: 'Session expired.',
   refresh: 'Refresh',
@@ -373,6 +375,7 @@ const ru: LocaleTable = {
   productPickerNoProducts: 'В каталоге нет товаров',
   productPickerNoMatches: 'Ничего не найдено',
   productPickerBtnAria: 'Открыть каталог товаров',
+  productPickerList: 'Список товаров',
 
   sessionExpired: 'Сессия истекла.',
   refresh: 'Обновить',

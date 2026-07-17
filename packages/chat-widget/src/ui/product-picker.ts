@@ -245,7 +245,7 @@ export class ProductPicker {
     const listEl = document.createElement("div");
     listEl.className = "oxp-product-picker-list";
     listEl.setAttribute("role", "listbox");
-    listEl.setAttribute("aria-label", "Product list");
+    listEl.setAttribute("aria-label", t("productPickerList", this.#lang));
     this.#listEl = listEl;
 
     el.appendChild(searchWrap);
