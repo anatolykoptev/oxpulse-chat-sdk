@@ -19,6 +19,7 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get, keys, clear } from 'idb-keyval';
 import { createSFrameProvider } from '../sframe.js';
+import { DurableReplayGuard } from '../sframe-replay.js';
 import { ReplayError } from 'sframe-ratchet/chat';
 import type { CryptoProvider } from '../types.js';
 
@@ -328,5 +329,151 @@ describe('SFrame durable cross-reload anti-replay (SEC-CR-003)', () => {
     await expect(
       provider.unseal(frame, { roomId: ROOM_ID, senderUid: SENDER_UID }),
     ).rejects.toBeInstanceOf(ReplayError);
+  });
+});
+
+/**
+ * SEC-CR-F4: the in-memory `mem` cache must be bounded — one MemWindow per distinct
+ * (namespace, room, sender) was created on hydrate and never released, so a long-lived
+ * always-open widget seeing many distinct senders/rooms grew `mem` without bound.
+ *
+ * These tests install a minimal Web Locks stub so the guard is `available` deterministically
+ * on ANY platform (node has no Web Locks API — the 6 cross-reload tests above are no-ops here
+ * and are the known darwin/node baseline failures). The `available === true` assertion + the
+ * re-hydrate assertion below both guard against a vacuous (no-op guard) pass.
+ */
+describe('DurableReplayGuard in-memory cache bound (SEC-CR-F4)', () => {
+  const savedNavDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+
+  function installLocksStub(): void {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        locks: {
+          request: (_name: string, _opts: unknown, cb: () => unknown): Promise<unknown> =>
+            Promise.resolve().then(() => cb()),
+        },
+      },
+      configurable: true,
+    });
+  }
+  function restoreNav(): void {
+    if (savedNavDesc) Object.defineProperty(globalThis, 'navigator', savedNavDesc);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
+
+  /** Read the private `mem` size to assert the internal cache invariant (no public size API). */
+  const memSize = (g: DurableReplayGuard): number =>
+    (g as unknown as { mem: Map<string, unknown> }).mem.size;
+
+  it('caps mem via FIFO eviction; an evicted (room,sender) re-hydrates correctly from IDB', async () => {
+    installLocksStub();
+    try {
+      // fake-indexeddb (auto-imported) + the locks stub → the guard is durable-available.
+      const guard = new DurableReplayGuard({ warnIfUnavailable: false });
+      expect(guard.available).toBe(true); // anti-vacuous: a no-op guard would never grow `mem`
+
+      const CAP = 256;
+      const OVERFLOW = 10;
+      const CTR = 5n;
+      // Accept one CTR per distinct (room, sender) key. Sequential awaits ⇒ each persist
+      // settles (drains `persisting`) before the next accept, so the oldest is always evictable.
+      for (let i = 0; i < CAP + OVERFLOW; i++) {
+        await guard.accept(`room-${i}`, 'sender', CTR);
+      }
+
+      // FIX: mem never exceeds the cap. RED pre-fix: it is CAP + OVERFLOW (266) — unbounded growth.
+      expect(memSize(guard)).toBeLessThanOrEqual(CAP);
+
+      // room-0 (oldest) was evicted, but its CTR is durably persisted: a re-check re-hydrates from
+      // IDB and STILL rejects the replay, and a genuinely-new CTR is accepted (no false reject).
+      expect(await guard.check('room-0', 'sender', CTR)).toBe(false); // already seen → replay
+      expect(await guard.check('room-0', 'sender', 999n)).toBe(true); // never seen → accept
+    } finally {
+      restoreNav();
+    }
+  });
+
+  /**
+   * A Web Locks stub whose `request` NEVER settles until the test explicitly calls `release()`
+   * — lets a test genuinely hold a `persistMerged` call in flight (and therefore its key
+   * `persisting`) across other guard operations, instead of racing real microtask timing.
+   */
+  function installControllableLocksStub(): {
+    pending: Array<{ name: string }>;
+    release: () => void;
+  } {
+    const pending: Array<{ name: string; run: () => void }> = [];
+    Object.defineProperty(globalThis, 'navigator', {
+      value: {
+        locks: {
+          request: (name: string, _opts: unknown, cb: () => unknown): Promise<unknown> =>
+            new Promise((resolve, reject) => {
+              pending.push({
+                name,
+                run: () => {
+                  Promise.resolve().then(cb).then(resolve, reject);
+                },
+              });
+            }),
+        },
+      },
+      configurable: true,
+    });
+    return {
+      pending,
+      release: () => pending.splice(0, pending.length).forEach((entry) => entry.run()),
+    };
+  }
+
+  /** Poll (macrotask ticks — fake-indexeddb's IDBRequest events resolve on a task, not a microtask). */
+  async function waitUntil(cond: () => boolean, maxTicks = 500): Promise<void> {
+    for (let i = 0; i < maxTicks; i++) {
+      if (cond()) return;
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+    if (!cond()) throw new Error('waitUntil: condition never became true');
+  }
+
+  it('SEC-CR-189-01: a key with an in-flight persist survives trim (even though oldest); self-heals once it drains', async () => {
+    const { pending, release } = installControllableLocksStub();
+    try {
+      const guard = new DurableReplayGuard({ warnIfUnavailable: false });
+      expect(guard.available).toBe(true); // anti-vacuous
+
+      const CAP = 256;
+      const holdKey = 'sframe-replay|default|room-hold|sender';
+
+      // Start an accept() whose persistMerged reaches navigator.locks.request and BLOCKS there
+      // (the stub above never auto-resolves) — this is the oldest entry, with `persisting` set,
+      // genuinely in flight (not merely "not yet awaited") for the entire test until release().
+      const holdPromise = guard.accept('room-hold', 'sender', 1n);
+      await waitUntil(() => pending.some((p) => p.name.includes('room-hold')));
+      expect(memSize(guard)).toBe(1);
+
+      // Push CAP more DISTINCT keys through check() (hydrate-only — never touches `persisting`,
+      // so each becomes immediately evictable once no longer the freshest). Sequential awaits so
+      // each hydrate (and any trim it triggers) fully settles before the next.
+      for (let i = 0; i < CAP; i++) {
+        await guard.check(`room-fill-${i}`, 'sender', 1n);
+      }
+
+      // mem holds hold + CAP fills = 257 > cap. Trim must have evicted the oldest NON-persisting
+      // entry (room-fill-0) each time it ran — room-hold (still persisting) must have SURVIVED,
+      // proving the `persisting.has(key)` skip in trimMemCache is load-bearing.
+      expect(memSize(guard)).toBeLessThanOrEqual(CAP);
+      expect((guard as unknown as { mem: Map<string, unknown> }).mem.has(holdKey)).toBe(true);
+
+      // Release the held lock — room-hold's persist completes, `persisting` drains.
+      release();
+      await holdPromise;
+      expect((guard as unknown as { persisting: Map<string, number> }).persisting.size).toBe(0);
+
+      // Self-heal: room-hold is now the oldest AND no longer persisting — the next trim evicts it.
+      await guard.check('room-fill-256', 'sender', 1n);
+      expect(memSize(guard)).toBeLessThanOrEqual(CAP);
+      expect((guard as unknown as { mem: Map<string, unknown> }).mem.has(holdKey)).toBe(false);
+    } finally {
+      restoreNav();
+    }
   });
 });

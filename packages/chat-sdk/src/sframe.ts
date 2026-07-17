@@ -72,7 +72,19 @@ export interface SFrameProviderOptions {
   durableReplay?: boolean;
   /** Namespace for the durable replay IDB store (isolate independent key-spaces). Default `'default'`. */
   durableReplayNamespace?: string;
-  /** Durable replay window size (distinct recent CTRs per sender per room). Default 1024. */
+  /**
+   * Durable replay window size (distinct recent CTRs per sender per room). Default 1024
+   * (equals `replayWindow`'s default, so both windows are configured EQUAL out of the box).
+   *
+   * SEC-CR-189-02: recommend `durableReplayWindow <= replayWindow`. `DurableReplayGuard`'s
+   * in-memory cache can — for a bounded stretch while a persist write is still in flight
+   * (`sframe-replay.ts`'s `persisting` guard) — release a not-yet-durable CTR slightly earlier
+   * than the window would normally evict it. This is harmless at equal windows: sframe-ratchet's
+   * OWN in-memory `replayWindow` (same CTR span) still rejects that in-session replay as a
+   * backstop. Setting `durableReplayWindow` LARGER than `replayWindow` removes that backstop for
+   * the extra span and reopens a narrow in-session replay window. Both currently default to
+   * 1024 and no caller in this repo sets them independently.
+   */
   durableReplayWindow?: number;
 }
 
