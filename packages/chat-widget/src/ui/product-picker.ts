@@ -18,7 +18,7 @@
  *     onSelect → composer.setProductCard(ref, meta) → existing chip → send
  */
 
-import { t, resolveLocale, type Locale } from "../utils/i18n.js";
+import { t, resolveLocale, formatPrice, type Locale } from "../utils/i18n.js";
 import { computeFloatingPosition } from "../utils/floating-position.js";
 import type { ProductMeta } from "../types.js";
 import type { SDKCatalogClient, CatalogProduct } from "@oxpulse/chat-sdk";
@@ -238,6 +238,19 @@ export class ProductPicker {
       this.#currentQuery = searchInput.value.toLowerCase();
       this.#renderList();
     });
+    // #204: Arrow-key nav is dead from the search input (where focus lands on
+    // open) — the per-item keydown listener only fires once an item is focused.
+    // Forward ArrowDown→first item, ArrowUp→last item so a keyboard user can
+    // descend into the list from the input (listbox/combobox APG expectation).
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" && this.#itemButtons.length > 0) {
+        e.preventDefault();
+        this.#itemButtons[0]?.focus();
+      } else if (e.key === "ArrowUp" && this.#itemButtons.length > 0) {
+        e.preventDefault();
+        this.#itemButtons[this.#itemButtons.length - 1]?.focus();
+      }
+    });
     searchWrap.appendChild(searchInput);
     this.#searchInput = searchInput;
 
@@ -246,6 +259,11 @@ export class ProductPicker {
     listEl.className = "oxp-product-picker-list";
     listEl.setAttribute("role", "listbox");
     listEl.setAttribute("aria-label", t("productPickerList", this.#lang));
+    // #200: aria-live on the STABLE container (not per-branch on fresh child
+    // nodes) so every state transition — loading / error / empty / result-count
+    // — announces to assistive tech (WCAG 2.2 SC 4.1.3). Set once here; the
+    // per-branch aria-live on the loading node was removed.
+    listEl.setAttribute("aria-live", "polite");
     this.#listEl = listEl;
 
     el.appendChild(searchWrap);
@@ -254,9 +272,16 @@ export class ProductPicker {
   }
 
   async #loadProducts(): Promise<void> {
-    if (this.#loading || this.#allProducts.length > 0) return;
+    // #199: drop the `#allProducts.length > 0` short-circuit — the Composer
+    // reuses ONE picker instance across opens, so caching the first non-empty
+    // page froze the list for the widget lifetime (stale after add/edit/delete).
+    // Refetch on every show(); keep only the in-flight #loading guard so a
+    // rapid double-open doesn't fire two concurrent fetches.
+    if (this.#loading) return;
     this.#loading = true;
     this.#loadError = false;
+    this.#allProducts = [];
+    this.#filteredProducts = [];
     this.#renderList();
 
     try {
@@ -283,8 +308,10 @@ export class ProductPicker {
     // Filter by search query
     if (this.#currentQuery) {
       this.#filteredProducts = this.#allProducts.filter((p) => {
-        const title = p.productMeta.title.toLowerCase();
-        const ref = p.productRef.toLowerCase();
+        // #205: title may be undefined/empty for a malformed catalog entry —
+        // guard so the filter doesn't throw on `.toLowerCase()`.
+        const title = (p.productMeta.title ?? "").toLowerCase();
+        const ref = (p.productRef ?? "").toLowerCase();
         return title.includes(this.#currentQuery) || ref.includes(this.#currentQuery);
       });
     } else {
@@ -299,7 +326,6 @@ export class ProductPicker {
       const loading = document.createElement("div");
       loading.className = "oxp-product-picker-loading";
       loading.textContent = t("productPickerLoading", this.#lang);
-      loading.setAttribute("aria-live", "polite");
       this.#listEl.appendChild(loading);
       return;
     }
@@ -325,21 +351,36 @@ export class ProductPicker {
 
     // Render product items
     for (const product of this.#filteredProducts) {
+      const meta = product.productMeta;
+      // #205: guard against missing meta fields — `textContent = undefined`
+      // renders the literal string "undefined". Fall back to a localized
+      // "Untitled product" for an empty/missing title; skip the price span
+      // entirely when price/currency is absent (don't render "undefined undefined").
+      const title = meta.title || t("productPickerUntitled", this.#lang);
+      const hasPrice =
+        typeof meta.price === "number" && Number.isFinite(meta.price) &&
+        typeof meta.currency === "string" && meta.currency.length > 0;
+
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "oxp-product-picker-item";
       btn.setAttribute("role", "option");
-      btn.setAttribute("aria-label", product.productMeta.title);
+      btn.setAttribute("aria-label", title);
 
       const titleEl = document.createElement("span");
       titleEl.className = "oxp-product-picker-item-title";
-      titleEl.textContent = product.productMeta.title;
+      titleEl.textContent = title;
       btn.appendChild(titleEl);
 
-      const priceEl = document.createElement("span");
-      priceEl.className = "oxp-product-picker-item-price";
-      priceEl.textContent = `${product.productMeta.price} ${product.productMeta.currency}`;
-      btn.appendChild(priceEl);
+      if (hasPrice) {
+        const priceEl = document.createElement("span");
+        priceEl.className = "oxp-product-picker-item-price";
+        // #207: price is now a JSON number — format locale-aware via
+        // Intl.NumberFormat (currency style), graceful fallback to the raw
+        // number if `currency` is not a valid ISO-4217 code.
+        priceEl.textContent = formatPrice(meta.price, meta.currency, this.#lang);
+        btn.appendChild(priceEl);
+      }
 
       btn.addEventListener("click", () => {
         this.#onSelect(product.productRef, product.productMeta);

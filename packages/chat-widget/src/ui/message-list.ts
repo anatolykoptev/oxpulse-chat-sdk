@@ -15,7 +15,7 @@ import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl, replyBodySnapshotForMessage } from '../utils/attachments.js';
 import { shouldAutoScroll, isChained, formatTime, formatDuration, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch, cssEscape } from '../utils/list-helpers.js';
 import { reactionButtonAriaLabel, HEART_EMOJI } from '../utils/reaction-types.js';
-import { t, resolveLocale, type Locale } from '../utils/i18n.js';
+import { t, resolveLocale, formatPrice, type Locale } from '../utils/i18n.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { ReactionQuickBar } from './reaction-quick-bar.js';
 import { ReactionTrigger } from './reaction-trigger.js';
@@ -646,9 +646,9 @@ const PRODUCT_URL_MAX = 2048;
  * fields are unusable (→ the card is skipped, the message still renders).
  *
  * #207: `price` is now a JSON number (non-negative, finite), not a
- * host-pre-formatted string. Locale-aware formatting (Intl.NumberFormat) is
- * applied in a later batch; until then renderProduct renders the raw number
- * verbatim as `${price} ${currency}`.
+ * host-pre-formatted string. `renderProduct` formats it locale-aware via
+ * `formatPrice` (Intl.NumberFormat, currency style) — graceful fallback to
+ * the raw number if `currency` is not a valid ISO-4217 code.
  */
 function normalizeProductMeta(raw: unknown): ProductMeta | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -699,7 +699,7 @@ function renderProduct(meta: ProductMeta, lang: Locale): HTMLElement {
 
   const price = document.createElement('div');
   price.className = 'oxp-product-price';
-  price.textContent = `${meta.price} ${meta.currency}`;
+  price.textContent = formatPrice(meta.price, meta.currency, lang);
   card.appendChild(price);
 
   if (safeUrl) {

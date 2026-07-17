@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { t, resolveLocale, lookupWithFallback, SUPPORTED_LOCALES, type Locale, type LocaleKey } from '../utils/i18n.js';
+import { t, resolveLocale, lookupWithFallback, formatPrice, SUPPORTED_LOCALES, type Locale, type LocaleKey } from '../utils/i18n.js';
 
 // Single source of truth for "every key" tests below — keep this in lockstep
 // with the LocaleKey union in ../utils/i18n.ts. Shared by both tests so a new
@@ -116,5 +116,31 @@ describe('t', () => {
     for (const key of ALL_LOCALE_KEYS) {
       expect(t(key, 'en'), key).not.toBe(t(key, 'ru'));
     }
+  });
+});
+
+// ── #207: numeric price formatting (Intl.NumberFormat, currency style) ────────
+
+describe('formatPrice', () => {
+  it('formats a numeric price with the en locale currency style', () => {
+    // en + USD → "$19.99". Asserts it is NOT the raw "19.99 USD" verbatim
+    // rendering the old string-contract produced.
+    const out = formatPrice(19.99, 'USD', 'en');
+    expect(out).not.toBe('19.99 USD');
+    expect(out).toMatch(/19\.99/);
+  });
+
+  it('falls back to the raw number for an invalid ISO-4217 currency code', () => {
+    // "dollars" is not a 3-letter alpha code → shape guard rejects it →
+    // graceful fallback to String(price), never throws, never "undefined".
+    expect(formatPrice(19.99, 'dollars', 'en')).toBe('19.99');
+    // Lowercase / too-long / numeric codes also fall back.
+    expect(formatPrice(19.99, 'usd', 'en')).toBe('19.99');
+    expect(formatPrice(19.99, 'USDX', 'en')).toBe('19.99');
+  });
+
+  it('falls back to the raw value for a non-finite price', () => {
+    expect(formatPrice(Number.NaN, 'USD', 'en')).toBe('NaN');
+    expect(formatPrice(Number.POSITIVE_INFINITY, 'USD', 'en')).toBe('Infinity');
   });
 });

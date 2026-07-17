@@ -1316,7 +1316,11 @@ describe('MessageList — W9 product card', () => {
     const card = bubble!.querySelector('.oxp-bubble-product');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('Widget Pro');
-    expect(card!.textContent).toContain('999 USD');
+    // #207: price is now a JSON number, formatted locale-aware via
+    // Intl.NumberFormat (en + USD → "$999.00"), NOT the old verbatim
+    // "999 USD" string coercion.
+    expect(card!.textContent).not.toContain('999 USD');
+    expect(card!.textContent).toMatch(/999/);
 
     const link = card!.querySelector('.oxp-product-link') as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
