@@ -61,7 +61,7 @@ export type { FetchRosterOptions, RosterEntry, PrivilegedRole } from './roster.j
 // ─── Seller product catalog ──────────────────────────────────────────────────
 
 export { SDKCatalogClient, SDKCatalogError } from './catalog.js';
-export type { SDKCatalogErrorCode, CatalogProduct } from './catalog.js';
+export type { SDKCatalogErrorCode, CatalogProduct, CatalogProductList } from './catalog.js';
 
 // ─── Wire-codec re-exports (compression API) ─────────────────────────────────
 // Production-safe symbols only. Test-only helpers (_evictDictForTesting,

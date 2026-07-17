@@ -17,6 +17,10 @@
  */
 
 import type { ProductMeta } from './types.js';
+// #195: reuse the rooms boundary-mapping pattern — do NOT hand-roll a parallel
+// snake↔camel mapper. normalizeProductMeta is the shared product_meta validator
+// used by both the message-row path (client.ts) and this catalog CRUD path.
+import { normalizeProductMeta } from './client.js';
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -55,7 +59,7 @@ export class SDKCatalogError extends Error {
 // Types
 // ---------------------------------------------------------------------------
 
-/** A product in the seller's catalog. */
+/** A product in the seller's catalog (camelCase SDK surface). */
 export interface CatalogProduct {
 	productRef: string;
 	productMeta: ProductMeta;
@@ -64,20 +68,87 @@ export interface CatalogProduct {
 	archivedAt: string | null;
 }
 
-/** Response shape from GET /api/sdk/catalog/products. */
-interface CatalogProductListDTO {
+/**
+ * #195: Result of GET /api/sdk/catalog/products. The wire envelope is
+ * `{ products, has_more, next_cursor }` (snake_case); this is the mapped
+ * camelCase surface returned to SDK consumers.
+ */
+export interface CatalogProductList {
 	products: CatalogProduct[];
+	hasMore: boolean;
+	nextCursor?: string;
 }
 
-/** Request body for POST /api/sdk/catalog/products. */
-interface CreateProductRequest {
-	productRef: string;
-	productMeta: ProductMeta;
+// ── Wire DTOs (snake_case — server contract, #195) ──────────────────────────
+//
+// Only the top-level envelope is snake_case; the nested `product_meta` blob
+// (title/price/currency/imageUrl/productUrl) is legitimately camelCase on both
+// sides. Mirrors the rooms DTO pattern in client.ts (RoomDTO / dtoToRoom).
+
+/** Response DTO for a single product (POST/GET/PATCH). */
+interface CatalogProductDTO {
+	product_ref: string;
+	product_meta: unknown;
+	created_at: string;
+	updated_at: string;
+	archived_at: string | null;
 }
 
-/** Request body for PATCH /api/sdk/catalog/products/:ref. */
-interface UpdateProductRequest {
-	productMeta: ProductMeta;
+/** Response DTO for GET /api/sdk/catalog/products. */
+interface CatalogProductListDTO {
+	products: CatalogProductDTO[];
+	has_more: boolean;
+	next_cursor?: string | null;
+}
+
+/** Request body for POST /api/sdk/catalog/products (snake_case). */
+interface CreateProductRequestDTO {
+	product_ref: string;
+	product_meta: ProductMeta;
+}
+
+/** Request body for PATCH /api/sdk/catalog/products/:ref (snake_case). */
+interface UpdateProductRequestDTO {
+	product_meta: ProductMeta;
+}
+
+/**
+ * #195: Map a snake_case product DTO to the camelCase `CatalogProduct` SDK
+ * surface. Reuses `normalizeProductMeta` (client.ts) for the product_meta blob
+ * so the catalog CRUD path and the message-row path share one validator —
+ * never a blind `as unknown as CatalogProduct` cast that leaves productRef /
+ * createdAt / archivedAt undefined.
+ *
+ * `product_meta` is normalized defensively: a malformed blob degrades to a
+ * minimal valid ProductMeta rather than surfacing garbage / throwing. The
+ * server validates product_meta on write, but the SDK receive boundary stays
+ * defensive (peer-controlled shape on the message-row path).
+ */
+function dtoToCatalogProduct(dto: CatalogProductDTO): CatalogProduct {
+	const meta = normalizeProductMeta(dto.product_meta);
+	// Server-validated on write; if a row somehow lacks a usable product_meta,
+	// fall back to an empty-but-typed shape rather than null (CatalogProduct
+	// promises a non-null productMeta).
+	const productMeta: ProductMeta = meta ?? { title: '', price: 0, currency: '', imageUrl: '', productUrl: '' };
+	return {
+		productRef: dto.product_ref,
+		productMeta,
+		createdAt: dto.created_at,
+		updatedAt: dto.updated_at,
+		archivedAt: dto.archived_at,
+	};
+}
+
+/**
+ * Build the `?limit=&cursor=` query string for listProducts. Empty when neither
+ * param is supplied (no trailing `?`). Cursor is encoded — a malformed cursor
+ * is surfaced by the server as a 400 → validation_error.
+ */
+function buildListQuery(limit?: number, cursor?: string): string {
+	const params: string[] = [];
+	if (limit != null) params.push(`limit=${encodeURIComponent(limit)}`);
+	if (cursor != null) params.push(`cursor=${encodeURIComponent(cursor)}`);
+	return params.length > 0 ? `?${params.join('&')}` : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -99,11 +170,11 @@ interface UpdateProductRequest {
  * // Create a product
  * const product = await catalog.createProduct({
  *   productRef: 'sku-123',
- *   productMeta: { title: 'Widget', price: '19.99', currency: 'USD', imageUrl: '', productUrl: '' },
+ *   productMeta: { title: 'Widget', price: 19.99, currency: 'USD', imageUrl: '', productUrl: '' },
  * });
  *
  * // List all products
- * const { products } = await catalog.listProducts();
+ * const { products, hasMore, nextCursor } = await catalog.listProducts();
  *
  * // Send a product card in chat (using existing SDKChatClient)
  * chatClient.setProductCard(product.productRef, product.productMeta);
@@ -149,25 +220,36 @@ export class SDKCatalogClient {
 		productMeta: ProductMeta;
 		signal?: AbortSignal;
 	}): Promise<CatalogProduct> {
-		const body: CreateProductRequest = {
-			productRef: args.productRef,
-			productMeta: args.productMeta,
+		// #195: wire envelope is snake_case { product_ref, product_meta }.
+		const body: CreateProductRequestDTO = {
+			product_ref: args.productRef,
+			product_meta: args.productMeta,
 		};
 		const resp = await this.request('POST', '/api/sdk/catalog/products', body, args.signal);
-		return resp as unknown as CatalogProduct;
+		return dtoToCatalogProduct(resp as CatalogProductDTO);
 	}
 
 	/**
-	 * List all active products in the seller's catalog (newest first).
+	 * List active products in the seller's catalog (newest first), with
+	 * cursor-based pagination.
 	 *
-	 * @param opts.limit Max products to return (default 500, max 1000).
-	 * @param opts.signal Optional AbortSignal to cancel the request.
+	 * @param opts.limit   Max products to return (server-capped).
+	 * @param opts.cursor  Opaque cursor from a prior `nextCursor` (next page).
+	 * @param opts.signal  Optional AbortSignal to cancel the request.
+	 * @returns `{ products, hasMore, nextCursor }` — mapped from the snake_case
+	 *          `{ products, has_more, next_cursor }` envelope.
+	 * @throws {SDKCatalogError} code='validation_error' on a malformed cursor (400).
 	 * @throws {SDKCatalogError} on transport/auth errors.
 	 */
-	async listProducts(opts?: { limit?: number; signal?: AbortSignal }): Promise<CatalogProduct[]> {
-		const qs = opts?.limit != null ? `?limit=${encodeURIComponent(opts.limit)}` : '';
+	async listProducts(opts?: { limit?: number; cursor?: string; signal?: AbortSignal }): Promise<CatalogProductList> {
+		const qs = buildListQuery(opts?.limit, opts?.cursor);
 		const resp = await this.request('GET', `/api/sdk/catalog/products${qs}`, undefined, opts?.signal);
-		return (resp as unknown as CatalogProductListDTO).products;
+		const dto = resp as CatalogProductListDTO;
+		return {
+			products: dto.products.map(dtoToCatalogProduct),
+			hasMore: dto.has_more,
+			nextCursor: dto.next_cursor ?? undefined,
+		};
 	}
 
 	/**
@@ -177,7 +259,7 @@ export class SDKCatalogClient {
 	 */
 	async getProduct(productRef: string, signal?: AbortSignal): Promise<CatalogProduct> {
 		const resp = await this.request('GET', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`, undefined, signal);
-		return resp as unknown as CatalogProduct;
+		return dtoToCatalogProduct(resp as CatalogProductDTO);
 	}
 
 	/**
@@ -187,9 +269,10 @@ export class SDKCatalogClient {
 	 * @throws {SDKCatalogError} code='validation_error' if product_meta is invalid.
 	 */
 	async updateProduct(productRef: string, args: { productMeta: ProductMeta; signal?: AbortSignal }): Promise<CatalogProduct> {
-		const body: UpdateProductRequest = { productMeta: args.productMeta };
+		// #195: wire body is snake_case { product_meta } (no product_ref in PATCH).
+		const body: UpdateProductRequestDTO = { product_meta: args.productMeta };
 		const resp = await this.request('PATCH', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`, body, args.signal);
-		return resp as unknown as CatalogProduct;
+		return dtoToCatalogProduct(resp as CatalogProductDTO);
 	}
 
 	/**

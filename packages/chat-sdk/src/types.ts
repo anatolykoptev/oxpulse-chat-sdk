@@ -279,7 +279,17 @@ export interface ListResult {
 /** W9: Marketplace product display metadata. Non-sensitive catalog info. */
 export interface ProductMeta {
   title: string;
-  price: string;
+  /**
+   * Raw numeric price amount (e.g. 19.99, 1200). The server requires a
+   * non-negative JSON number — NOT a pre-formatted display string. Callers
+   * (widget / host UI) own locale-aware formatting (Intl.NumberFormat) at
+   * render time; `currency` is carried separately.
+   *
+   * #207: was `string` (host-pre-formatted display text); now `number` to
+   * match the finalized server contract and enable future numeric
+   * price filter/sort.
+   */
+  price: number;
   currency: string;
   imageUrl: string;
   productUrl: string;

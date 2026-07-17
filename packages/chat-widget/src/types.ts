@@ -334,13 +334,16 @@ export interface MountOptions extends WidgetConfig {
 export interface ProductMeta {
   title: string;
   /**
-   * Host-pre-formatted display text (e.g. "1 200", "12.99"), NOT a raw
-   * numeric amount. The widget renders it verbatim as `${price} ${currency}`
-   * (message-list.ts) — no Intl.NumberFormat or locale-aware formatting is
-   * applied. Callers own formatting (decimals, thousands separators, symbol
-   * placement) before setting this field.
+   * Raw numeric price amount (e.g. 19.99, 1200). The server requires a
+   * non-negative JSON number — NOT a pre-formatted display string.
+   *
+   * #207: was `string` (host-pre-formatted display text rendered verbatim);
+   * now `number` to match the finalized server contract. Locale-aware
+   * formatting (Intl.NumberFormat) is applied at render time in a later
+   * batch — until then the widget renders the raw number verbatim as
+   * `${price} ${currency}`.
    */
-  price: string;
+  price: number;
   currency: string;
   imageUrl: string;
   productUrl: string;

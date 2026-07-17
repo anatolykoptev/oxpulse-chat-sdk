@@ -57,7 +57,7 @@ const ROOM_ID = 'room-marketplace-1';
 
 const VALID_PRODUCT_META = {
 	title: 'Vintage Coffee Mug',
-	price: '$19.99',
+	price: 19.99,
 	currency: 'USD',
 	imageUrl: 'https://cdn.example.com/img/mug.jpg',
 	productUrl: 'https://marketplace.example.com/listings/mug-123',

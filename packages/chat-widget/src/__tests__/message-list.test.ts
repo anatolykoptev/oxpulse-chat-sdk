@@ -1291,7 +1291,7 @@ describe('MessageList — W9 product card', () => {
   function makeProductMeta() {
     return {
       title: 'Widget Pro',
-      price: '999',
+      price: 999,
       currency: 'USD',
       imageUrl: 'https://example.com/img.png',
       productUrl: 'https://example.com/p/1',
@@ -1485,7 +1485,7 @@ describe('MessageList — W9 product card', () => {
   it('omits_product_link_when_productUrl_is_unsafe', async () => {
     const meta = {
       title: 'Unsafe',
-      price: '1',
+      price: 1,
       currency: 'USD',
       imageUrl: 'javascript://alert(1)',
       productUrl: 'javascript://alert(2)',

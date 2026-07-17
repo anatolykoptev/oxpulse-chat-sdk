@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SDKCatalogClient, SDKCatalogError } from '../catalog.js';
 import type { ProductMeta } from '../types.js';
 
+// #207: price is a JSON NUMBER now, not a host-pre-formatted string.
 const validMeta: ProductMeta = {
 	title: 'Widget',
-	price: '19.99',
+	price: 19.99,
 	currency: 'USD',
 	imageUrl: 'https://example.com/img.png',
 	productUrl: 'https://example.com/product',
@@ -19,6 +20,41 @@ function jsonResponse(status: number, body: unknown): Response {
 		status,
 		headers: { 'Content-Type': 'application/json' },
 	});
+}
+
+// #195: the server emits a snake_case envelope. product_meta keys stay camelCase,
+// but the top-level DTO uses product_ref / created_at / updated_at / archived_at.
+function snakeProduct(overrides: Partial<{
+	product_ref: string;
+	title: string;
+	price: number;
+	currency: string;
+	imageUrl: string;
+	productUrl: string;
+	created_at: string;
+	updated_at: string;
+	archived_at: string | null;
+}> = {}) {
+	return {
+		product_ref: overrides.product_ref ?? 'sku-1',
+		product_meta: {
+			title: overrides.title ?? 'Widget',
+			price: overrides.price ?? 19.99,
+			currency: overrides.currency ?? 'USD',
+			imageUrl: overrides.imageUrl ?? 'https://example.com/img.png',
+			productUrl: overrides.productUrl ?? 'https://example.com/product',
+		},
+		created_at: overrides.created_at ?? '2026-07-16T00:00:00Z',
+		updated_at: overrides.updated_at ?? '2026-07-16T00:00:00Z',
+		archived_at: overrides.archived_at ?? null,
+	};
+}
+
+/** Parse the JSON body of the Nth fetch call. */
+function sentBody(callIndex = 0): Record<string, unknown> {
+	const call = vi.mocked(fetch).mock.calls[callIndex];
+	const init = call[1] as { body?: string };
+	return JSON.parse(init.body ?? '{}');
 }
 
 describe('SDKCatalogClient', () => {
@@ -41,19 +77,28 @@ describe('SDKCatalogClient', () => {
 	});
 
 	describe('createProduct', () => {
-		it('sends POST with correct body and returns product', async () => {
-			const product = {
-				productRef: 'sku-1',
-				productMeta: validMeta,
-				createdAt: '2026-07-16T00:00:00Z',
-				updatedAt: '2026-07-16T00:00:00Z',
-				archivedAt: null,
-			};
-			globalThis.fetch = mockFetch(jsonResponse(201, product));
+		it('sends POST with snake_case body { product_ref, product_meta } and returns mapped product', async () => {
+			globalThis.fetch = mockFetch(jsonResponse(201, snakeProduct()));
 
 			const result = await client.createProduct({ productRef: 'sku-1', productMeta: validMeta });
 
+			// #195: request body MUST be snake_case — server rejects camelCase keys.
+			const body = sentBody(0);
+			expect(body).toHaveProperty('product_ref', 'sku-1');
+			expect(body).toHaveProperty('product_meta');
+			expect(body).not.toHaveProperty('productRef');
+			expect(body).not.toHaveProperty('productMeta');
+
+			// #195: response is mapped snake→camel (no blind cast → undefined fields).
 			expect(result.productRef).toBe('sku-1');
+			expect(result.createdAt).toBe('2026-07-16T00:00:00Z');
+			expect(result.updatedAt).toBe('2026-07-16T00:00:00Z');
+			expect(result.archivedAt).toBeNull();
+			// #207: price stays a number through the mapper.
+			expect(result.productMeta.price).toBe(19.99);
+			expect(typeof result.productMeta.price).toBe('number');
+			expect(result.productMeta.title).toBe('Widget');
+
 			expect(fetch).toHaveBeenCalledWith(
 				'https://chat.test/api/sdk/catalog/products',
 				expect.objectContaining({
@@ -82,40 +127,65 @@ describe('SDKCatalogClient', () => {
 	});
 
 	describe('listProducts', () => {
-		it('sends GET and returns products array', async () => {
-			const products = [
-				{ productRef: 'sku-1', productMeta: validMeta, createdAt: '', updatedAt: '', archivedAt: null },
-			];
-			globalThis.fetch = mockFetch(jsonResponse(200, { products }));
+		it('sends GET and returns { products, hasMore, nextCursor } mapped from snake_case envelope', async () => {
+			globalThis.fetch = mockFetch(
+				jsonResponse(200, {
+					products: [snakeProduct({ product_ref: 'sku-1' }), snakeProduct({ product_ref: 'sku-2', title: 'Gadget', price: 5 })],
+					has_more: true,
+					next_cursor: 'abc123',
+				}),
+			);
 
 			const result = await client.listProducts();
-			expect(result).toHaveLength(1);
-			expect(result[0].productRef).toBe('sku-1');
+			expect(result.products).toHaveLength(2);
+			expect(result.hasMore).toBe(true);
+			expect(result.nextCursor).toBe('abc123');
+			// Mapping: camelCase fields populated (not undefined from a blind cast).
+			expect(result.products[0].productRef).toBe('sku-1');
+			expect(result.products[0].createdAt).toBe('2026-07-16T00:00:00Z');
+			expect(result.products[1].productMeta.price).toBe(5);
+			expect(typeof result.products[1].productMeta.price).toBe('number');
 		});
 
-		it('passes limit query param', async () => {
-			globalThis.fetch = mockFetch(jsonResponse(200, { products: [] }));
-			await client.listProducts({ limit: 50 });
+		it('maps has_more:false + next_cursor:null to hasMore:false + nextCursor undefined', async () => {
+			globalThis.fetch = mockFetch(
+				jsonResponse(200, { products: [], has_more: false, next_cursor: null }),
+			);
+			const result = await client.listProducts();
+			expect(result.products).toEqual([]);
+			expect(result.hasMore).toBe(false);
+			expect(result.nextCursor).toBeUndefined();
+		});
+
+		it('passes limit + cursor query params', async () => {
+			globalThis.fetch = mockFetch(
+				jsonResponse(200, { products: [], has_more: false, next_cursor: null }),
+			);
+			await client.listProducts({ limit: 50, cursor: 'abc123' });
 			expect(fetch).toHaveBeenCalledWith(
-				'https://chat.test/api/sdk/catalog/products?limit=50',
+				'https://chat.test/api/sdk/catalog/products?limit=50&cursor=abc123',
 				expect.objectContaining({ method: 'GET' }),
 			);
+		});
+
+		it('maps a malformed-cursor 400 to validation_error', async () => {
+			globalThis.fetch = mockFetch(jsonResponse(400, { error: 'invalid cursor' }));
+			await expect(client.listProducts({ cursor: 'bad' })).rejects.toMatchObject({
+				code: 'validation_error',
+				status: 400,
+			});
 		});
 	});
 
 	describe('getProduct', () => {
-		it('sends GET with encoded ref', async () => {
-			const product = {
-				productRef: 'sku with space',
-				productMeta: validMeta,
-				createdAt: '',
-				updatedAt: '',
-				archivedAt: null,
-			};
-			globalThis.fetch = mockFetch(jsonResponse(200, product));
+		it('sends GET with encoded ref and maps the snake_case response', async () => {
+			globalThis.fetch = mockFetch(
+				jsonResponse(200, snakeProduct({ product_ref: 'sku with space' })),
+			);
 
 			const result = await client.getProduct('sku with space');
 			expect(result.productRef).toBe('sku with space');
+			expect(result.productMeta.price).toBe(19.99);
 			expect(fetch).toHaveBeenCalledWith(
 				'https://chat.test/api/sdk/catalog/products/sku%20with%20space',
 				expect.objectContaining({ method: 'GET' }),
@@ -129,20 +199,23 @@ describe('SDKCatalogClient', () => {
 	});
 
 	describe('updateProduct', () => {
-		it('sends PATCH with product_meta body', async () => {
-			const product = {
-				productRef: 'sku-1',
-				productMeta: { ...validMeta, price: '29.99' },
-				createdAt: '',
-				updatedAt: '2026-07-16T01:00:00Z',
-				archivedAt: null,
-			};
-			globalThis.fetch = mockFetch(jsonResponse(200, product));
+		it('sends PATCH with snake_case body { product_meta } and maps the response', async () => {
+			globalThis.fetch = mockFetch(
+				jsonResponse(200, snakeProduct({ price: 29.99, updated_at: '2026-07-16T01:00:00Z' })),
+			);
 
 			const result = await client.updateProduct('sku-1', {
-				productMeta: { ...validMeta, price: '29.99' },
+				productMeta: { ...validMeta, price: 29.99 },
 			});
-			expect(result.productMeta.price).toBe('29.99');
+			// #195: update body is { product_meta } (snake), NOT { productMeta }.
+			const body = sentBody(0);
+			expect(body).toHaveProperty('product_meta');
+			expect(body).not.toHaveProperty('productMeta');
+			expect(body).not.toHaveProperty('product_ref');
+
+			expect(result.productMeta.price).toBe(29.99);
+			expect(typeof result.productMeta.price).toBe('number');
+			expect(result.updatedAt).toBe('2026-07-16T01:00:00Z');
 		});
 	});
 

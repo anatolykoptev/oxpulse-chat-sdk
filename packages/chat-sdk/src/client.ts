@@ -119,26 +119,33 @@ function dtoToMember(dto: MemberDTO): Member {
 // ─── Shared row mapper (M5 DRY fix) ──────────────────────────────────────────
 
 /**
- * #117: Validate + normalize a raw `product_meta` payload at the SDK receive
- * boundary. Mirrors the widget's `normalizeProductMeta` render-gate guard so
- * `MessageRow.productMeta: ProductMeta | null` is honest for all SDK consumers.
+ * #117 / #207: Validate + normalize a raw `product_meta` payload at the SDK
+ * receive boundary. Mirrors the widget's `normalizeProductMeta` render-gate
+ * guard so `MessageRow.productMeta: ProductMeta | null` is honest for all SDK
+ * consumers. Reused by `SDKCatalogClient.dtoToCatalogProduct` (#195) so the
+ * catalog CRUD path and the message-row path share one snake→camel mapper.
  *
  * Rules:
  *   - Non-object → null.
- *   - Core fields (title, price, currency) must be non-empty strings → else null.
- *   - Length caps: title 200, price 40, currency 16, urls 2048 (truncated).
+ *   - title / currency must be non-empty strings → else null.
+ *   - price must be a non-negative finite number → else null. (#207: was a
+ *     non-empty string; now a JSON number per the finalized server contract.)
+ *   - Length caps: title 200, currency 16, urls 2048 (truncated).
  *   - Non-string / oversized URLs coerced to '' (never garbage).
  */
-function normalizeProductMeta(raw: unknown): ProductMeta | null {
+export function normalizeProductMeta(raw: unknown): ProductMeta | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   const obj = raw as Record<string, unknown>;
 
   const title = typeof obj['title'] === 'string' ? obj['title'] : '';
-  const price = typeof obj['price'] === 'string' ? obj['price'] : '';
   const currency = typeof obj['currency'] === 'string' ? obj['currency'] : '';
+  // #207: price is a JSON number (non-negative, finite). Reject anything else.
+  const priceRaw = obj['price'];
+  const price =
+    typeof priceRaw === 'number' && Number.isFinite(priceRaw) && priceRaw >= 0 ? priceRaw : NaN;
 
-  // Core fields must be non-empty strings.
-  if (title.length === 0 || price.length === 0 || currency.length === 0) return null;
+  // Core fields must be present and valid.
+  if (title.length === 0 || currency.length === 0 || Number.isNaN(price)) return null;
 
   const capUrl = (v: unknown): string => {
     // Non-string or over-cap → '' (render-safe: the isSafeAttachmentUrl gate
@@ -149,7 +156,7 @@ function normalizeProductMeta(raw: unknown): ProductMeta | null {
 
   return {
     title: title.length > 200 ? title.slice(0, 200) : title,
-    price: price.length > 40 ? price.slice(0, 40) : price,
+    price,
     currency: currency.length > 16 ? currency.slice(0, 16) : currency,
     imageUrl: capUrl(obj['imageUrl']),
     productUrl: capUrl(obj['productUrl']),

@@ -260,7 +260,11 @@ export class ProductPicker {
     this.#renderList();
 
     try {
-      this.#allProducts = await this.#client.listProducts({ limit: PRODUCTS_PER_PAGE, signal: this.#signal });
+      // #195: listProducts now returns { products, hasMore, nextCursor }.
+      // Cursor paging UI is a later batch (#199-206); for now take the first
+      // page of products.
+      const { products } = await this.#client.listProducts({ limit: PRODUCTS_PER_PAGE, signal: this.#signal });
+      this.#allProducts = products;
       this.#filteredProducts = this.#allProducts;
     } catch (err) {
       console.error("[product-picker] failed to load catalog:", err);

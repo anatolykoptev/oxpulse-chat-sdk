@@ -819,7 +819,7 @@ describe('OxpulseChatElement — W2.2 slice 3 SDK wiring', () => {
 
     const productMeta = {
       title: 'Widget Pro',
-      price: '999',
+      price: 999,
       currency: 'USD',
       imageUrl: 'https://example.com/img.png',
       productUrl: 'https://example.com/p/1',

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ProductPicker } from "../ui/product-picker.js";
 import type { SDKCatalogClient, CatalogProduct } from "@oxpulse/chat-sdk";
 
-const validMeta = { title: "Widget", price: "19.99", currency: "USD", imageUrl: "", productUrl: "" };
+const validMeta = { title: "Widget", price: 19.99, currency: "USD", imageUrl: "", productUrl: "" };
 
 function makeProduct(ref: string, title: string): CatalogProduct {
 	return {
@@ -15,8 +15,9 @@ function makeProduct(ref: string, title: string): CatalogProduct {
 }
 
 function makeMockClient(products: CatalogProduct[]): SDKCatalogClient {
+	// #195: listProducts now returns { products, hasMore, nextCursor }.
 	return {
-		listProducts: vi.fn().mockResolvedValue(products),
+		listProducts: vi.fn().mockResolvedValue({ products, hasMore: false }),
 	} as unknown as SDKCatalogClient;
 }
 
