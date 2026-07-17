@@ -146,12 +146,13 @@ export class SDKCatalogClient {
 	async createProduct(args: {
 		productRef: string;
 		productMeta: ProductMeta;
+		signal?: AbortSignal;
 	}): Promise<CatalogProduct> {
 		const body: CreateProductRequest = {
 			productRef: args.productRef,
 			productMeta: args.productMeta,
 		};
-		const resp = await this.request('POST', '/api/sdk/catalog/products', body);
+		const resp = await this.request('POST', '/api/sdk/catalog/products', body, args.signal);
 		return resp as unknown as CatalogProduct;
 	}
 
@@ -159,11 +160,12 @@ export class SDKCatalogClient {
 	 * List all active products in the seller's catalog (newest first).
 	 *
 	 * @param opts.limit Max products to return (default 500, max 1000).
+	 * @param opts.signal Optional AbortSignal to cancel the request.
 	 * @throws {SDKCatalogError} on transport/auth errors.
 	 */
-	async listProducts(opts?: { limit?: number }): Promise<CatalogProduct[]> {
-		const qs = opts?.limit != null ? `?limit=${opts.limit}` : '';
-		const resp = await this.request('GET', `/api/sdk/catalog/products${qs}`);
+	async listProducts(opts?: { limit?: number; signal?: AbortSignal }): Promise<CatalogProduct[]> {
+		const qs = opts?.limit != null ? `?limit=${encodeURIComponent(opts.limit)}` : '';
+		const resp = await this.request('GET', `/api/sdk/catalog/products${qs}`, undefined, opts?.signal);
 		return (resp as unknown as CatalogProductListDTO).products;
 	}
 
@@ -172,8 +174,8 @@ export class SDKCatalogClient {
 	 *
 	 * @throws {SDKCatalogError} code='not_found' if the product doesn't exist or is archived.
 	 */
-	async getProduct(productRef: string): Promise<CatalogProduct> {
-		const resp = await this.request('GET', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`);
+	async getProduct(productRef: string, signal?: AbortSignal): Promise<CatalogProduct> {
+		const resp = await this.request('GET', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`, undefined, signal);
 		return resp as unknown as CatalogProduct;
 	}
 
@@ -183,9 +185,9 @@ export class SDKCatalogClient {
 	 * @throws {SDKCatalogError} code='not_found' if the product doesn't exist or is archived.
 	 * @throws {SDKCatalogError} code='validation_error' if product_meta is invalid.
 	 */
-	async updateProduct(productRef: string, args: { productMeta: ProductMeta }): Promise<CatalogProduct> {
+	async updateProduct(productRef: string, args: { productMeta: ProductMeta; signal?: AbortSignal }): Promise<CatalogProduct> {
 		const body: UpdateProductRequest = { productMeta: args.productMeta };
-		const resp = await this.request('PATCH', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`, body);
+		const resp = await this.request('PATCH', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`, body, args.signal);
 		return resp as unknown as CatalogProduct;
 	}
 
@@ -195,8 +197,8 @@ export class SDKCatalogClient {
 	 *
 	 * @throws {SDKCatalogError} code='not_found' if the product doesn't exist or is already archived.
 	 */
-	async deleteProduct(productRef: string): Promise<void> {
-		await this.request('DELETE', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`);
+	async deleteProduct(productRef: string, signal?: AbortSignal): Promise<void> {
+		await this.request('DELETE', `/api/sdk/catalog/products/${encodeURIComponent(productRef)}`, undefined, signal);
 	}
 
 	// ── Internal fetch wrapper ──────────────────────────────────────────────
@@ -205,6 +207,7 @@ export class SDKCatalogClient {
 		method: string,
 		path: string,
 		body?: unknown,
+		signal?: AbortSignal,
 	): Promise<unknown> {
 		let resp: Response;
 		try {
@@ -215,6 +218,7 @@ export class SDKCatalogClient {
 					'Content-Type': 'application/json',
 				},
 				body: body != null ? JSON.stringify(body) : undefined,
+				signal,
 			});
 		} catch (err) {
 			throw new SDKCatalogError(

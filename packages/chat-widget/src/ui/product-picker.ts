@@ -99,8 +99,11 @@ export class ProductPicker {
     // Focus search input
     this.#searchInput?.focus();
 
-    // Load products from catalog API
-    await this.#loadProducts();
+    // Register event listeners BEFORE the async load so that Escape /
+    // outside-click / abort can cancel the picker while products are
+    // still loading (race condition fix — listeners were previously
+    // registered after the await, leaving the picker non-cancellable
+    // during the fetch).
 
     // Outside dismissal
     this.#outsideClickHandler = (e: MouseEvent) => {
@@ -145,6 +148,10 @@ export class ProductPicker {
       this.#abortListener = () => this.hide();
       this.#signal.addEventListener("abort", this.#abortListener, { once: true });
     }
+
+    // Load products from catalog API (async — listeners above can
+    // cancel the picker while this is in-flight).
+    await this.#loadProducts();
   }
 
   /** Hide the picker without firing onSelect. */
@@ -214,7 +221,7 @@ export class ProductPicker {
     el.className = "oxp-product-picker";
     el.setAttribute("role", "dialog");
     el.setAttribute("aria-modal", "true");
-    el.setAttribute("aria-label", "Product catalog");
+    el.setAttribute("aria-label", t("productPickerAria", this.#lang));
     el.style.width = `${PICKER_WIDTH}px`;
     el.style.maxHeight = `${PICKER_HEIGHT}px`;
 
@@ -225,8 +232,8 @@ export class ProductPicker {
     const searchInput = document.createElement("input");
     searchInput.type = "search";
     searchInput.className = "oxp-product-picker-input";
-    searchInput.placeholder = "Search products…";
-    searchInput.setAttribute("aria-label", "Search products");
+    searchInput.placeholder = t("productPickerSearch", this.#lang);
+    searchInput.setAttribute("aria-label", t("productPickerSearchAria", this.#lang));
     searchInput.addEventListener("input", () => {
       this.#currentQuery = searchInput.value.toLowerCase();
       this.#renderList();
@@ -253,7 +260,7 @@ export class ProductPicker {
     this.#renderList();
 
     try {
-      this.#allProducts = await this.#client.listProducts({ limit: PRODUCTS_PER_PAGE });
+      this.#allProducts = await this.#client.listProducts({ limit: PRODUCTS_PER_PAGE, signal: this.#signal });
       this.#filteredProducts = this.#allProducts;
     } catch (err) {
       console.error("[product-picker] failed to load catalog:", err);
@@ -287,7 +294,7 @@ export class ProductPicker {
     if (this.#loading) {
       const loading = document.createElement("div");
       loading.className = "oxp-product-picker-loading";
-      loading.textContent = "Loading…";
+      loading.textContent = t("productPickerLoading", this.#lang);
       loading.setAttribute("aria-live", "polite");
       this.#listEl.appendChild(loading);
       return;
@@ -296,7 +303,7 @@ export class ProductPicker {
     if (this.#loadError) {
       const error = document.createElement("div");
       error.className = "oxp-product-picker-error";
-      error.textContent = "Failed to load catalog";
+      error.textContent = t("productPickerLoadError", this.#lang);
       this.#listEl.appendChild(error);
       return;
     }
@@ -305,7 +312,9 @@ export class ProductPicker {
       const empty = document.createElement("div");
       empty.className = "oxp-product-picker-empty";
       empty.textContent =
-        this.#allProducts.length === 0 ? "No products in catalog" : "No matches";
+        this.#allProducts.length === 0
+          ? t("productPickerNoProducts", this.#lang)
+          : t("productPickerNoMatches", this.#lang);
       this.#listEl.appendChild(empty);
       return;
     }
