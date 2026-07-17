@@ -74,6 +74,44 @@ describe('SDKCatalogClient', () => {
 			const c = new SDKCatalogClient({ jwt: 'abc' });
 			expect(c).toBeInstanceOf(SDKCatalogClient);
 		});
+
+		// #206b: defense-in-depth — an absolute http:// baseUrl leaks the
+		// Bearer JWT in cleartext. Warn (non-breaking).
+		it('#206b warns on absolute http:// baseUrl (non-localhost)', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			new SDKCatalogClient({ jwt: 'abc', baseUrl: 'http://chat.test' });
+			expect(warn).toHaveBeenCalled();
+			warn.mockRestore();
+		});
+
+		it('#206b does NOT warn on https absolute baseUrl', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			new SDKCatalogClient({ jwt: 'abc', baseUrl: 'https://chat.test' });
+			expect(warn).not.toHaveBeenCalled();
+			warn.mockRestore();
+		});
+
+		it('#206b does NOT warn on http://localhost (dev host)', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			new SDKCatalogClient({ jwt: 'abc', baseUrl: 'http://localhost:3000' });
+			expect(warn).not.toHaveBeenCalled();
+			warn.mockRestore();
+		});
+
+		it('#206b does NOT warn on http://127.0.0.1 (dev host)', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			new SDKCatalogClient({ jwt: 'abc', baseUrl: 'http://127.0.0.1:8080' });
+			expect(warn).not.toHaveBeenCalled();
+			warn.mockRestore();
+		});
+
+		it('#206b does NOT warn on empty or relative baseUrl', () => {
+			const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			new SDKCatalogClient({ jwt: 'abc' });
+			new SDKCatalogClient({ jwt: 'abc', baseUrl: '/api' });
+			expect(warn).not.toHaveBeenCalled();
+			warn.mockRestore();
+		});
 	});
 
 	describe('createProduct', () => {
@@ -123,6 +161,15 @@ describe('SDKCatalogClient', () => {
 			await expect(
 				client.createProduct({ productRef: 'sku-1', productMeta: validMeta }),
 			).rejects.toMatchObject({ code: 'conflict', status: 409 });
+		});
+
+		// #206a: 422 Unprocessable Entity is a validation error — without an
+		// explicit case it fell to `default → server_4xx`, mislabeling it.
+		it('#206a throws validation_error on 422 (not server_4xx)', async () => {
+			globalThis.fetch = mockFetch(jsonResponse(422, { error: 'invalid product_meta' }));
+			await expect(
+				client.createProduct({ productRef: 'sku-1', productMeta: validMeta }),
+			).rejects.toMatchObject({ code: 'validation_error', status: 422 });
 		});
 	});
 
@@ -244,6 +291,16 @@ describe('SDKCatalogClient', () => {
 		it('throws server_5xx on 500', async () => {
 			globalThis.fetch = mockFetch(jsonResponse(500, { error: 'internal' }));
 			await expect(client.listProducts()).rejects.toMatchObject({ code: 'server_5xx' });
+		});
+
+		// #206a: an empty 2xx body must not throw a raw SyntaxError that
+		// escapes the SDKCatalogError wrapper. Without the guard,
+		// resp.json() throws "Unexpected end of JSON input" → deleteProduct
+		// rejects with a SyntaxError. With the guard, request() returns null
+		// and deleteProduct resolves.
+		it('#206a does not throw a raw SyntaxError on an empty 2xx body', async () => {
+			globalThis.fetch = mockFetch(new Response(null, { status: 200 }));
+			await expect(client.deleteProduct('sku-1')).resolves.toBeUndefined();
 		});
 	});
 });

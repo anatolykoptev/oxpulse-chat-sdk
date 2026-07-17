@@ -200,7 +200,28 @@ export class SDKCatalogClient {
 			);
 		}
 		this.jwt = args.jwt;
-		this.baseUrl = args.baseUrl ?? '';
+		const baseUrl = args.baseUrl ?? '';
+		// #206: defense-in-depth — the JWT rides as `Authorization: Bearer <jwt>`
+		// on every request. An absolute `http://` baseUrl leaks it in cleartext
+		// (passive MITM). Warn (non-breaking) for a non-https absolute scheme;
+		// allow empty / relative / localhost / 127.0.0.1 (dev + same-origin).
+		if (baseUrl) {
+			try {
+				const url = new URL(baseUrl);
+				const isDevHost = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+				if (url.protocol !== 'https:' && !isDevHost) {
+					console.warn(
+						`[SDKCatalogClient] absolute baseUrl with non-https scheme "${url.protocol}" ` +
+							'leaks the Bearer JWT in cleartext (passive MITM). Use https: ' +
+							'or a relative URL, or use http://localhost for local dev.',
+					);
+				}
+			} catch {
+				// Relative URL (e.g. "/api") — fetch resolves against the page
+				// origin; allowed (same-origin / proxied deployments).
+			}
+		}
+		this.baseUrl = baseUrl;
 	}
 
 	// ── CRUD ────────────────────────────────────────────────────────────────
@@ -325,7 +346,15 @@ export class SDKCatalogClient {
 
 		// 2xx with body.
 		if (resp.ok) {
-			return resp.json();
+			// #206: guard resp.json() — an empty 2xx body (e.g. a 200 No Content
+			// from a misconfigured server) throws a raw SyntaxError that would
+			// escape the SDKCatalogError wrapper. Treat an empty/non-JSON body
+			// as no content (mirrors the 204 path) instead.
+			try {
+				return await resp.json();
+			} catch {
+				return null;
+			}
 		}
 
 		// Error responses.
@@ -348,6 +377,11 @@ export class SDKCatalogClient {
 				throw new SDKCatalogError('conflict', errBody, resp, 409);
 			case 413:
 				throw new SDKCatalogError('validation_error', errBody, resp, 413);
+			// #206: 422 Unprocessable Entity is a validation error — without this
+			// case it fell to `default → server_4xx`, mislabeling a validation
+			// failure as a generic 4xx.
+			case 422:
+				throw new SDKCatalogError('validation_error', errBody, resp, 422);
 			default:
 				if (resp.status >= 500) {
 					throw new SDKCatalogError('server_5xx', errBody, resp, resp.status);

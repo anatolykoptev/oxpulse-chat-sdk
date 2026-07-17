@@ -354,4 +354,51 @@ describe("ProductPicker", () => {
 
 		picker.hide();
 	});
+
+	// ── #206c: aria-selected on role="option" items ────────────────────────────
+
+	it("#206c sets aria-selected=false on every option item at render", async () => {
+		const products = [makeProduct("sku-1", "Widget"), makeProduct("sku-2", "Gadget")];
+		const client = makeMockClient(products);
+		const picker = new ProductPicker({ container, client, onSelect: () => {} });
+
+		await picker.show(anchor);
+
+		const items = container.querySelectorAll(".oxp-product-picker-item");
+		expect(items.length).toBe(2);
+		for (const item of items) {
+			expect(item.getAttribute("role")).toBe("option");
+			expect(item.getAttribute("aria-selected")).toBe("false");
+		}
+
+		picker.hide();
+	});
+
+	it("#206c flips aria-selected to true on the keyboard-focused item (ArrowDown)", async () => {
+		const products = [makeProduct("sku-1", "Widget"), makeProduct("sku-2", "Gadget")];
+		const client = makeMockClient(products);
+		const picker = new ProductPicker({ container, client, onSelect: () => {} });
+
+		await picker.show(anchor);
+
+		const items = container.querySelectorAll(".oxp-product-picker-item");
+		expect(items.length).toBe(2);
+
+		// ArrowDown from search input → first item focused → aria-selected flips.
+		const searchInput = container.querySelector(".oxp-product-picker-input") as HTMLInputElement;
+		searchInput.focus();
+		searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+
+		expect(document.activeElement).toBe(items[0]);
+		expect(items[0].getAttribute("aria-selected")).toBe("true");
+		expect(items[1].getAttribute("aria-selected")).toBe("false");
+
+		// ArrowDown on the first item → second item focused → aria-selected flips.
+		items[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+		expect(document.activeElement).toBe(items[1]);
+		expect(items[1].getAttribute("aria-selected")).toBe("true");
+		expect(items[0].getAttribute("aria-selected")).toBe("false");
+
+		picker.hide();
+	});
 });

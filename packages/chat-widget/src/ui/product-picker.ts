@@ -20,6 +20,7 @@
 
 import { t, resolveLocale, formatPrice, type Locale } from "../utils/i18n.js";
 import { computeFloatingPosition } from "../utils/floating-position.js";
+import { useFloatingDismiss } from "../utils/floating-dismiss.js";
 import type { ProductMeta } from "../types.js";
 import type { SDKCatalogClient, CatalogProduct } from "@oxpulse/chat-sdk";
 
@@ -62,9 +63,7 @@ export class ProductPicker {
   #listEl: HTMLElement | null = null;
   #itemButtons: HTMLButtonElement[] = [];
 
-  #outsideClickHandler: ((e: MouseEvent) => void) | null = null;
-  #keydownHandler: ((e: KeyboardEvent) => void) | null = null;
-  #abortListener: (() => void) | null = null;
+  #dismissTeardown: (() => void) | null = null;
   #currentQuery = "";
 
   // Cached products from the catalog API.
@@ -104,50 +103,15 @@ export class ProductPicker {
     // still loading (race condition fix — listeners were previously
     // registered after the await, leaving the picker non-cancellable
     // during the fetch).
-
-    // Outside dismissal
-    this.#outsideClickHandler = (e: MouseEvent) => {
-      if (
-        this.#pickerEl &&
-        !this.#pickerEl.contains(e.target as Node) &&
-        e.target !== anchorEl &&
-        !anchorEl.contains(e.target as Node)
-      ) {
-        this.hide();
-      }
-    };
-    document.addEventListener("pointerdown", this.#outsideClickHandler, true);
-
-    // Escape + Tab trap
-    this.#keydownHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        const restore = this.#restoreFocusEl;
-        this.hide();
-        queueMicrotask(() => restore?.focus());
-      } else if (e.key === "Tab" && this.#pickerEl) {
-        const focusable = this.#pickerEl.querySelectorAll<HTMLElement>(
-          "input, button:not([disabled])",
-        );
-        if (focusable.length === 0) return;
-        const first = focusable[0]!;
-        const last = focusable[focusable.length - 1]!;
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", this.#keydownHandler);
-
-    if (this.#signal) {
-      this.#abortListener = () => this.hide();
-      this.#signal.addEventListener("abort", this.#abortListener, { once: true });
-    }
+    //
+    // #203: outside-pointerdown dismiss + Escape/Tab focus-trap + abort
+    // wiring deduplicated into the shared helper (was a ~60-line clone of
+    // EmojiPicker). Behavior is identical.
+    this.#dismissTeardown = useFloatingDismiss(this.#pickerEl, anchorEl, {
+      onHide: () => this.hide(),
+      getRestoreFocusEl: () => this.#restoreFocusEl,
+      signal: this.#signal,
+    });
 
     // Load products from catalog API (async — listeners above can
     // cancel the picker while this is in-flight).
@@ -167,18 +131,8 @@ export class ProductPicker {
 
   #removePicker(): void {
     const wasOpen = this.#pickerEl !== null;
-    if (this.#outsideClickHandler) {
-      document.removeEventListener("pointerdown", this.#outsideClickHandler, true);
-      this.#outsideClickHandler = null;
-    }
-    if (this.#keydownHandler) {
-      document.removeEventListener("keydown", this.#keydownHandler);
-      this.#keydownHandler = null;
-    }
-    if (this.#abortListener && this.#signal) {
-      this.#signal.removeEventListener("abort", this.#abortListener);
-      this.#abortListener = null;
-    }
+    this.#dismissTeardown?.();
+    this.#dismissTeardown = null;
     if (this.#pickerEl?.parentNode) {
       this.#pickerEl.parentNode.removeChild(this.#pickerEl);
     }
@@ -365,6 +319,10 @@ export class ProductPicker {
       btn.type = "button";
       btn.className = "oxp-product-picker-item";
       btn.setAttribute("role", "option");
+      // #206: aria-selected on option items — false at render, flips to true
+      // on the keyboard-focused item (focus listener below covers ArrowUp/Down
+      // from the input, between items, and click). Listbox APG expectation.
+      btn.setAttribute("aria-selected", "false");
       btn.setAttribute("aria-label", title);
 
       const titleEl = document.createElement("span");
@@ -385,6 +343,15 @@ export class ProductPicker {
       btn.addEventListener("click", () => {
         this.#onSelect(product.productRef, product.productMeta);
         this.hide();
+      });
+
+      // #206: flip aria-selected to the focused option (covers ArrowUp/Down
+      // from the search input, between items, and click focus).
+      btn.addEventListener("focus", () => {
+        for (const b of this.#itemButtons) {
+          b.setAttribute("aria-selected", "false");
+        }
+        btn.setAttribute("aria-selected", "true");
       });
 
       // Arrow key navigation
