@@ -2128,13 +2128,9 @@ export function resolveTheme(themeAttr: string | null): 'light' | 'dark' | 'auto
 
 /** Apply data-theme to host element.
  *  M11: 'auto' writes data-theme='auto' and lets CSS @media handle live
- *  switching — no matchMedia snapshot, no listener leak. */
+ *  switching — no matchMedia snapshot, no listener leak.
+ *  F8: delegates resolution to resolveTheme() (the canonical primitive) instead
+ *  of duplicating the auto/light/dark branch inline. */
 export function applyTheme(host: HTMLElement, themeAttr: string | null): void {
-  const t = themeAttr ?? 'auto';
-  if (t === 'light' || t === 'dark') {
-    host.setAttribute('data-theme', t);
-    return;
-  }
-  // auto — write 'auto' so @media (prefers-color-scheme) applies live
-  host.setAttribute('data-theme', 'auto');
+  host.setAttribute('data-theme', resolveTheme(themeAttr));
 }

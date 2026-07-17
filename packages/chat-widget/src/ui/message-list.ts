@@ -1403,6 +1403,26 @@ export class MessageList {
         for (const b of bubbles) b.destroy();
         this.#voiceBubbles.delete(evictedId);
       }
+      // F12: sweep the per-msgId dedup Sets for the evicted row — same
+      // lifecycle as the sibling per-msgId Maps above (#rows, #reactions,
+      // #pulseTimers, #attachmentObjectUrls, #voiceBubbles). Without this,
+      // #firedDecryptErrors and #firedAttachmentErrors accumulated one entry
+      // per failed msgId for the widget's entire lifetime (only cleared in
+      // destroy()), unbounded in a long-lived busy room — exactly the class
+      // the eviction caps exist to bound. A msgId recycled after eviction
+      // (re-entering #order as a new message) would also be wrongly
+      // suppressed by the stale dedup entry. For well-formed (UUID) msgIds a
+      // still-live message's entry is never touched here; a crafted msgId
+      // containing ':' can make the prefix match below over-delete a live
+      // sibling's dedup entry (harmless — at worst one duplicate host error
+      // event). Root fix = validating inbound msg_id format on receipt (#191).
+      this.#firedDecryptErrors.delete(evictedId);
+      // #firedAttachmentErrors is keyed by `${msgId}:${attachmentId}`
+      // (composite) — delete every key whose msgId component matches the
+      // evicted row. Set deletion during iteration is spec-safe.
+      for (const key of this.#firedAttachmentErrors) {
+        if (key.startsWith(`${evictedId}:`)) this.#firedAttachmentErrors.delete(key);
+      }
       const child = this.#listEl?.firstElementChild;
       if (child) {
         child.remove();

@@ -71,7 +71,7 @@
 // The key can rsync files in but cannot read or delete any existing content.
 // rsync --ignore-existing is the immutability enforcer for versioned dirs.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,13 +109,35 @@ function ghaWarning(title, message) {
 	console.log(`::warning title=${title}::${escaped}`);
 }
 
+// GitHub Actions step-summary: appends a line to the $GITHUB_STEP_SUMMARY file
+// (a path GHA injects as an env var) so the note shows up in the run's Summary
+// UI, not just the raw log. No-op outside GHA (env var absent).
+function ghaStepSummary(line) {
+	const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+	if (!summaryPath) return;
+	try {
+		const prefix = existsSync(summaryPath) ? '\n' : '';
+		appendFileSync(summaryPath, `${prefix}${line}\n`);
+	} catch {
+		// Best-effort visibility — never let a summary-write failure mask the
+		// actual soft-skip signal (ghaWarning already emitted above).
+	}
+}
+
 // ── Soft-skip when deploy key is absent ──────────────────────────────────────
 // Mirror the SOFT_PACKAGES pattern in release-npm-packages.mjs.
 // Pipeline safe to merge before the operator installs the key.
+// LOUD: a stuck/misconfigured CDN deploy is indistinguishable from success on
+// a green GHA job that only logs to stdout — emit a ::warning:: annotation
+// (visible in the Checks UI without opening the raw log) AND a step-summary
+// line so the skip is surfaced in the run's Summary tab. exit(0) is
+// intentional (soft-skip is non-fatal) — the noise is the fix.
 
 if (!CDN_DEPLOY_KEY) {
-	log('CDN_DEPLOY_KEY secret is absent — CDN publish skipped (non-fatal).');
-	log('Action required: generate an ed25519 key pair and install as described in the PR body.');
+	const skipMsg = 'CDN_DEPLOY_KEY secret is absent — CDN publish skipped (non-fatal). Action required: generate an ed25519 key pair and install it on the CDN box as described in the publish-widget-cdn.mjs header / PR body.';
+	ghaWarning('CDN publish skipped — CDN_DEPLOY_KEY absent', skipMsg);
+	ghaStepSummary('⚠️ **CDN publish skipped** — `CDN_DEPLOY_KEY` secret is absent. The widget CDN bundle was NOT published this run. See the script header in `scripts/publish-widget-cdn.mjs` for key setup instructions.');
+	log(skipMsg);
 	process.exit(0);
 }
 

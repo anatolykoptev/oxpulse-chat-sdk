@@ -116,9 +116,16 @@ widget.destroy();
 | `app-id` | string | yes | — | OxPulse app ID (from admin panel) |
 | `jwt` | string | yes | — | Signed JWT from your backend |
 | `room-id` | string | yes | — | Room to open |
-| `mode` | `inline` \| `iframe` | no | `inline` | Render mode |
+| `mode` | `inline` \| `iframe` | no | `inline` | Render mode (`iframe` is **experimental** — see below) |
 | `theme` | `light` \| `dark` \| `auto` | no | `auto` | Colour scheme |
 | `lang` | BCP 47 string | no | auto | Locale override |
+
+> **`mode='iframe'` is EXPERIMENTAL — not production-ready.**
+> The iframe render mode is a half-built feature: it creates a sandboxed
+> `<iframe>` but does not yet construct a real chat client inside it, and
+> in-place JWT refresh writes `liveConfig.jwt` with no consumer (W2.2 TODO).
+> Use `mode='inline'` (the default) for production deployments. Selecting
+> `mode='iframe'` emits a one-time `console.warn` to surface this gap.
 
 ## Events
 
