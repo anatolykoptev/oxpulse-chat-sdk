@@ -94,6 +94,8 @@ widget.destroy();
 | `allow-write` | boolean | no | false | Enable named-write compose UI |
 | `write-mint-endpoint` | string | when `allow-write` | - | Your backend endpoint that mints a named-write token |
 | `reactions-enabled` | boolean | no | true | Show reaction UI |
+| `pinned-messages-enabled` | boolean | no | true | Show pinned messages banner + pin/unpin buttons (inline mode only) |
+| `seller-catalog` | boolean (presence) | no | off | Opt-in: render the seller product-catalog picker button in the composer toolbar. When present, the widget constructs an `SDKCatalogClient` from the same `jwt` + `base-url` it already uses and passes it to the Composer. The JWT must carry `catalog:read:*` scope (server-enforced). Only active when a composer is mounted (write-capable client). |
 
 `mode='iframe'` is experimental and does not yet support `allow-write`.
 

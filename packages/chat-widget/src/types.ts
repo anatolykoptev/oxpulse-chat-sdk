@@ -166,6 +166,32 @@ export interface WidgetConfig {
    * no MessageList is mounted, so this flag has no effect.
    */
   pinnedMessagesEnabled?: boolean;
+
+  // ── Seller product catalog (Phase 3, #196) ────────────────────────────────
+
+  /**
+   * Opt-in: render the seller product-catalog picker button in the composer
+   * toolbar. When true (and a composer is mounted — i.e. a write-capable
+   * client exists), the widget constructs an `SDKCatalogClient` from the
+   * SAME `jwt` + `baseUrl` it already uses for its main SDK client and passes
+   * it to the `Composer` as `catalogClient`, so the product button renders
+   * and opens the `ProductPicker`.
+   *
+   * Default: false (backward compatible — no catalog client, no button).
+   *
+   * The JWT must carry `catalog:read:*` scope (server-enforced); a token
+   * without it will surface a load error inside the picker, not crash the
+   * widget.
+   */
+  sellerCatalog?: boolean;
+
+  /**
+   * @internal — test-only factory override for the catalog client.
+   * When provided, `element.ts` calls this instead of constructing a real
+   * `SDKCatalogClient`. Allows unit tests to inject a mock catalog client
+   * without a network. Never set in production code.
+   */
+  _createCatalogClient?: (opts: { jwt: string; baseUrl: string }) => import('@oxpulse/chat-sdk').SDKCatalogClient;
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
@@ -185,6 +211,7 @@ export const OBSERVED_ATTRIBUTES = [
   'write-mint-endpoint',
   'reactions-enabled',
   'pinned-messages-enabled',
+  'seller-catalog',
 ] as const;
 
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */
