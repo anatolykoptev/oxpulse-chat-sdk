@@ -390,7 +390,7 @@ export class Composer {
       const productBtn = document.createElement('button');
       productBtn.type = 'button';
       productBtn.className = 'oxp-composer-product-btn';
-      productBtn.setAttribute('aria-label', 'Product catalog');
+      productBtn.setAttribute('aria-label', t('productPickerBtnAria', this.#lang));
       productBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l1-5h16l1 5"/><path d="M4 9h16v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M9 13h6"/></svg>';
       productBtn.addEventListener('click', () => {
         if (this.#signal?.aborted) return;
@@ -654,6 +654,7 @@ export class Composer {
     this.#attachmentPicker = null;
     this.#emojiPicker?.hide();
     this.#emojiPicker = null;
+    this.#productPicker?.hide();
     this.#productPicker = null;
 
     if (this.#root && this.#root.parentNode) {

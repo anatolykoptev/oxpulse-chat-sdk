@@ -93,6 +93,15 @@ export type LocaleKey =
   | 'productViewAria'
   | 'productCardAttached'
   | 'removeProductCard'
+  // Product picker (seller catalog)
+  | 'productPickerAria'
+  | 'productPickerSearch'
+  | 'productPickerSearchAria'
+  | 'productPickerLoading'
+  | 'productPickerLoadError'
+  | 'productPickerNoProducts'
+  | 'productPickerNoMatches'
+  | 'productPickerBtnAria'
   // Reconnect banner
   | 'sessionExpired'
   | 'refresh'
@@ -224,6 +233,14 @@ const en: LocaleTable = {
   productViewAria: 'View product: {title}',
   productCardAttached: 'Product card attached: {title}',
   removeProductCard: 'Remove product card',
+  productPickerAria: 'Product catalog',
+  productPickerSearch: 'Search products…',
+  productPickerSearchAria: 'Search products',
+  productPickerLoading: 'Loading…',
+  productPickerLoadError: 'Failed to load catalog',
+  productPickerNoProducts: 'No products in catalog',
+  productPickerNoMatches: 'No matches',
+  productPickerBtnAria: 'Open product catalog',
 
   sessionExpired: 'Session expired.',
   refresh: 'Refresh',
@@ -348,6 +365,14 @@ const ru: LocaleTable = {
   productViewAria: 'Открыть товар: {title}',
   productCardAttached: 'Карточка товара: {title}',
   removeProductCard: 'Убрать карточку товара',
+  productPickerAria: 'Каталог товаров',
+  productPickerSearch: 'Поиск товаров…',
+  productPickerSearchAria: 'Поиск товаров',
+  productPickerLoading: 'Загрузка…',
+  productPickerLoadError: 'Не удалось загрузить каталог',
+  productPickerNoProducts: 'В каталоге нет товаров',
+  productPickerNoMatches: 'Ничего не найдено',
+  productPickerBtnAria: 'Открыть каталог товаров',
 
   sessionExpired: 'Сессия истекла.',
   refresh: 'Обновить',
