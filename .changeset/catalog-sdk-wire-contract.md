@@ -1,5 +1,6 @@
 ---
 "@oxpulse/chat-sdk": minor
+"@oxpulse/chat-widget": minor
 ---
 
 Fix SDKCatalogClient wire contract to match the finalized server DTOs (#195),
@@ -23,9 +24,15 @@ and make `ProductMeta.price` a JSON number (#207, SDK half).
   numeric `price`, asserting the request body is snake_case and the response
   mapping populates camelCase fields.
 
+**Breaking (@oxpulse/chat-widget):** `ProductMeta.price` is now `number`, not a
+host-pre-formatted string. This also changes the shared render-boundary
+`normalizeProductMeta`, which now rejects a string `price` — so a product-card
+message from an older client that sends a string price is dropped on receive.
+See the wire-compat note tracked separately.
+
 Note: `price: string → number` and the `listProducts` return-shape change are
 breaking for consumers of the catalog API; they land within the same unreleased
-minor (3.0.4 → 3.1.0) as the original `SDKCatalogClient` export (#193), which
-never shipped a correct form.
+minor as the original `SDKCatalogClient` export (#193), which never shipped a
+correct form.
 
 Closes #195. Closes #198. Closes #207.
