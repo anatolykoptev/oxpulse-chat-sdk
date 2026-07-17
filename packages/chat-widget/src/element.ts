@@ -606,6 +606,18 @@ export class OxpulseChatElement extends HTMLElement {
          * SDKChatClient always has all three together.
          */
         send?(roomId: string, args: { senderUid: string; sealed: ArrayBuffer }): Promise<{ seq: number; msgId: string }>;
+        /**
+         * SEC-CR-001: poisoned-room fail-closed gate for the direct-upload path.
+         * uploadAttachment (below) drives presignAttachment() + PUT directly, bypassing
+         * chat-sdk's sendFile() and therefore its built-in poison gate. It calls this
+         * BEFORE presign so no attachment BYTES leave for a room poisoned by a prior
+         * crypto_mode_mismatch. REQUIRED together with send/baseUrl/jwt to enable upload
+         * (see the attachmentClient narrowing below): a client that cannot answer poison
+         * state is not trusted to upload E2EE bytes — fail closed, not open. A real
+         * SDKChatClient always has all four together. Throws
+         * SDKChatError('crypto_mode_poisoned') for a poisoned room.
+         */
+        assertRoomNotPoisoned?(roomId: string): void;
         /** #120: broadcast typing indicator. Fire-and-forget. */
         sendTyping?(roomId: string, ttlSecs?: number): Promise<void>;
         /** #121: send presence heartbeat. */
@@ -918,28 +930,48 @@ export class OxpulseChatElement extends HTMLElement {
         // anon-read + named-write combo this fix targets.
         const capturedSendClient = effectiveSendClient;
         const self = this;
-        // issue #67: narrow ONCE to a client that can drive the presign/PUT/send
-        // attachment flow (send/baseUrl/jwt all present — a real SDKChatClient
-        // always has all three together; test mocks opt in explicitly). Typed
-        // here so uploadAttachment/sendAttachmentMessage below need no
-        // per-call-site casts.
-        const attachmentClient: (RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string }) | null =
-          capturedSendClient.send && capturedSendClient.baseUrl !== undefined && capturedSendClient.jwt !== undefined
-            ? (capturedSendClient as RawClient & { send: NonNullable<RawClient['send']>; baseUrl: string; jwt: string })
+        // issue #67 + SEC-CR-001: narrow ONCE to a client that can drive the
+        // presign/PUT/send attachment flow (send/baseUrl/jwt) AND enforce the
+        // poisoned-room gate (assertRoomNotPoisoned) — a real SDKChatClient always has
+        // all four together; test mocks opt in explicitly. Requiring the gate here
+        // makes the direct-upload path fail CLOSED: a client that cannot answer poison
+        // state simply gets no upload capability. Typed here so
+        // uploadAttachment/sendAttachmentMessage below need no per-call-site casts.
+        type UploadCapableClient = RawClient & {
+          send: NonNullable<RawClient['send']>;
+          baseUrl: string;
+          jwt: string;
+          assertRoomNotPoisoned: NonNullable<RawClient['assertRoomNotPoisoned']>;
+        };
+        const attachmentClient: UploadCapableClient | null =
+          capturedSendClient.send &&
+          capturedSendClient.baseUrl !== undefined &&
+          capturedSendClient.jwt !== undefined &&
+          typeof capturedSendClient.assertRoomNotPoisoned === 'function'
+            ? (capturedSendClient as UploadCapableClient)
             : null;
 
         // issue #67: split presign/PUT from send so the attachmentId is available
         // before the message is sent (stage-then-send).
         async function uploadAttachment(
-          // Review fix (LOW, PR #88): unused here — presign/PUT aren't room-scoped
-          // (the catch path below uses the outer config!.roomId instead) — but the
-          // param stays in the signature to satisfy AttachmentPickerClient's
-          // uploadAttachment(roomId, blob, args) interface contract.
-          _roomId: string,
+          // The presign/PUT wire calls are not themselves room-scoped, but this room IS
+          // the poison-gate key (SEC-CR-001, below) and the destination the later
+          // sendAttachmentMessage → send(roomId) targets — matching the attachment-picker
+          // that passes opts.roomId (attachment-picker.ts). The catch path still uses the
+          // outer config!.roomId for token-expired signalling.
+          roomId: string,
           blob: Blob,
           args: { mimeType?: string; filename?: string; width?: number; height?: number; signal?: AbortSignal },
         ): Promise<{ attachmentId: string; attachment: EnvelopeAttachment }> {
           try {
+            // SEC-CR-001: fail CLOSED. This direct-upload path bypasses chat-sdk's
+            // sendFile() gate, so it must assert poison state itself BEFORE presign —
+            // otherwise a room poisoned by a prior crypto_mode_mismatch (a downgrade
+            // tripwire) would still presign + PUT the file BYTES to storage, leaking the
+            // fail-closed guarantee that no message content leaves a poisoned room.
+            // Reads the SDK's authoritative #poisonedRooms via the public delegate; a
+            // poisoned room throws SDKChatError('crypto_mode_poisoned') here.
+            attachmentClient!.assertRoomNotPoisoned(roomId);
             const mimeType = args.mimeType ?? blob.type;
             const digest = await crypto.subtle.digest('SHA-256', await readBlobAsArrayBuffer(blob));
             const sha256 = bytesToHex(digest);

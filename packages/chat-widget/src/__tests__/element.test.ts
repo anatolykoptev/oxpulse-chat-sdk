@@ -19,6 +19,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OxpulseChatElement, defineElement, mount, decodeRowAttachments } from '../element.js';
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
 import { encodeAttachmentEnvelope, decodeAttachmentEnvelope } from '../utils/attachment-envelope.js';
+import { SDKChatError } from '@oxpulse/chat-sdk';
 
 // Issue #37 ("gate first paint on roster resolution") made the element's
 // MessageList await a roster-vs-300ms race in #fetchAndRender before first
@@ -1310,6 +1311,9 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
       send: vi.fn().mockResolvedValue({ seq: 1, msgId: 'msg-att-1' }),
       baseUrl: 'https://chat.example.com',
       jwt: 'test-jwt',
+      // SEC-CR-001: upload capability now REQUIRES the poisoned-room gate; a healthy
+      // client's gate is a no-op (throws only for a poisoned room).
+      assertRoomNotPoisoned: vi.fn(),
     };
   }
 
@@ -1420,6 +1424,62 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
       width: 640,
       height: 480,
     });
+  });
+
+  it('SEC-CR-001: a poisoned room refuses uploadAttachment BEFORE any presign/PUT (fail-closed — no attachment bytes leave)', async () => {
+    // The widget's direct-upload path (presign + PUT, bypassing chat-sdk sendFile())
+    // must consult the SDK's authoritative poisoned-room gate BEFORE presign, so a room
+    // poisoned by a prior crypto_mode_mismatch never leaks file BYTES to storage.
+    const client = makeCapableClient();
+    // Room 'room1' is poisoned: the SDK's public gate throws (as it does after a real
+    // downgrade mismatch). A healthy room would be a no-op.
+    client.assertRoomNotPoisoned = vi.fn((rid: string) => {
+      if (rid === 'room1') {
+        throw new SDKChatError('crypto_mode_poisoned', `room ${rid} was poisoned by a prior crypto_mode_mismatch`);
+      }
+    });
+
+    const presignCalls: RequestInit[] = [];
+    const putCalls: RequestInit[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === 'https://chat.example.com/api/sdk/attachments/presign') {
+        presignCalls.push(init ?? {});
+        return { ok: true, status: 200, json: async () => ({ attachment_id: 'att-x', upload_url: '/api/sdk/attachments/att-x?t=tok' }) } as Response;
+      }
+      if (urlStr.startsWith('https://chat.example.com/api/sdk/attachments/att-')) {
+        putCalls.push(init ?? {});
+        return { ok: true, status: 204, json: async () => null } as Response;
+      }
+      // Roster fetch etc. — harmless 404.
+      return { ok: false, status: 404, json: async () => null, text: async () => '' } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const textarea = el.shadowRoot!.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+    expect(textarea).not.toBeNull();
+
+    const pngFile = new File([new Uint8Array(16)], 'photo.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pngFile] } });
+    textarea.dispatchEvent(pasteEvent);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Fail-closed: the gate throws before presign — NO bytes ever leave for the poisoned room.
+    expect(presignCalls).toHaveLength(0);
+    expect(putCalls).toHaveLength(0);
+    expect(client.send).not.toHaveBeenCalled();
+    // And the gate was actually consulted for the target room (proves the code path ran,
+    // not that upload was skipped for some unrelated reason).
+    expect(client.assertRoomNotPoisoned).toHaveBeenCalledWith('room1');
   });
 
   it('logs an orphaned-attachment warning when send() fails AFTER a successful presign+PUT (review fix)', async () => {

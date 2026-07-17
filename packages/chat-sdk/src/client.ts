@@ -585,6 +585,25 @@ export class SDKChatClient {
   }
 
   /**
+   * SEC-CR-001: public poison gate for an out-of-client attachment-upload wrapper.
+   *
+   * The chat-widget uploads attachment BYTES via presignAttachment() + a raw PUT
+   * directly — deliberately bypassing sendFile() to retain the presigned attachmentId
+   * for its stage-then-send UX — so it cannot inherit sendFile()'s own
+   * #assertRoomNotPoisoned gate (see sendFile above). This thin delegate lets that
+   * room-aware wrapper fail CLOSED *before* presign, so no attachment BYTES leave for a
+   * room poisoned by a prior crypto_mode_mismatch. It reads the SAME authoritative
+   * #poisonedRooms as every internal gate (send / sendText / sendFile / list / …) — it
+   * is NOT a second poison store.
+   *
+   * Throws SDKChatError('crypto_mode_poisoned') for a poisoned room; returns for a
+   * healthy one.
+   */
+  assertRoomNotPoisoned(roomId: string): void {
+    this.#assertRoomNotPoisoned(roomId);
+  }
+
+  /**
    * SEC-CR-001: validate a server-emitted crypto_mode for ONE room against the
    * client-configured expectation (#cryptoMode) and cache the resolved mode for that
    * room. On mismatch/unknown, validateAndResolveCryptoMode poisons ONLY this room
