@@ -124,7 +124,7 @@ describe('OxpulseChatElement — product-card end-to-end (#116)', () => {
     // Stage a product card via the element's public API.
     const productMeta = {
       title: 'Widget Pro',
-      price: '999',
+      price: 999,
       currency: 'USD',
       imageUrl: 'https://example.com/img.png',
       productUrl: 'https://example.com/p/1',
