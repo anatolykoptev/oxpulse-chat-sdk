@@ -23,6 +23,8 @@ export {
   isAliceRole,
   deriveMasterKey,
   deriveMacKeys,
+  wipeMacKeys,
+  wipe,
   buildAuthTranscript,
   computeAuthMac,
   verifyAuthMac,
@@ -32,8 +34,11 @@ export {
   verifyActivateMac,
   sealAead,
   openAead,
+  envelopeToWireB64u,
+  wireB64uToEnvelope,
   type TranscriptParty,
   type AeadEnvelope,
+  type AeadLabel,
 } from './intro-crypto.ts';
 
 // intro-wire — JSON+Zod wire codec for the 6 intro message types
