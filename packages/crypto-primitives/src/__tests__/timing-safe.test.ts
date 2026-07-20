@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { timingSafeEqual, timingSafePubkeyEqualB64u } from '../timing-safe.ts';
+import { b64uEncodeBytes, b64uDecodeBytes } from '../base64url.ts';
 
 describe('timingSafeEqual', () => {
 	it('returns true for equal byte arrays', () => {
@@ -90,6 +91,44 @@ describe('timingSafePubkeyEqualB64u', () => {
 
 	it('does NOT throw on valid b64url input', () => {
 		expect(() => timingSafePubkeyEqualB64u(b64u, b64u)).not.toThrow();
+	});
+
+	it('returns false (does NOT throw) on malformed base64url input (#218 nit #9)', () => {
+		// Chars outside [A-Za-z0-9_-] — atob will throw DOMException.
+		// timingSafePubkeyEqualB64u must swallow the throw and return false.
+		const malformed = '!!!not-base64url!!!';
+		expect(() => timingSafePubkeyEqualB64u(b64u, malformed)).not.toThrow();
+		expect(timingSafePubkeyEqualB64u(b64u, malformed)).toBe(false);
+		expect(timingSafePubkeyEqualB64u(malformed, b64u)).toBe(false);
+		// Both malformed — still no throw, returns false.
+		expect(timingSafePubkeyEqualB64u(malformed, malformed)).toBe(false);
+	});
+});
+
+describe('b64uEncodeBytes / b64uDecodeBytes (#218 nit #11)', () => {
+	it('round-trips arbitrary bytes', () => {
+		const bytes = new Uint8Array([0, 1, 2, 3, 250, 251, 252, 253, 254, 255]);
+		const encoded = b64uEncodeBytes(bytes);
+		expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+		expect(encoded).not.toContain('=');
+		expect(encoded).not.toContain('+');
+		expect(encoded).not.toContain('/');
+		const decoded = b64uDecodeBytes(encoded);
+		expect(Array.from(decoded)).toEqual(Array.from(bytes));
+	});
+
+	it('round-trips a 32-byte pubkey (43 chars)', () => {
+		const pub = new Uint8Array(32);
+		for (let i = 0; i < 32; i++) pub[i] = i + 100;
+		const encoded = b64uEncodeBytes(pub);
+		expect(encoded).toHaveLength(43);
+		const decoded = b64uDecodeBytes(encoded);
+		expect(Array.from(decoded)).toEqual(Array.from(pub));
+	});
+
+	it('round-trips empty bytes', () => {
+		expect(b64uEncodeBytes(new Uint8Array(0))).toBe('');
+		expect(Array.from(b64uDecodeBytes(''))).toEqual([]);
 	});
 });
 

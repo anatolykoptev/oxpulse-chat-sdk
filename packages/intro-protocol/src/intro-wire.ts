@@ -30,6 +30,34 @@ const PubkeyB64u = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const EphPubB64u = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 
 /**
+ * Generic URL-safe base64 string (no fixed length) — used for variable-length
+ * payloads like profile_key_b64u. Constrains charset to base64url to fail
+ * fast on malformed input rather than passing through to downstream decode.
+ */
+const B64uString = z.string().regex(/^[A-Za-z0-9_-]+$/).min(1);
+
+/**
+ * Deterministically CBOR-encodable transport properties (ADR-013 / #218 nit #6).
+ *
+ * Constrained to scalar types that cborg's rfc8949EncodeOptions encode
+ * canonically: string | number | int | bool | null | arrays thereof.
+ * Rejects floats-with-NaN-payloads, bigint, Map, Set, and other shapes
+ * whose CBOR encoding can diverge between two parties constructing the
+ * "same" logical value (which would break transcript/MAC verification).
+ */
+const TransportProps = z.record(
+  z.string(),
+  z.union([
+    z.string(),
+    z.number(),
+    z.bigint(),
+    z.boolean(),
+    z.null(),
+    z.array(z.unknown()),
+  ]),
+).default({});
+
+/**
  * AEAD ciphertext: 24B nonce ‖ ciphertext ‖ 16B tag, URL-safe base64.
  * Minimum 54 chars = ceil((24 + 0 + 16) * 4 / 3) = ceil(160/3) = 54.
  */
@@ -48,10 +76,10 @@ export const IntroRequestV1Schema = z.object({
   target: z.object({
     pubkey_b64u: PubkeyB64u,
     author_b64u: PubkeyB64u,
-    profile_key_b64u: z.string(),
+    profile_key_b64u: B64uString,
     short_id: z.string().optional(),
     handle: z.string().optional(),
-    transport_props: z.record(z.string(), z.unknown()).default({}),
+    transport_props: TransportProps,
   }),
   note: z.string().max(280).optional(),
   created_at: z.number().int().nonnegative(),
@@ -62,7 +90,7 @@ export const IntroAcceptV1Schema = z.object({
   sessionId: SessionId,
   eph_pub_b64u: EphPubB64u,
   accepted_at: z.number().int().nonnegative(),
-  transport_props: z.record(z.string(), z.unknown()).default({}),
+  transport_props: TransportProps,
 });
 
 export const IntroDeclineV1Schema = z.object({

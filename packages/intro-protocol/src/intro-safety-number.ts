@@ -5,18 +5,16 @@
  *
  *   fp_input = canonicalCBOR([min(alice, bob), max(alice, bob), masterKey])
  *   fp_hash  = SHA-512(fp_input)[0..30]   // 30 bytes
- *   fp_dec   = bytesToDecimalString(fp_hash) // 60 digits exactly (5 decimal digits per byte — max per byte = 255, padded to 3 digits, 30 * 3 = 90... we use a different approach below)
+ *   fp_dec   = bytesToDecimalString(fp_hash) // 60 digits exactly
  *
- * Actual digit derivation: each 5 consecutive bits maps to 2 decimal digits (00-31),
- * concatenated. OR simpler: convert 30 bytes BigInt → pad decimal to 72 digits,
- * take first 60.
+ * Implementation: 30-byte SHA-512 slice → big-endian BigInt → decimal string,
+ * left-zero-padded to 72 digits, take leftmost 60, grouped as 12 × 5.
  *
- * Implementation uses BigInt approach: 30-byte SHA-512 slice → big integer →
- * decimal string, left-zero-padded to 72 digits (2^240 < 10^72) → take leftmost 60.
- * Grouped as 12 groups of 5 separated by spaces.
+ * 2^240 ≈ 1.77 × 10^72 (up to 73 decimal digits). padStart(72) is a no-op
+ * for 73-digit values; slice(0, 60) always yields exactly 60 digits.
  *
- * Symmetric property: alice/bob inputs are canonically ordered (lex-smaller first)
- * before CBOR encoding, so swap(alice,bob) → identical output.
+ * Symmetric property: alice/bob inputs are canonically ordered (lex-smaller
+ * first) before CBOR encoding, so swap(alice,bob) → identical output.
  */
 
 import { sha512 } from '@noble/hashes/sha2.js';

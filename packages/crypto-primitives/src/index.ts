@@ -31,3 +31,6 @@ export {
 
 // Timing-safe comparison (ADR-008: public exports)
 export { timingSafeEqual, timingSafePubkeyEqualB64u } from './timing-safe.ts';
+
+// base64url encode/decode (ADR-013 / #218 nit #11: single canonical home)
+export { b64uEncodeBytes, b64uDecodeBytes } from './base64url.ts';
