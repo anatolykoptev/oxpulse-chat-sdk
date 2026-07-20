@@ -80,10 +80,15 @@ const PROVENANCE = process.env.NPM_PROVENANCE === '1';
 
 // Packages in this repo, in dependency order.
 const PACKAGES = [
-	{ name: '@oxpulse/wire-codec', dir: 'packages/wire-codec' },
-	{ name: '@oxpulse/chat-sdk',   dir: 'packages/chat-sdk'   },
-	{ name: '@oxpulse/voice-core', dir: 'packages/voice-core' },
-	{ name: '@oxpulse/chat-widget', dir: 'packages/chat-widget' },
+	// Dep order: a same-run bump of an earlier package is visible to later
+	// packages via `npm view` by the time they publish.
+	{ name: '@oxpulse/wire-codec',      dir: 'packages/wire-codec'      },
+	{ name: '@oxpulse/url-contract',     dir: 'packages/url-contract'     },
+	{ name: '@oxpulse/crypto-primitives', dir: 'packages/crypto-primitives' },
+	{ name: '@oxpulse/intro-protocol',   dir: 'packages/intro-protocol'   }, // depends on crypto-primitives
+	{ name: '@oxpulse/chat-sdk',         dir: 'packages/chat-sdk'         },
+	{ name: '@oxpulse/voice-core',       dir: 'packages/voice-core'       },
+	{ name: '@oxpulse/chat-widget',      dir: 'packages/chat-widget'      },
 ];
 
 // In OIDC mode, packages in this set are treated as "soft" — if npm view
@@ -93,7 +98,18 @@ const PACKAGES = [
 //
 // Bootstrapped packages (wire-codec, chat-sdk, chat-widget) must NOT be in
 // this set — their publish failures are fatal.
-const SOFT_PACKAGES_OIDC = new Set(['@oxpulse/voice-core']);
+//
+// NEW PACKAGES (2026-07-19): crypto-primitives, url-contract, intro-protocol
+// are awaiting manual trusted-publisher configuration on npmjs.com. Until
+// that's done, OIDC publish will E404 for them — soft-skip keeps the pipeline
+// green. Operator: configure trusted publishers on npm for each, then remove
+// from this set. See ADR-013 + release.yml header comment.
+const SOFT_PACKAGES_OIDC = new Set([
+	'@oxpulse/voice-core',
+	'@oxpulse/crypto-primitives',
+	'@oxpulse/url-contract',
+	'@oxpulse/intro-protocol',
+]);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
