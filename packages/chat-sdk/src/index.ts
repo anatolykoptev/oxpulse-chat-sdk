@@ -36,7 +36,7 @@ export { ReplayError } from 'sframe-ratchet/chat';
 export type { SFrameProviderOptions } from './sframe.js';
 export type { PendingMessage } from './outbox.js';
 export { SDKChatError, SDKChatBatchError } from './errors.js';
-export { generateUUID } from './utils.js';
+export { generateUUID, backoffWithJitter, backoffMs } from './utils.js';
 
 // ─── Push notification SDK ────────────────────────────────────────────────────
 

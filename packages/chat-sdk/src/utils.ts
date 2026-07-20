@@ -93,10 +93,52 @@ export function httpStatusToCode(status: number): SDKChatErrorCode {
   return 'server_error'; // unreachable fallback
 }
 
-/** Returns jittered backoff in ms. Caps at 30 s. */
+/**
+ * Default exponential backoff schedule (ms) used by `backoffWithJitter` /
+ * `backoffMs`. Caps at 30 s: 1s, 2s, 4s, 8s, 16s, 30s, 30s, …
+ *
+ * ADR-009: shared schedule across the SDK reconnect path so concurrent client
+ * retries spread across a ±20% jitter window instead of synchronised waves.
+ */
+const DEFAULT_BACKOFF_SCHEDULE = [1000, 2000, 4000, 8000, 16000, 30000] as const;
+
+/**
+ * Reconnect backoff with ±20% jitter and a configurable schedule.
+ *
+ * `base = schedule[attempt] ?? fallback`, then `Math.round(base * (0.8 +
+ * Math.random() * 0.4))` spreads concurrent client retries across a window so
+ * a server restart with N peers doesn't trigger N synchronised retry waves at
+ * T+1s, T+2s…
+ *
+ * Same shape as `web/src/lib/reconnect-backoff.ts` — mirrored here as the
+ * canonical SDK implementation. `backoffMs` is a thin opt-out wrapper over
+ * this function using the default exponential schedule + 30 s fallback.
+ *
+ * @param attempt   0-based reconnect attempt index.
+ * @param schedule  readonly base delays indexed by attempt; defaults to the
+ *                  exponential `[1000, 2000, 4000, 8000, 16000, 30000]`.
+ * @param fallback  base delay used once `attempt` exceeds `schedule.length`;
+ *                  defaults to `30000`.
+ * @returns jittered delay in ms (±20% of the base).
+ */
+export function backoffWithJitter(
+  attempt: number,
+  schedule: readonly number[] = DEFAULT_BACKOFF_SCHEDULE,
+  fallback = 30_000,
+): number {
+  const base = schedule[attempt] ?? fallback;
+  return Math.round(base * (0.8 + Math.random() * 0.4));
+}
+
+/**
+ * Returns jittered backoff in ms. Caps at 30 s.
+ *
+ * Thin wrapper over `backoffWithJitter` using the default exponential schedule
+ * + 30 s fallback. Signature unchanged (backward compatible) — existing
+ * callers (`client.ts`) are unaffected.
+ */
 export function backoffMs(attempt: number): number {
-  const base = Math.min(1000 * Math.pow(2, attempt), 30_000);
-  return base * (0.8 + Math.random() * 0.4);
+  return backoffWithJitter(attempt);
 }
 
 /**
