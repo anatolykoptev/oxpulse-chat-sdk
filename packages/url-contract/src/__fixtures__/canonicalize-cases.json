@@ -1,0 +1,21 @@
+{
+  "_comment": "SEC-CR-001 cross-language canonicalizer conformance fixture (kind-carrier fix, PR #1975). Consumed by BOTH crates/signaling/src/rooms_tests.rs::normalize_room_key_matches_cross_language_fixture (asserts Rust `normalize_room_key`) AND packages/url-contract/src/__tests__/canonicalize-contract.test.ts (asserts TS `parseRoomCode(input)?.roomId`). The 9-char canonical form is the ONE identity used for the DashMap key, the room_token `room` claim, the SFU `/sfu/ws/{room}` segment, and the client cache key. The signaling SFU verifies `claims.room == room_id` by EXACT match, so a one-sided drift between these two producers makes fresh-client group joins fail that match and silently kills group calls. Both runtimes MUST agree on every `shared_agreement` row.",
+
+  "_comment_shared_agreement": "Forms a fresh client actually produces and sends: typed-10 group codes (G-first, valid Luhn), legacy-bare-9, and opaque-22. Rust `normalize_room_key(input)` and TS `parseRoomCode(input)?.roomId` MUST both equal `expected` byte-for-byte.",
+  "shared_agreement": [
+    { "input": "GHJK-12346", "expected": "GHJK-1234", "_note": "typed-10 group, G-first, Luhn '6' -> 9-char payload" },
+    { "input": "HZZZ-9999L", "expected": "HZZZ-9999", "_note": "typed-10 group, H-first, Luhn 'L' -> 9-char payload" },
+    { "input": "JABC-5678M", "expected": "JABC-5678", "_note": "typed-10 group, J-first, Luhn 'M' -> 9-char payload" },
+    { "input": "ABCD-1234", "expected": "ABCD-1234", "_note": "legacy-bare-9 -> unchanged (kind legacy-bare)" },
+    { "input": "ZZZZ-0000", "expected": "ZZZZ-0000", "_note": "legacy-bare-9 -> unchanged" },
+    { "input": "ABCDEFGHJKLMNPQRSTUVWa", "expected": "ABCDEFGHJKLMNPQRSTUVWa", "_note": "opaque-22 base64url -> unchanged (kind opaque)" }
+  ],
+
+  "_comment_divergent": "Forms where the server's `normalize_room_key` and the client's `parseRoomCode` INTENTIONALLY diverge — documenting (and pinning) the asymmetry so a future one-sided change is caught. The `r:` legacy SFU namespace is a SERVER-ONLY accept/strip bridge (DEBT D8): `normalize_room_key` strips `r:` to keep a stale `r:`-emitting client in the same room as a fresh bare client, but the client-side `parseRoomCode` REJECTS `r:` by design (it never re-emits the prefix). Non-group / bad-Luhn typed-10 shapes: the Rust kind-gate (SEC-CR-002) leaves them intact (only a G-first Luhn-valid typed-10 collapses), and TS `parseRoomCode` returns null. `rust_expected` is the `normalize_room_key` output; `ts_parse_is_null: true` means `parseRoomCode(input)` returns null (no `roomId` produced).",
+  "divergent": [
+    { "input": "r:GHJK-12346", "rust_expected": "GHJK-1234", "ts_parse_is_null": true, "_note": "server strips r: AND collapses typed-10; client rejects r:" },
+    { "input": "r:ABCD-1234", "rust_expected": "ABCD-1234", "ts_parse_is_null": true, "_note": "server strips r: to bare-9; client rejects r:" },
+    { "input": "ABCD-1234L", "rust_expected": "ABCD-1234L", "ts_parse_is_null": true, "_note": "valid-Luhn NON-G-first typed-10: NOT a group code, so the kind-gated strip (SEC-CR-002) leaves it intact; client parseRoomCode rejects non-G-first typed codes. This row is the discriminator that proves the strip is kind-gated, not validate_room_id-gated (which WOULD have collapsed it to ABCD-1234)." },
+    { "input": "ABCD-12340", "rust_expected": "ABCD-12340", "ts_parse_is_null": true, "_note": "bad-Luhn 10-char: left intact by both gates; client parseRoomCode rejects bad Luhn" }
+  ]
+}

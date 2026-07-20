@@ -1,0 +1,60 @@
+{
+  "name": "@oxpulse/url-contract",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "author": "Anatoly Koptev",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat-sdk/tree/main/packages/url-contract",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat-sdk.git",
+    "directory": "packages/url-contract"
+  },
+  "bugs": {
+    "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
+  },
+  "keywords": [
+    "oxpulse",
+    "chat",
+    "url",
+    "room",
+    "contract",
+    "schema"
+  ],
+  "description": "Heterogeneous room URL contract — generators, parsers, brands (ADR-0005).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "directory": "dist"
+  },
+  "scripts": {
+    "prepare": "tsc --outDir dist",
+    "build": "tsc --outDir dist",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
