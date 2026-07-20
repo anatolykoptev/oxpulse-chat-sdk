@@ -8,18 +8,17 @@
  * position via timing (OWASP ASVS V11.3.1, CWE-208).
  */
 
+import { equalBytes } from '@noble/curves/utils.js';
+
 /**
  * Constant-time byte-array equality (XOR-reduce-OR).
  *
- * Returns `false` immediately on length mismatch — length is non-secret.
+ * Delegates to `@noble/curves` `equalBytes` (already a dependency) to avoid
+ * reinventing the standard constant-time comparison primitive. Returns
+ * `false` immediately on length mismatch — length is non-secret.
  * No short-circuit path based on byte content (W4).
  */
-export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
-	if (a.length !== b.length) return false;
-	let diff = 0;
-	for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
-	return diff === 0;
-}
+export const timingSafeEqual: (a: Uint8Array, b: Uint8Array) => boolean = equalBytes;
 
 /** Decode a base64url string (no padding) to raw bytes. */
 export function b64uDecodeBytes(s: string): Uint8Array {

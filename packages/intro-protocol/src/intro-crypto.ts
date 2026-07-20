@@ -26,7 +26,8 @@ import { randomBytes } from '@noble/ciphers/utils.js';
 import { encode as cborgEncode, rfc8949EncodeOptions } from 'cborg';
 
 // Constant-time comparison — single source of truth (ADR-008).
-import { timingSafeEqual } from '@oxpulse/crypto-primitives';
+// deriveSharedSecret — RFC 7748 §6.1 all-zero-shared-secret defense (low-order point guard).
+import { timingSafeEqual, deriveSharedSecret } from '@oxpulse/crypto-primitives';
 
 // ---------------------------------------------------------------------------
 // Label constants (sub-spec §4.2) — UTF-8 encoded at use-site.
@@ -156,7 +157,7 @@ export function deriveMasterKey(
   aliceEphPub: Uint8Array,
   bobEphPub:   Uint8Array,
 ): Uint8Array {
-  const ikm  = x25519.getSharedSecret(ownEphPriv, peerEphPub);
+  const ikm  = deriveSharedSecret(ownEphPriv, peerEphPub);
   const salt = utf8(LABEL_MASTER_KEY);
   const info = concatBytes(new Uint8Array([PROTOCOL_VERSION]), aliceEphPub, bobEphPub);
   return hkdf(sha256, ikm, salt, info, 32);
