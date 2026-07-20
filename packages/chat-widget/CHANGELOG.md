@@ -1,5 +1,88 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.21.1
+
+### Patch Changes
+
+- b4e2266: Gate the attachment-upload path on the poisoned-room fail-closed check
+  (SEC-CR-001).
+
+  `SDKChatClient#assertRoomNotPoisoned` already refuses `send`/`sendText`/`sendFile`
+  for a room poisoned by a prior `crypto_mode_mismatch` (a downgrade tripwire), so
+  no message content leaves a poisoned room. But the widget's direct-upload path
+  (`uploadAttachment` → `presignAttachment` + a raw PUT, which deliberately bypasses
+  `sendFile()` to keep the presigned `attachmentId` for stage-then-send) had no such
+  gate: in a poisoned room it presigned and uploaded the file BYTES to storage
+  before the later, gated `send` — leaking the fail-closed guarantee.
+
+  - chat-sdk: expose a minimal public `assertRoomNotPoisoned(roomId)` delegate that
+    reads the same authoritative `#poisonedRooms` set as every internal gate (no
+    second poison store).
+  - chat-widget: `uploadAttachment` now calls it before presign, and upload
+    capability requires it — a client that cannot answer poison state gets no upload
+    capability at all (fail closed). Stage-then-send UX is preserved.
+
+- 0dd25c1: Fix reconnect tearing down the fresh subscription on success. On a successful
+  reconnect, `notifyReconnected()` called `stopReconnectLoop()`, whose unsubscribe
+  branch immediately tore down the SSE subscription that `#scheduleAttempt` (and the
+  `online`-event retry) had just established — leaving a permanently-dead room behind
+  a false "connected" banner: no frames ever arrived again after any network blip.
+
+  `stopReconnectLoop()` conflated two responsibilities — cancel the pending retry
+  timer, and tear down the live subscription. `notifyReconnected()` only wanted the
+  former. Extracted a timer-only `#cancelRetryTimer()`; `notifyReconnected()` now
+  calls it instead of `stopReconnectLoop()`. Genuine-teardown callers (clear,
+  destroy, notifyAuthExpired) keep the full `stopReconnectLoop()`.
+
+  Also fixes the complementary leak the self-teardown had been masking: the two
+  success sites (`#scheduleAttempt`, `#onOnline`) overwrote `#unsubscribe` with the
+  fresh sub without releasing the previous one. On a flap (reconnect → drop →
+  reconnect) the prior subscription's teardown was dropped on the floor, so the SDK
+  decrypt-chain refcount never reached 0 and the orphaned sub kept self-reconnecting
+  (duplicate delivery + request fan-out). Both sites now route through a
+  `#replaceSubscription()` helper that tears down the stale sub before assigning the
+  fresh one (idempotent teardown; the fresh sub is assigned after the release, so it
+  is never the one torn down).
+
+  The existing suite masked all of this because it mocked the unsubscribe fn as a
+  no-op; added regression tests with a non-noop unsub spy asserting the fresh
+  subscription stays live after a successful reconnect (both the timer and `online`
+  paths), that on a flap the stale sub is torn down before the fresh one replaces it,
+  and that genuine teardown (clear/destroy) still unsubscribes.
+
+- a3929a5: Routine bug-hunt batch: theme resolution dedup, dedup-Set eviction sweep, iframe experimental notice
+
+  - **theme.ts (F8):** `applyTheme()` now calls `resolveTheme()` instead of
+    duplicating the auto/light/dark branch logic inline. `resolveTheme()` was
+    previously dead (zero callers) while `applyTheme()` hand-copied the identical
+    resolution — collapsed to a single `host.setAttribute('data-theme',
+resolveTheme(themeAttr))` call. Behavior-identical (existing 56 theme tests
+    pass).
+  - **message-list.ts (F12):** `#firedAttachmentErrors` and `#firedDecryptErrors`
+    Sets are now swept in `#evictOldMessages()` (delete entries for evicted
+    msgIds), matching how every sibling per-msgId Map is pruned. Previously these
+    Sets accumulated one entry per failed msgId for the widget's entire lifetime
+    (only cleared in `destroy()`), unbounded in a long-lived busy room, and a
+    msgId recycled after eviction was wrongly suppressed by the stale dedup
+    entry. Two new eviction tests verify the sweep + dedup-contract preservation.
+  - **README + element.ts (F3/F5 INTERIM):** `mode='iframe'` is now marked
+    EXPERIMENTAL / not-production-ready in the README mode documentation, and
+    selecting `mode='iframe'` emits a one-time `console.warn` per page load.
+    The iframe mode is half-built (creates the iframe but constructs no real
+    chat client; in-place JWT refresh writes `liveConfig.jwt` with no consumer —
+    W2.2 TODO). Interim safety notice only; the full build is tracked separately.
+  - **publish-widget-cdn.mjs (F6, ops script — no package bump):** the CDN
+    publish soft-skip (when `CDN_DEPLOY_KEY` is absent) now emits a `::warning::`
+    GHA annotation via the existing `ghaWarning()` helper AND writes a
+    step-summary line to `$GITHUB_STEP_SUMMARY`, so a skipped/misconfigured CDN
+    deploy is visible in the Actions UI instead of indistinguishable from
+    success on a green job. `exit(0)` is preserved (soft-skip is intentional).
+
+- Updated dependencies [e5bf0a7]
+- Updated dependencies [c4ae240]
+- Updated dependencies [b4e2266]
+  - @oxpulse/chat-sdk@3.0.6
+
 ## 0.21.0
 
 ### Minor Changes

@@ -1,5 +1,47 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.0.6
+
+### Patch Changes
+
+- e5bf0a7: Add backoffWithJitter(attempt, schedule?, fallback?) as the default backoff with configurable schedule. backoffMs is now a thin wrapper delegating to backoffWithJitter (signature unchanged, backward compatible). Both already use ±20% jitter.
+- c4ae240: Harden two crypto-adjacent paths:
+
+  - **Bound the durable replay-guard in-memory cache (F4, resource exhaustion).**
+    `DurableReplayGuard` created one `MemWindow` per distinct (namespace, room, sender) on
+    hydrate and never released it, so a long-lived always-open widget seeing many distinct
+    senders/rooms grew memory without bound. The cache is now FIFO-capped
+    (`REPLAY_MEM_CACHE_CAP = 256`, mirroring `client.ts`'s shipped `ACTIVE_CRYPTO_MODE_MAP_CAP`);
+    an evicted (room, sender) re-hydrates from the authoritative IndexedDB store on next use, so
+    cross-reload replay protection is preserved. Eviction never drops an entry mid-hydration or
+    with an in-flight persist (which would let a fresh hydrate read a stale window and re-accept a
+    replayed CTR).
+
+  - **Fail closed when no CSPRNG is available in `generateUUID` (F13, crypto invariant).**
+    When both `crypto.randomUUID` and `crypto.getRandomValues` were absent, `generateUUID` silently
+    fell back to `Math.random()` — a non-CSPRNG. Since this is a public export usable for
+    nonces/session ids (not only message ids), it now throws instead of returning weak randomness.
+    On every supported runtime (browser secure origin, Node >= 18 WebCrypto) `getRandomValues` is
+    present, so the throw is unreachable in practice.
+
+- b4e2266: Gate the attachment-upload path on the poisoned-room fail-closed check
+  (SEC-CR-001).
+
+  `SDKChatClient#assertRoomNotPoisoned` already refuses `send`/`sendText`/`sendFile`
+  for a room poisoned by a prior `crypto_mode_mismatch` (a downgrade tripwire), so
+  no message content leaves a poisoned room. But the widget's direct-upload path
+  (`uploadAttachment` → `presignAttachment` + a raw PUT, which deliberately bypasses
+  `sendFile()` to keep the presigned `attachmentId` for stage-then-send) had no such
+  gate: in a poisoned room it presigned and uploaded the file BYTES to storage
+  before the later, gated `send` — leaking the fail-closed guarantee.
+
+  - chat-sdk: expose a minimal public `assertRoomNotPoisoned(roomId)` delegate that
+    reads the same authoritative `#poisonedRooms` set as every internal gate (no
+    second poison store).
+  - chat-widget: `uploadAttachment` now calls it before presign, and upload
+    capability requires it — a client that cannot answer poison state gets no upload
+    capability at all (fail closed). Stage-then-send UX is preserved.
+
 ## 3.0.4
 
 ### Patch Changes
