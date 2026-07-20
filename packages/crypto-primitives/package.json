@@ -1,0 +1,66 @@
+{
+  "name": "@oxpulse/crypto-primitives",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "author": "Anatoly Koptev",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat-sdk/tree/main/packages/crypto-primitives",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat-sdk.git",
+    "directory": "packages/crypto-primitives"
+  },
+  "bugs": {
+    "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
+  },
+  "keywords": [
+    "oxpulse",
+    "chat",
+    "e2ee",
+    "crypto",
+    "x25519",
+    "hkdf",
+    "aead",
+    "timing-safe"
+  ],
+  "description": "Pairwise X25519+HKDF+AEAD primitives, MessageEnvelope v1 codec, and timing-safe comparison helpers for oxpulse-chat (Phase 1 unified transport).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "directory": "dist"
+  },
+  "scripts": {
+    "prepare": "tsc --outDir dist",
+    "build": "tsc --outDir dist",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
