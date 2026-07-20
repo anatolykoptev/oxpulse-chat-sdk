@@ -1,0 +1,72 @@
+{
+  "name": "@oxpulse/intro-protocol",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "author": "Anatoly Koptev",
+  "homepage": "https://github.com/anatolykoptev/oxpulse-chat-sdk/tree/main/packages/intro-protocol",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolykoptev/oxpulse-chat-sdk.git",
+    "directory": "packages/intro-protocol"
+  },
+  "bugs": {
+    "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
+  },
+  "keywords": [
+    "oxpulse",
+    "chat",
+    "e2ee",
+    "crypto",
+    "introduction",
+    "contact",
+    "safety-number",
+    "timing-safe",
+    "cwe-208"
+  ],
+  "description": "L2 introduction protocol — Briar-faithful intro crypto (X25519+HKDF+AEAD), JSON+Zod wire codec, and Signal-style safety numbers. Fixes CWE-208 timing oracle in sessionId redundancy check. EXPERIMENTAL (0.1.0).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "directory": "dist"
+  },
+  "scripts": {
+    "prepare": "tsc --outDir dist",
+    "build": "tsc --outDir dist",
+    "prepublishOnly": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@oxpulse/crypto-primitives": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@noble/ciphers": "^2.2.0",
+    "cborg": "^5.1.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

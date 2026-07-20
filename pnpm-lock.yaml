@@ -91,6 +91,38 @@ importers:
         version: 4.1.8(@types/node@22.19.21)(jsdom@25.0.1)(vite@8.0.16(@types/node@22.19.21)(esbuild@0.25.12))
     publishDirectory: dist
 
+  packages/intro-protocol:
+    dependencies:
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@oxpulse/crypto-primitives':
+        specifier: workspace:*
+        version: link:../crypto-primitives/dist
+      cborg:
+        specifier: ^5.1.1
+        version: 5.1.7
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.21
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.8(@types/node@22.19.21)(jsdom@25.0.1)(vite@8.0.16(@types/node@22.19.21)(esbuild@0.25.12))
+    publishDirectory: dist
+
   packages/url-contract:
     devDependencies:
       '@types/node':
@@ -449,6 +481,10 @@ packages:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
 
+  '@noble/ciphers@2.2.0':
+    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
+    engines: {node: '>= 20.19.0'}
+
   '@noble/curves@2.2.0':
     resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
     engines: {node: '>= 20.19.0'}
@@ -667,6 +703,10 @@ packages:
 
   cbor-x@1.6.4:
     resolution: {integrity: sha512-UGKHjp6RHC6QuZ2yy5LCKm7MojM4716DwoSaqwQpaH4DvZvbBTGcoDNTiG9Y2lByXZYFEs9WRkS5tLl96IrF1Q==}
+
+  cborg@5.1.7:
+    resolution: {integrity: sha512-rGg2MG9zZEUKtKqjkBppIWUecTXf9N1vs1Qru43vJWoDaODhCrtmzdehCaA/aq/c1cPI5A0kPrJ5Tf+jIfhV4w==}
+    hasBin: true
 
   chai@6.2.2:
     resolution: {integrity: sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==}
@@ -1422,6 +1462,9 @@ packages:
   xmlchars@2.2.0:
     resolution: {integrity: sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==}
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@asamuzakjp/css-color@3.2.0':
@@ -1743,6 +1786,8 @@ snapshots:
       '@tybys/wasm-util': 0.10.2
     optional: true
 
+  '@noble/ciphers@2.2.0': {}
+
   '@noble/curves@2.2.0':
     dependencies:
       '@noble/hashes': 2.2.0
@@ -1923,6 +1968,8 @@ snapshots:
   cbor-x@1.6.4:
     optionalDependencies:
       cbor-extract: 2.2.2
+
+  cborg@5.1.7: {}
 
   chai@6.2.2: {}
 
@@ -2569,3 +2616,5 @@ snapshots:
   xml-name-validator@5.0.0: {}
 
   xmlchars@2.2.0: {}
+
+  zod@4.4.3: {}
