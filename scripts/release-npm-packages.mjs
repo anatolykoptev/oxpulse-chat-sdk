@@ -105,7 +105,9 @@ const PACKAGES = [
 // green. Operator: configure trusted publishers on npm for each, then remove
 // from this set. See ADR-013 + release.yml header comment.
 const SOFT_PACKAGES_OIDC = new Set([
-	'@oxpulse/voice-core',
+	// voice-core removed 2026-07-21: it is published (0.3.0) and its trusted
+	// publisher is now configured on npm, so OIDC publish succeeds — a failure
+	// there is real and should be fatal, not soft-skipped.
 	'@oxpulse/crypto-primitives',
 	'@oxpulse/url-contract',
 	'@oxpulse/intro-protocol',
