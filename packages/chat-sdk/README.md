@@ -1,21 +1,20 @@
 # @oxpulse/chat-sdk
 
-[![version](https://img.shields.io/badge/version-2.0.0-blue)](./CHANGELOG.md)
-[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-green)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/@oxpulse/chat-sdk)](https://www.npmjs.com/package/@oxpulse/chat-sdk)
+[![license](https://img.shields.io/npm/l/@oxpulse/chat-sdk)](./LICENSE)
 
-TypeScript client for the OxPulse encrypted chat message log API.
+TypeScript client for the OxPulse SDK HTTP chat API: send, list, subscribe, room management, reactions, attachments, push subscriptions, and optional sframe-ratchet E2EE.
 
-> **v2.0.0 — production release.**
-> The `web/` mirror (`$lib/api/sdkChat`) has been deleted.
-> All production code imports directly from this package.
->
-> **v2.0.0 is a security-driven major bump (SEC-CR-001):** with an `e2ee` provider
-> configured, downgrade defense to plaintext is now default-on — see [E2EE](#e2ee).
+Use it in marketplace or third-party integrations that talk to the OxPulse SDK backend. It is CSP-safe: no `eval()` or `new Function()` calls.
 
 ## Install
 
-```bash
-npm install @oxpulse/chat-sdk
+```sh
+npm install @oxpulse/chat-sdk@3
+# or
+pnpm add @oxpulse/chat-sdk@3
+# or
+yarn add @oxpulse/chat-sdk@3
 ```
 
 ## Quick start
@@ -23,124 +22,78 @@ npm install @oxpulse/chat-sdk
 ```ts
 import { SDKChatClient } from '@oxpulse/chat-sdk';
 
-// JWT obtained from POST /api/sdk/tokens (server-side mint).
 const client = new SDKChatClient({
   baseUrl: 'https://chat.example.com',
-  jwt: 'raw-jwt-here', // do NOT include "Bearer " prefix
+  jwt: 'raw-jwt-from-your-backend', // do NOT include "Bearer " prefix
 });
 
-// Send a sealed (E2EE) message.
 const { seq, msgId } = await client.send('room-123', {
   senderUid: 'user-1',
   sealed: ciphertextArrayBuffer,
 });
 
-// List historical messages.
-const { items, hasNext } = await client.list('room-123', { afterSeq: 0, limit: 100 });
+const { items, hasNext, next } = await client.list('room-123', { afterSeq: 0, limit: 50 });
 
-// Subscribe to live messages via SSE.
-// Auth uses a short-lived ticket (RFC 6750 compliant — no JWT in URL).
-// subscribe() auto-reconnects with exponential backoff and replays missed
-// messages via list() before re-attaching the live stream.
 const teardown = client.subscribe('room-123', {
-  onMessage: (row) => {
-    // row.sealed — ciphertext as ArrayBuffer; pass to your E2EE decrypt function.
-    console.log('new message seq=%d', row.seq);
-  },
-  onError: (err) => console.error('SSE error', err),
+  onMessage: (row) => console.log('seq', row.seq, 'msgId', row.msgId),
+  onError: (err) => console.error(err),
 });
 
-// Stop subscribing.
+// later
 teardown();
 ```
 
-## API reference
+## API surface
 
-### `new SDKChatClient(options)`
+### `SDKChatClient`
 
-| Option | Type | Description |
-|---|---|---|
-| `jwt` | `string` | Raw SDK JWT. Do NOT include `"Bearer "` prefix. |
-| `baseUrl` | `string?` | URL prefix; default `''` (same-origin). |
-| `compression` | `'none' \| 'auto' \| 'dict'` | Wire compression; default `'none'`. |
-| `e2ee` | `E2EEOptions?` | End-to-end encryption config. |
-| `cryptoMode` | `'sframe-static' \| 'plaintext'` | Expected server crypto mode. Defaults to `'sframe-static'` when `e2ee` is configured (downgrade defense, SEC-CR-001), otherwise auto-detected. |
+Constructor options (`SDKChatClientOptions`):
 
-### Methods
+- `baseUrl` - server URL (no trailing slash)
+- `jwt` - raw SDK JWT (no `Bearer ` prefix)
+- `compression?: 'none' | 'auto' | 'dict'` - default `'none'`
+- `minCompressBytes?: number` - threshold for `auto`/`dict` (default 256)
+- `dictHint?: 'zstd-dict-ru-v1' | 'zstd-dict-fa-v1' | 'zstd-dict-en-v1'`
+- `e2ee?: E2EEOptions` - see [E2EE](#e2ee)
+- `cryptoMode?: 'sframe-static' | 'plaintext'` - defaults to `'sframe-static'` when `e2ee` is set
+- `appId?: string`
 
-#### `send(roomId, args): Promise<{ seq, msgId }>`
+Methods:
 
-Send a single sealed message. Returns server-assigned `seq` and `msgId`.
+- `send(roomId, SendArgs)` → `{ seq, msgId }`
+- `sendText(roomId, { senderUid, text, ... })` → `{ seq, msgId }` (requires `e2ee`)
+- `sendOptimistic(roomId, SendArgs)` → `OptimisticHandle`
+- `sendTextOptimistic(roomId, { senderUid, text, ... })` → `OptimisticHandle` (requires `e2ee`)
+- `flushOutbox(roomId)` → `Promise<void>`
+- `batchAppend(roomId, BatchAppendItem[])` → `Promise<void>`
+- `list(roomId, ListArgs?)` → `ListResult` with `items`, `hasNext`, and optional `next()`
+- `subscribe(roomId, SubscribeArgs)` → teardown `() => void`
+- `getThread(roomId, rootMsgId)` → `MessageRow[]`
+- `searchByProductRef(productRef, { roomId?, limit? })` → `MessageRow[]`
+- `sendTyping(roomId, ttlSecs?)` / `sendPresence(roomId)` / `getPresence(roomId)`
+- `markRead(roomId, seq)`
+- `sendFile(roomId, blob, SendFileArgs)` → `{ seq, msgId }`
+- `createRoom(CreateRoomArgs?)` / `getRoom(roomId)` / `updateRoom(roomId, UpdateRoomArgs)` / `listRooms({ limit?, offset?, includeArchived? })` / `listMembers(roomId)`
+- `addMember(roomId, userId, role?)` / `removeMember(roomId, userId)` / `batchAddMembers(roomId, userIds[], role?)`
+- `updateMessage(roomId, msgId, { sealed })` / `deleteMessage(roomId, msgId)`
+- `pinMessage(roomId, msgId)` / `unpinMessage(roomId, msgId)` / `listPins(roomId)`
+- `addReaction(roomId, msgId, reaction)` / `removeReaction(roomId, msgId, reaction)` / `getReactions(roomId, msgId)`
+- `encodeEnvelope(payload)` / `decodeEnvelope(bytes)`
 
-#### `sendText(roomId, args): Promise<{ seq, msgId }>`
+Static: `MAX_RETRIES`, `BATCH_ADD_MEMBERS_CHUNK`.
 
-Send a plaintext message with auto-seal. Requires `e2ee` configured.
+### Other exports
 
-#### `sendOptimistic(roomId, args): OptimisticHandle`
+- `SDKChatError` / `SDKChatBatchError` / `SDKChatErrorCode`
+- `SDKPushClient` / `SDKPushError` / `SDKPushErrorCode` / `SubscribeResult` / `SubscriptionChangeListenerOpts`
+- `createSFrameProvider` / `SFrameProviderOptions` / `ReplayError` (re-exported from `sframe-ratchet/chat`)
+- `mintAnonReadToken` / `AnonReadMintError` / `AnonReadMintResult`
+- `mintNamedWriteToken` / `NamedWriteMintError` / `MintNamedWriteOptions`
+- `fetchRoster` / `rosterDisplayName` / `rosterAvatar` / `rosterRole`
+- `setDictLoader` / `setDictBaseUrl` / `ensureWireCodecReady` (re-exported from `@oxpulse/wire-codec`)
+- `generateUUID` / `backoffWithJitter` / `backoffMs`
 
-Enqueue message for offline-safe delivery with retry. Returns handle with
-`onPending`, `onSucceeded`, `onFailed` callbacks.
-
-#### `sendTextOptimistic(roomId, args): OptimisticHandle`
-
-Like `sendOptimistic()` but auto-seals plaintext before enqueue. Use instead
-of `sendOptimistic()` when `e2ee` is configured.
-
-#### `batchAppend(roomId, items): Promise<void>`
-
-Send multiple pre-sealed messages in a single `POST /api/sdk/messages/batch` transaction.
-
-- `room_id` is injected automatically per item.
-- `created_at` is set server-side; do not include it.
-- Does **NOT** auto-seal — callers must set `sealed` to the pre-sealed ciphertext as
-  an `ArrayBuffer` before calling (the SDK base64-encodes it for the wire internally).
-  Use `sendText` / `sendTextOptimistic` for auto-seal.
-- Scope required: `chat:write:<room_id>`.
-
-```ts
-const items: BatchAppendItem[] = messages.map((m) => ({
-  msgId: m.id,
-  sealed: m.sealedBytes, // ArrayBuffer
-}));
-await client.batchAppend('room-123', items);
-```
-
-#### `list(roomId, args?): Promise<ListResult>`
-
-Fetch message history. Supports cursor pagination via `ListArgs.afterSeq` / `beforeSeq`.
-
-#### `subscribe(roomId, args): () => void`
-
-Open an SSE stream. Auto-reconnects with exponential backoff (max ~30 s jitter).
-On reconnect, replays missed messages via `list()` before re-attaching.
-
-Returns a teardown function; call it to unsubscribe and close the stream.
-
-#### Room management
-
-`createRoom(args?)`, `updateRoom(roomId, args)`, `listRooms()`, `getRoom(roomId)`,
-`archiveRoom(roomId)` — full CRUD for SDK rooms.
-
-#### Message operations
-
-`deleteMessage(roomId, msgId)`, `pinMessage(roomId, msgId)`,
-`unpinMessage(roomId, msgId)`, `listPinnedMessages(roomId)`,
-`updateMessage(roomId, msgId, args)`.
-
-#### Reactions
-
-`addReaction(roomId, msgId, reaction)`, `removeReaction(roomId, msgId, reaction)`,
-`getReactions(roomId, msgId)`.
-
-#### Presence / typing
-
-`sendTyping(roomId, ttlSecs?)`, `sendPresence(roomId)`, `getPresence(roomId)`,
-`sendReadReceipt(roomId, seq)`.
-
-#### File attachments
-
-`sendFile(roomId, args)` — presign-then-upload helper. See
-`packages/chat-sdk/src/attachments.ts` for the `SendFileArgs` shape.
+Key types: `SendArgs`, `ListArgs`, `ListResult`, `MessageRow`, `SubscribeArgs`, `UpdateMessageArgs`, `PinnedMessage`, `BatchAppendItem`, `OptimisticHandle`, `CreateRoomArgs`, `UpdateRoomArgs`, `Room`, `RoomSummary`, `Member`, `RoomVisibility`, `CryptoProvider`, `E2EEOptions`, `CryptoMode`, `SealContext`, `SendFileArgs`, `PresignResult`, `RosterEntry`, `PrivilegedRole`, `FetchRosterOptions`, `AnonReadMintResult`, `NamedWriteMintErrorCode`, `PendingMessage`.
 
 ### E2EE
 
@@ -154,6 +107,7 @@ const client = new SDKChatClient({
   jwt: 'jwt...',
   e2ee: {
     provider: 'sframe',
+    // HKDF base-key with usages ['deriveKey', 'deriveBits']
     getKey: async ({ roomId }) => derivedKeyForRoom(roomId),
   },
 });
@@ -166,77 +120,34 @@ const client = new SDKChatClient({
   baseUrl: '...',
   jwt: '...',
   e2ee: {
-    provider: myProvider, // implements CryptoProvider { seal, unseal }
+    provider: myProvider, // implements { seal, unseal, dispose? }
   },
 });
 ```
 
-`subscribe()` decrypts each message row asynchronously in a per-room serial
-chain to preserve ordering. Rows that fail decryption are delivered with
-`MessageRow.unsealError: 'replay' | 'auth' | 'unknown'` instead of being dropped.
+`sendText()` encrypts before sending. `list()` and `subscribe()` transparently decrypt each row. Rows that fail decryption are delivered with `MessageRow.unsealError: 'replay' | 'auth' | 'unknown'` instead of being dropped.
 
-#### Downgrade defense (default-on since v2.0.0, SEC-CR-001)
+#### Downgrade defense
 
-When an `e2ee` provider is configured, `cryptoMode` defaults to `'sframe-static'` —
-the client refuses to accept a server-emitted `crypto_mode: 'plaintext'` for that
-room. A mismatch throws `SDKChatError('crypto_mode_mismatch')` and poisons **only
-that room** (sibling rooms on the same client keep working); recreate the client
-instance to retry a poisoned room. Constructing with an `e2ee` provider **and**
-`cryptoMode: 'plaintext'` now throws `invalid_args` at construction (contradictory
-config) instead of silently sending plaintext. An e2ee client with no explicit
-`cryptoMode` seals and sends immediately by default — no discovery round-trip
-required before the first send. Clients with no `e2ee` provider are unaffected:
-plaintext remains a valid auto-detected mode.
-
-### `BatchAppendItem`
-
-```ts
-interface BatchAppendItem {
-  msgId: string;                 // UUID
-  sealed?: ArrayBuffer | null;   // pre-sealed ciphertext; SDK base64-encodes for the wire
-  threadRootMsgId?: string | null;
-  productRef?: string | null;
-  productMeta?: unknown;
-}
-```
-
-### `MessageRow`
-
-```ts
-interface MessageRow {
-  seq: number;
-  msgId: string;
-  senderUid: string;
-  sealed: ArrayBuffer;     // ciphertext
-  plaintext?: ArrayBuffer; // set by SDK when e2ee is configured
-  unsealError?: 'replay' | 'auth' | 'unknown'; // set on decrypt failure
-  createdAt: string;       // ISO 8601
-  threadRootMsgId: string | null;
-  productRef: string | null;
-  productMeta: unknown;    // catalog metadata (title/price/currency/imageUrl/productUrl); set when productRef is set
-  editedAt?: string;       // last-edit timestamp; unset when never edited
-  deletedAt?: string;      // soft-delete timestamp; unset when not deleted
-  editCount?: number;      // number of edits; 0 when never edited
-}
-```
+When `e2ee` is configured, `cryptoMode` defaults to `'sframe-static'`. The client refuses a server-emitted `crypto_mode: 'plaintext'` for that room and throws `SDKChatError('crypto_mode_mismatch')`, poisoning only that room. Recreate the client to retry a poisoned room. Passing `e2ee` with `cryptoMode: 'plaintext'` throws `invalid_args` at construction.
 
 ## Error model
 
-All failures throw `SDKChatError` with a typed `code` field:
+All failures throw `SDKChatError` with a typed `code`:
 
 | Code | When |
-|------|------|
-| `unauthorized` | 401 — invalid or expired JWT / ticket |
-| `forbidden` | 403 — missing scope |
+|---|---|
+| `unauthorized` | 401 - invalid or expired JWT / ticket |
+| `forbidden` | 403 - missing scope |
 | `not_found` | 404 |
 | `rate_limited` | 429 |
-| `invalid_args` | 400–4xx (other than above); also thrown at construct time for contradictory options (e.g. `e2ee` + `cryptoMode: 'plaintext'`) |
+| `invalid_args` | 400–4xx (other than above); also thrown at construction for contradictory options |
 | `server_error` | 5xx |
 | `network` | fetch/network-level failure |
-| `unsupported` | an e2ee-only operation (e.g. `sendText`) called without `e2ee` configured |
-| `crypto_mode_mismatch` | server-emitted `crypto_mode` doesn't match the configured/discovered expectation (SEC-CR-001 downgrade defense) — poisons that room |
-| `crypto_mode_poisoned` | room already poisoned by a prior `crypto_mode_mismatch`; recreate the client to retry |
-| `crypto_mode_undiscovered` | `sendText` called before `crypto_mode` is known and no `e2ee` provider is configured (e2ee clients default to `'sframe-static'` and never hit this) |
+| `unsupported` | an e2ee-only operation called without `e2ee` configured |
+| `crypto_mode_mismatch` | server-emitted `crypto_mode` does not match the configured/discovered expectation |
+| `crypto_mode_poisoned` | room already poisoned by a prior mismatch; recreate the client |
+| `crypto_mode_undiscovered` | `sendText` called before `crypto_mode` is known and no `e2ee` provider is configured |
 
 ## Compression (optional)
 
@@ -246,16 +157,15 @@ Enable zstd compression to reduce payload size:
 const client = new SDKChatClient({
   baseUrl: 'https://chat.example.com',
   jwt: 'jwt...',
-  compression: 'auto',       // zstd dictless when payload ≥ 256 B
+  compression: 'auto', // zstd dictless when payload >= 256 B
 });
 ```
 
-See `@oxpulse/wire-codec` README for codec internals and dict management.
+See `@oxpulse/wire-codec` for codec internals and dict management. The SDK re-exports `setDictLoader`, `setDictBaseUrl`, `ensureWireCodecReady`, `DictLoader`, and `DictName` from `@oxpulse/wire-codec`, so most apps do not need to install the codec separately.
 
 ## CSP compatibility
 
-`@oxpulse/chat-sdk` is **strict-CSP-safe** — zero `eval()`, zero `new Function()`.
-Verified by `src/__tests__/csp-cleanliness.test.ts` on every build.
+`@oxpulse/chat-sdk` is strict-CSP-safe. It contains zero `eval()` and zero `new Function()`. Verified by `src/__tests__/csp-cleanliness.test.ts` on every build.
 
 Compatible with:
 
@@ -265,35 +175,29 @@ script-src 'self' 'wasm-unsafe-eval' 'nonce-...' 'strict-dynamic'
 
 ## Notifications (Web Push)
 
-Use `SDKPushClient` to manage Web Push subscriptions for buyer/seller notifications.
+Use `SDKPushClient` to manage Web Push subscriptions:
 
 ```ts
-import { SDKChatClient, SDKPushClient } from '@oxpulse/chat-sdk';
+import { SDKPushClient } from '@oxpulse/chat-sdk';
 
-const chat = new SDKChatClient({ baseUrl, jwt });
 const push = new SDKPushClient({ baseUrl, jwt });
 
-// 1. fetch VAPID key
 const vapidKey = await push.getVapidPublicKey();
-
-// 2. browser subscribe
 const reg = await navigator.serviceWorker.ready;
 const subscription = await reg.pushManager.subscribe({
   userVisibleOnly: true,
   applicationServerKey: vapidKey,
 });
 
-// 3. register with server
-const { deviceId } = await push.subscribe();
+const { endpoint, deviceId } = await push.subscribe();
 
-// 4. listen for server-rotated endpoints
 push.attachSubscriptionChangeListener({
-  onResubscribed: newEndpoint => console.log('rotated', newEndpoint),
+  onResubscribed: (newEndpoint) => console.log('rotated', newEndpoint),
   onLost: () => console.log('permission revoked'),
 });
 ```
 
-Permission check before subscribing:
+Request permission first:
 
 ```ts
 const perm = await SDKPushClient.requestPermission();
@@ -302,7 +206,7 @@ if (perm === 'granted') {
 }
 ```
 
-All failures throw `SDKPushError` with a typed `code: SDKPushErrorCode` field.
+All failures throw `SDKPushError` with a typed `code: SDKPushErrorCode`.
 
 ## License
 
