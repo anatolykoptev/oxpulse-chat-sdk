@@ -26,21 +26,16 @@
 #   goes public (and update the npm "Environment name" field on the trusted
 #   publisher to "release" or leave it blank).
 #
-# Trusted publishers configured on npm (npmjs.com → package → Publishing):
-#   @oxpulse/wire-codec      → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
-#   @oxpulse/chat-sdk        → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
-#   @oxpulse/chat-widget     → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml  environment: release
-#
-# PENDING trusted-publisher configuration (2026-07-19): operator must configure
-# these on npmjs.com → package → Publishing → GitHub Actions trusted publisher:
-#   @oxpulse/crypto-primitives → workflow: release.yml
-#   @oxpulse/url-contract      → workflow: release.yml
-#   @oxpulse/intro-protocol    → workflow: release.yml
-# Until configured, OIDC publish E404s for these — release-npm-packages.mjs
-# SOFT_PACKAGES_OIDC set skips them gracefully. After configuration, remove
-# them from SOFT_PACKAGES_OIDC in scripts/release-npm-packages.mjs.
+# Trusted publishers configured on npm (npmjs.com → package → Publishing) —
+# ALL 7 packages, each → anatolykoptev/oxpulse-chat-sdk  workflow: release.yml
+# environment: release (as of 2026-07-21):
+#   @oxpulse/wire-codec  @oxpulse/chat-sdk  @oxpulse/chat-widget  @oxpulse/voice-core
+#   @oxpulse/crypto-primitives  @oxpulse/url-contract  @oxpulse/intro-protocol
+# All are bootstrapped + trusted-publisher-configured, so SOFT_PACKAGES_OIDC in
+# scripts/release-npm-packages.mjs is EMPTY — every OIDC publish failure is fatal.
 # Bootstrap note: a brand-new package needs ONE manual `npm publish` (token
-# mode) before the trusted-publisher UI is reachable from its settings page.
+# mode) before the trusted-publisher UI is reachable from its settings page;
+# add it to SOFT_PACKAGES_OIDC until its trusted publisher is configured.
 #
 # GitHub Releases note:
 #   changesets/action creates GitHub Releases automatically when the publish
