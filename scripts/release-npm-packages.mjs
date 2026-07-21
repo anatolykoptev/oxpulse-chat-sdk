@@ -96,22 +96,15 @@ const PACKAGES = [
 // instead of failing the run. Once a package is bootstrapped on npm and its
 // trusted publisher is configured, remove it from this set.
 //
-// Bootstrapped packages (wire-codec, chat-sdk, chat-widget) must NOT be in
-// this set — their publish failures are fatal.
+// Bootstrapped packages must NOT be in this set — their publish failures are fatal.
 //
-// NEW PACKAGES (2026-07-19): crypto-primitives, url-contract, intro-protocol
-// are awaiting manual trusted-publisher configuration on npmjs.com. Until
-// that's done, OIDC publish will E404 for them — soft-skip keeps the pipeline
-// green. Operator: configure trusted publishers on npm for each, then remove
-// from this set. See ADR-013 + release.yml header comment.
-const SOFT_PACKAGES_OIDC = new Set([
-	// voice-core removed 2026-07-21: it is published (0.3.0) and its trusted
-	// publisher is now configured on npm, so OIDC publish succeeds — a failure
-	// there is real and should be fatal, not soft-skipped.
-	'@oxpulse/crypto-primitives',
-	'@oxpulse/url-contract',
-	'@oxpulse/intro-protocol',
-]);
+// As of 2026-07-21 ALL 7 packages (wire-codec, chat-sdk, chat-widget, voice-core,
+// crypto-primitives, url-contract, intro-protocol) are published on npm with
+// trusted publishers configured, so this set is EMPTY — every OIDC publish
+// failure is now fatal. Add a name here ONLY as a temporary bootstrap grace
+// period for a brand-new package, and remove it once its trusted publisher is
+// configured. See ADR-013 + release.yml header comment.
+const SOFT_PACKAGES_OIDC = new Set([]);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
