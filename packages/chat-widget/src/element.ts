@@ -628,6 +628,12 @@ export class OxpulseChatElement extends HTMLElement {
         markRead?(roomId: string, seq: number): Promise<void>;
         /** #126: fetch thread replies. */
         getThread?(roomId: string, rootMsgId: string): Promise<import('./ui/thread-panel.js').ThreadRow[]>;
+        /** #228: list pinned messages (ordered by pinned_at desc). */
+        listPins?(roomId: string): Promise<import('@oxpulse/chat-sdk').PinnedMessage[]>;
+        /** #228: pin a message. Idempotent. */
+        pinMessage?(roomId: string, msgId: string): Promise<void>;
+        /** #228: unpin a message. No-op if not pinned. */
+        unpinMessage?(roomId: string, msgId: string): Promise<void>;
         readonly baseUrl?: string;
         readonly jwt?: string;
       }
@@ -829,12 +835,14 @@ export class OxpulseChatElement extends HTMLElement {
             onRosterSignal: args.onRosterSignal,
             onMutation: args.onMutation
               ? (sdkEv: SDKMutationEvent): void => {
-                  // Widget MutationEvent shape is compatible with SDK's (same fields used).
+                  // Bridge SDK MutationEvent → widget MutationEvent.
+                  // #229: forward pinnedBy for op="pin" (was dropped before).
                   args.onMutation!({
                     msgId: sdkEv.msgId,
                     op: sdkEv.op,
                     deletedAt: sdkEv.deletedAt,
                     editedAt: sdkEv.editedAt,
+                    pinnedBy: sdkEv.pinnedBy,
                   });
                 }
               : undefined,
@@ -867,6 +875,24 @@ export class OxpulseChatElement extends HTMLElement {
 
         removeReaction: effectiveSendClient?.removeReaction
           ? (roomId: string, msgId: string, emoji: string) => effectiveSendClient!.removeReaction!(roomId, msgId, emoji)
+          : undefined,
+
+        // #228: pinned messages — listPins via the read client (sdkClient),
+        // pin/unpin via the write client (effectiveSendClient), mirroring the
+        // reaction bridge pattern. SDK PinnedMessage → widget PinnedEntry
+        // (drops appId/roomId — the banner only needs msgId/pinnedBy/pinnedAt).
+        listPins: sdkClient.listPins
+          ? (roomId: string) => sdkClient.listPins!(roomId).then((pins) =>
+              pins.map((p) => ({ msgId: p.msgId, pinnedBy: p.pinnedBy, pinnedAt: p.pinnedAt })),
+            )
+          : undefined,
+
+        pinMessage: effectiveSendClient?.pinMessage
+          ? (roomId: string, msgId: string) => effectiveSendClient!.pinMessage!(roomId, msgId)
+          : undefined,
+
+        unpinMessage: effectiveSendClient?.unpinMessage
+          ? (roomId: string, msgId: string) => effectiveSendClient!.unpinMessage!(roomId, msgId)
           : undefined,
 
         // issue #67: GET /api/sdk/attachments/{id} is JWT-authenticated (Authorization:
@@ -1219,7 +1245,18 @@ export class OxpulseChatElement extends HTMLElement {
         return sdkClient.subscribe(roomId, {
           onMessage: (row) => { this.#messageList?.handleMessage(decodeRowAttachments(row, resolvedBaseUrl)); },
           onError,
-          onMutation: undefined,
+          // #229: forward mutation events (edit/delete/pin/unpin) to the
+          // MessageList's internal handler — was undefined before, so pin/unpin
+          // SSE events were silently dropped on the reconnect path.
+          onMutation: (sdkEv) => {
+            this.#messageList?.handleMutation({
+              msgId: sdkEv.msgId,
+              op: sdkEv.op,
+              deletedAt: sdkEv.deletedAt,
+              editedAt: sdkEv.editedAt,
+              pinnedBy: sdkEv.pinnedBy,
+            });
+          },
           onReaction: (sdkEv) => {
             this.#messageList?.handleReaction({
               msgId: sdkEv.msgId,

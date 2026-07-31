@@ -396,6 +396,138 @@ export const THEME_CSS = `
   .oxp-typing-dot { animation: none; opacity: 0.7; }
 }
 
+/* ── Pinned messages banner (#228) ────────────────────────────────────── */
+.oxp-pinned-banner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--oxp-surface);
+  border-bottom: 1px solid var(--oxp-border);
+  font-size: 13px;
+  color: var(--oxp-fg-secondary);
+  font-family: var(--oxp-font);
+  flex-shrink: 0;
+}
+.oxp-pinned-banner-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+.oxp-pinned-banner-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+.oxp-pinned-banner-preview {
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  color: var(--oxp-fg);
+  font-family: var(--oxp-font);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.oxp-pinned-banner-preview:hover {
+  text-decoration: underline;
+  color: var(--oxp-accent);
+}
+.oxp-pinned-banner-preview:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.oxp-pinned-banner-preview[data-not-loaded='true'] {
+  color: var(--oxp-muted);
+  font-style: italic;
+  cursor: default;
+}
+.oxp-pinned-banner-preview[data-not-loaded='true']:hover {
+  text-decoration: none;
+  color: var(--oxp-muted);
+}
+.oxp-pinned-banner-meta {
+  font-size: 11px;
+  color: var(--oxp-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oxp-pinned-banner-nav {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.oxp-pinned-banner[data-multi='true'] .oxp-pinned-banner-nav {
+  display: flex;
+}
+.oxp-pinned-banner-nav-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--oxp-fg-secondary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+.oxp-pinned-banner-nav-btn:hover {
+  color: var(--oxp-accent);
+  background: var(--oxp-surface-hover, rgba(0, 0, 0, 0.05));
+}
+.oxp-pinned-banner-nav-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+.oxp-pinned-banner-counter {
+  font-size: 11px;
+  color: var(--oxp-muted);
+  min-width: 28px;
+  text-align: center;
+}
+.oxp-pinned-banner-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--oxp-fg-secondary);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.oxp-pinned-banner-close:hover {
+  color: var(--oxp-fg);
+  background: var(--oxp-surface-hover, rgba(0, 0, 0, 0.05));
+}
+.oxp-pinned-banner-close:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+}
+
+/* #232: highlight animation for jump-to-message from pinned banner */
+.oxp-pinned-jump-highlight {
+  animation: oxp-pinned-jump-flash 2s ease-out;
+}
+@keyframes oxp-pinned-jump-flash {
+  0% { background-color: var(--oxp-accent); }
+  30% { background-color: var(--oxp-accent); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .oxp-pinned-jump-highlight { animation: none; }
+  .oxp-pinned-jump-highlight { background-color: var(--oxp-accent); opacity: 0.3; }
+}
+
 .oxp-message-list-error button:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
@@ -1140,6 +1272,46 @@ export const THEME_CSS = `
 }
 
 .oxp-reply-btn:focus-visible {
+  outline: 2px solid var(--oxp-accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+/* #231: pin/unpin button on each bubble — mirrors heart button styling */
+.oxp-pin-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--oxp-fg-secondary);
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.15s;
+}
+
+.oxp-pin-btn svg {
+  fill: none;
+  stroke: currentColor;
+}
+
+.oxp-pin-btn[aria-pressed='true'] {
+  color: var(--oxp-accent);
+}
+
+.oxp-pin-btn[aria-pressed='true'] svg {
+  fill: currentColor;
+}
+
+.oxp-bubble:hover .oxp-pin-btn,
+.oxp-bubble:focus-within .oxp-pin-btn {
+  opacity: 1;
+}
+
+.oxp-pin-btn:focus-visible {
   outline: 2px solid var(--oxp-accent);
   outline-offset: 2px;
   opacity: 1;
