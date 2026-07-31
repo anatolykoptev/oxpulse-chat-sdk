@@ -51,7 +51,8 @@ describe('iframe receiver — refresh-token applies fresh JWT in place (origin-g
 
   beforeEach(() => {
     parentPostMessage = vi.fn();
-    Object.defineProperty(globalThis, 'parent', {
+    // postmessage.ts uses window.parent.postMessage — mock it directly.
+    Object.defineProperty(window, 'parent', {
       value: { postMessage: parentPostMessage },
       writable: true,
       configurable: true,
@@ -96,5 +97,131 @@ describe('iframe receiver — refresh-token applies fresh JWT in place (origin-g
     dispatch({ ns: NS, type: 'refresh-token', jwt: evilJwt }, 'https://attacker.com');
     await flush();
     expect(hooks.__getLiveJwt()).toBe(newJwt); // still the trusted refresh, not evil
+  });
+
+  it('rejects a refresh-token with mismatched aud_origins even from a trusted origin', async () => {
+    const hooks = await importIframeWithParentOrigin(PARENT_ORIGIN);
+
+    const oldJwt = makeJwt({ aud_origins: [PARENT_ORIGIN], sub: 'u1' });
+    dispatch(
+      { ns: NS, type: 'init', config: { appId: 'a', jwt: oldJwt, roomId: 'r', mode: 'iframe' } },
+      PARENT_ORIGIN,
+    );
+    await flush();
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+    const errorCountBefore = parentPostMessage.mock.calls.filter(
+      ([m]) => (m as { type?: string }).type === 'error',
+    ).length;
+
+    // refresh-token from the TRUSTED origin but with DIFFERENT aud_origins
+    const reScopedJwt = makeJwt({ aud_origins: ['https://other.com'], sub: 'u2' });
+    dispatch({ ns: NS, type: 'refresh-token', jwt: reScopedJwt }, PARENT_ORIGIN);
+    await flush();
+
+    // JWT unchanged — validation rejected the re-scoped token
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+
+    // An error was relayed to the parent (count only NEW errors from this test)
+    const errorCountAfter = parentPostMessage.mock.calls.filter(
+      ([m]) => (m as { type?: string }).type === 'error',
+    ).length;
+    expect(errorCountAfter - errorCountBefore).toBeGreaterThanOrEqual(1);
+    // The last error should be ORIGIN_NOT_ALLOWED
+    const allErrors = parentPostMessage.mock.calls
+      .filter(([m]) => (m as { type?: string }).type === 'error')
+      .map(([m]) => m as { code: string; message: string });
+    const lastError = allErrors[allErrors.length - 1];
+    expect(lastError.code).toBe('ORIGIN_NOT_ALLOWED');
+  });
+
+  it('rejects an expired refresh-token even from a trusted origin', async () => {
+    const hooks = await importIframeWithParentOrigin(PARENT_ORIGIN);
+
+    const oldJwt = makeJwt({ aud_origins: [PARENT_ORIGIN], sub: 'u1' });
+    dispatch(
+      { ns: NS, type: 'init', config: { appId: 'a', jwt: oldJwt, roomId: 'r', mode: 'iframe' } },
+      PARENT_ORIGIN,
+    );
+    await flush();
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+    const errorCountBefore = parentPostMessage.mock.calls.filter(
+      ([m]) => (m as { type?: string }).type === 'error',
+    ).length;
+
+    // refresh-token from trusted origin, same aud_origins, but expired
+    const expiredJwt = makeJwt({
+      aud_origins: [PARENT_ORIGIN],
+      sub: 'u2',
+      exp: Math.floor(Date.now() / 1000) - 3600, // 1 hour ago
+    });
+    dispatch({ ns: NS, type: 'refresh-token', jwt: expiredJwt }, PARENT_ORIGIN);
+    await flush();
+
+    // JWT unchanged — validation rejected the expired token
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+
+    const errorCountAfter = parentPostMessage.mock.calls.filter(
+      ([m]) => (m as { type?: string }).type === 'error',
+    ).length;
+    expect(errorCountAfter - errorCountBefore).toBeGreaterThanOrEqual(1);
+    const allErrors = parentPostMessage.mock.calls
+      .filter(([m]) => (m as { type?: string }).type === 'error')
+      .map(([m]) => m as { code: string; message: string });
+    const lastError = allErrors[allErrors.length - 1];
+    expect(lastError.code).toBe('JWT_EXPIRED');
+  });
+
+  it('accepts a refresh-token with same aud_origins in different order', async () => {
+    const hooks = await importIframeWithParentOrigin(PARENT_ORIGIN);
+
+    const origins = [PARENT_ORIGIN, 'https://shop.example.com'];
+    const oldJwt = makeJwt({ aud_origins: origins, sub: 'u1' });
+    dispatch(
+      { ns: NS, type: 'init', config: { appId: 'a', jwt: oldJwt, roomId: 'r', mode: 'iframe' } },
+      PARENT_ORIGIN,
+    );
+    await flush();
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+
+    // Same origins, reversed order — should be accepted (order-insensitive)
+    const reversedJwt = makeJwt({
+      aud_origins: [...origins].reverse(),
+      sub: 'u2',
+    });
+    dispatch({ ns: NS, type: 'refresh-token', jwt: reversedJwt }, PARENT_ORIGIN);
+    await flush();
+
+    expect(hooks.__getLiveJwt()).toBe(reversedJwt);
+  });
+
+  it('rejects a malformed refresh-token', async () => {
+    const hooks = await importIframeWithParentOrigin(PARENT_ORIGIN);
+
+    const oldJwt = makeJwt({ aud_origins: [PARENT_ORIGIN], sub: 'u1' });
+    dispatch(
+      { ns: NS, type: 'init', config: { appId: 'a', jwt: oldJwt, roomId: 'r', mode: 'iframe' } },
+      PARENT_ORIGIN,
+    );
+    await flush();
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+    const errorCountBefore = parentPostMessage.mock.calls.filter(
+      ([m]) => (m as { type?: string }).type === 'error',
+    ).length;
+
+    // Malformed JWT (only 2 parts instead of 3)
+    dispatch({ ns: NS, type: 'refresh-token', jwt: 'not.a.jwt.but.only.2.parts' }, PARENT_ORIGIN);
+    await flush();
+
+    expect(hooks.__getLiveJwt()).toBe(oldJwt);
+
+    const errorCountAfter = parentPostMessage.mock.calls.filter(
+      ([m]) => (m as { type?: string }).type === 'error',
+    ).length;
+    expect(errorCountAfter - errorCountBefore).toBeGreaterThanOrEqual(1);
+    const allErrors = parentPostMessage.mock.calls
+      .filter(([m]) => (m as { type?: string }).type === 'error')
+      .map(([m]) => m as { code: string; message: string });
+    const lastError = allErrors[allErrors.length - 1];
+    expect(lastError.code).toBe('JWT_MALFORMED');
   });
 });
