@@ -137,7 +137,18 @@ export type LocaleKey =
   | 'threadReplyPlaceholder'
   | 'threadLoading'
   | 'threadEmpty'
-  | 'threadError';
+  | 'threadError'
+  // Pinned messages banner (#228)
+  | 'pinnedBannerTitle'
+  | 'pinnedBannerPinnedBy'
+  | 'pinnedBannerLoading'
+  | 'pinnedBannerNotLoaded'
+  | 'pinnedBannerCloseAria'
+  | 'pinnedBannerPrevAria'
+  | 'pinnedBannerNextAria'
+  | 'pinnedBannerJumpAria'
+  | 'pinMessageAria'
+  | 'unpinMessageAria';
 
 type LocaleTable = Record<LocaleKey, string>;
 
@@ -253,6 +264,17 @@ const en: LocaleTable = {
   threadLoading: 'Loading thread…',
   threadEmpty: 'No replies yet',
   threadError: 'Failed to load thread',
+
+  pinnedBannerTitle: 'Pinned message',
+  pinnedBannerPinnedBy: 'Pinned by {name}',
+  pinnedBannerLoading: 'Loading pinned messages…',
+  pinnedBannerNotLoaded: 'Pinned message not loaded',
+  pinnedBannerCloseAria: 'Close pinned banner',
+  pinnedBannerPrevAria: 'Previous pinned message',
+  pinnedBannerNextAria: 'Next pinned message',
+  pinnedBannerJumpAria: 'Jump to message',
+  pinMessageAria: 'Pin message',
+  unpinMessageAria: 'Unpin message',
 };
 
 /** Russian translations. oxpulse's userbase is heavily RU — this is the first
@@ -366,6 +388,17 @@ const ru: LocaleTable = {
   threadLoading: 'Загрузка треда…',
   threadEmpty: 'Пока нет ответов',
   threadError: 'Не удалось загрузить тред',
+
+  pinnedBannerTitle: 'Закреплённое сообщение',
+  pinnedBannerPinnedBy: 'Закрепил(а) {name}',
+  pinnedBannerLoading: 'Загрузка закреплённых сообщений…',
+  pinnedBannerNotLoaded: 'Закреплённое сообщение не загружено',
+  pinnedBannerCloseAria: 'Закрыть баннер закреплённых',
+  pinnedBannerPrevAria: 'Предыдущее закреплённое',
+  pinnedBannerNextAria: 'Следующее закреплённое',
+  pinnedBannerJumpAria: 'Перейти к сообщению',
+  pinMessageAria: 'Закрепить сообщение',
+  unpinMessageAria: 'Открепить сообщение',
 };
 
 const LOCALES: Record<Locale, LocaleTable> = { en, ru };

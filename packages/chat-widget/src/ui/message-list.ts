@@ -23,6 +23,7 @@ import { createAvatarElement } from './avatar.js';
 import { createRoleBadgeElement, type PrivilegedRole } from './role-badge.js';
 import { createVoiceBubble, type VoiceBubble } from './voice-bubble.js';
 import { TypingIndicator } from './typing-indicator.js';
+import { PinnedBanner, type PinnedEntry } from './pinned-banner.js';
 import { PresenceOverlay } from './presence-overlay.js';
 import { ReadReceipts } from './read-receipts.js';
 import { ThreadPanel, type ThreadRow } from './thread-panel.js';
@@ -63,6 +64,8 @@ export interface MutationEvent {
   op: string;
   deletedAt?: string;
   editedAt?: string;
+  /** Present on op="pin" — the user who pinned the message. */
+  pinnedBy?: string;
 }
 
 /** Live reaction event from subscribe() onReaction callback. */
@@ -130,6 +133,12 @@ export interface MessageListClient {
   getThread?(roomId: string, rootMsgId: string): Promise<ThreadRow[]>;
   /** #126: send a text message (used for thread replies). */
   sendText?(roomId: string, args: { senderUid: string; text: string; threadRootMsgId?: string }): Promise<void>;
+  /** #228: list pinned messages in a room (ordered by pinned_at desc). */
+  listPins?(roomId: string): Promise<PinnedEntry[]>;
+  /** #228: pin a message. Idempotent. */
+  pinMessage?(roomId: string, msgId: string): Promise<void>;
+  /** #228: unpin a message. No-op if not pinned. */
+  unpinMessage?(roomId: string, msgId: string): Promise<void>;
   /**
    * issue #67: fetch an attachment blob WITH authentication. The attachment
    * GET route is JWT-authenticated (Authorization: Bearer only — no signed
@@ -176,6 +185,9 @@ export interface MessageListOptions {
 
   /** Whether reaction UI is enabled. Default: true. */
   reactionsEnabled?: boolean;
+
+  /** Whether pinned-messages banner is enabled. Default: true. */
+  pinnedMessagesEnabled?: boolean;
 
   /**
    * Write-401 fix (issue #78): fires when a reaction write op
@@ -788,6 +800,12 @@ export class MessageList {
   #listEl: HTMLElement | null = null;
   /** #120: typing indicator instance — mounted below #listEl. */
   #typingIndicator: TypingIndicator | null = null;
+  /** #228: pinned-messages banner — mounted above #listEl. */
+  #pinnedBanner: PinnedBanner | null = null;
+  /** #228: whether pinned-messages UI is enabled. */
+  #pinnedMessagesEnabled = true;
+  /** #232: highlight timers for scrollToMsgId — cleared in destroy(). */
+  #highlightTimers: Set<ReturnType<typeof setTimeout>> = new Set();
   /** #121: presence overlay — tracks online users + renders avatar dots. */
   #presenceOverlay: PresenceOverlay | null = null;
   /** #122: read receipts — checkmarks on own messages. */
@@ -895,6 +913,7 @@ export class MessageList {
     this.#onAttachmentError = opts.onAttachmentError;
     this.#onDecryptError = opts.onDecryptError;
     this.#reactionsEnabled = opts.reactionsEnabled ?? true;
+    this.#pinnedMessagesEnabled = opts.pinnedMessagesEnabled ?? true;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
     // Combine with caller-supplied signal if provided.
     const internal = new AbortController();
@@ -916,6 +935,19 @@ export class MessageList {
     this.#listEl.setAttribute('aria-live', 'polite');
     this.#listEl.className = 'oxp-message-list';
     this.#container.appendChild(this.#listEl);
+    // #228: mount pinned-messages banner ABOVE #listEl (insertBefore keeps it
+    // at the top of the container, above the scrollable message list).
+    if (this.#pinnedMessagesEnabled) {
+      this.#pinnedBanner = new PinnedBanner({
+        container: this.#container,
+        insertBefore: this.#listEl,
+        lang: this.#lang,
+        signal: this.#signal,
+        resolvePreview: (msgId) => this.#resolveRowPreview(msgId),
+        resolveName: (uid) => this.#roster.get(uid)?.displayName,
+        onJumpToMessage: (msgId) => this.scrollToMsgId(msgId),
+      });
+    }
     // #120: mount typing indicator below the message list.
     this.#typingIndicator = new TypingIndicator({
       container: this.#container,
@@ -982,6 +1014,26 @@ export class MessageList {
 
     // DM2: shared fetch-render-subscribe logic (also used by #retryMount).
     await this.#fetchAndRender();
+
+    // #230: load initial pinned messages from listPins() AFTER rows are
+    // fetched — the banner's resolvePreview reads from #rows, so pins must
+    // be hydrated after the row store is populated.
+    if (this.#pinnedMessagesEnabled && this.#client.listPins) {
+      this.#pinnedBanner?.setLoading(true);
+      void this.#client.listPins(this.#roomId).then((pins) => {
+        if (this.#signal.aborted) return;
+        this.#pinnedBanner?.setPins(pins);
+        // Refresh pin button states on all rendered bubbles — they were
+        // rendered before listPins resolved, so their aria-pressed is stale.
+        for (const pin of pins) {
+          this.#updateBubblePinState(pin.msgId);
+        }
+      }).catch(() => {
+        // M4: clear loading state on error — banner hides gracefully.
+        if (this.#signal.aborted) return;
+        this.#pinnedBanner?.setLoading(false);
+      });
+    }
   }
 
   /**
@@ -1008,6 +1060,59 @@ export class MessageList {
    */
   handleReaction(event: ReactionEvent): void {
     this.#handleReaction(event);
+  }
+
+  /**
+   * #229: Route a live mutation event (edit/delete/pin/unpin) to the list's
+   * internal handler. Used by the element's reconnect SubscribeFn to keep
+   * mutations live across SSE reconnects — mirrors handleMessage/handleReaction.
+   */
+  handleMutation(event: MutationEvent): void {
+    this.#handleMutation(event);
+  }
+
+  /**
+   * #232: Scroll to a specific message by msgId and briefly highlight it.
+   * Used by the PinnedBanner's "jump to message" action. If the message is
+   * outside the loaded window, this is a no-op (the banner already shows
+   * "Message not loaded" for off-window pins).
+   */
+  scrollToMsgId(msgId: string): void {
+    if (!this.#listEl) return;
+    const idx = this.#order.indexOf(msgId);
+    if (idx === -1) return;
+    const bubbles = this.#listEl.querySelectorAll('[role="article"]');
+    const el = bubbles[idx] as HTMLElement | undefined;
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('oxp-pinned-jump-highlight');
+    // Track the timer so destroy() can clear it — prevents the callback
+    // firing on a torn-down #listEl if the widget is destroyed mid-highlight.
+    const timer = setTimeout(() => {
+      this.#highlightTimers.delete(timer);
+      el.classList.remove('oxp-pinned-jump-highlight');
+    }, 2000);
+    this.#highlightTimers.add(timer);
+  }
+
+  /**
+   * #233: Resolve a msgId → preview text from the decrypted row store.
+   * Returns undefined when the message is outside the loaded window
+   * (the banner shows a "Message not loaded" placeholder for those).
+   */
+  #resolveRowPreview(msgId: string): string | undefined {
+    const row = this.#rows.get(msgId);
+    if (!row || row.deletedAt) return undefined;
+    if (row.text) return formatBodyPreview(row.text, 200);
+    if (row.plaintext) {
+      try {
+        const decoded = new TextDecoder().decode(row.plaintext);
+        return formatBodyPreview(decoded, 200);
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
   }
 
   /** Tear down: abort in-flight mount(), unsubscribe, clear DOM, close picker,
@@ -1052,6 +1157,12 @@ export class MessageList {
     // #120: destroy typing indicator (clears all timers + removes DOM).
     this.#typingIndicator?.destroy();
     this.#typingIndicator = null;
+    // #228: destroy pinned-messages banner.
+    this.#pinnedBanner?.destroy();
+    this.#pinnedBanner = null;
+    // #232: clear any pending jump-highlight timers.
+    for (const timer of this.#highlightTimers) clearTimeout(timer);
+    this.#highlightTimers.clear();
     // #121: destroy presence overlay (clears heartbeat + dots).
     this.#presenceOverlay?.destroy();
     this.#presenceOverlay = null;
@@ -1433,6 +1544,20 @@ export class MessageList {
   }
 
   #handleMutation(event: MutationEvent): void {
+    // #229: handle pin/unpin ops — update the pinned banner live.
+    // These are metadata-only ops (no sealed content re-transmitted),
+    // so they don't need the row to exist in #rows.
+    if (event.op === 'pin') {
+      this.#pinnedBanner?.addPin(event.msgId, event.pinnedBy ?? '', new Date().toISOString());
+      this.#updateBubblePinState(event.msgId);
+      return;
+    }
+    if (event.op === 'unpin') {
+      this.#pinnedBanner?.removePin(event.msgId);
+      this.#updateBubblePinState(event.msgId);
+      return;
+    }
+
     const existing = this.#rows.get(event.msgId);
     if (!existing) return;
 
@@ -1452,6 +1577,26 @@ export class MessageList {
     const el = bubbles[idx] as HTMLElement | undefined;
     if (!el) return;
     this.#updateBubble(el, updated, idx);
+  }
+
+  /**
+   * #229/#231: Update the pin button's aria-pressed state on a bubble after
+   * a pin/unpin mutation, without a full bubble re-render. The pin button's
+   * visual state is CSS-driven off aria-pressed (like the heart button).
+   */
+  #updateBubblePinState(msgId: string): void {
+    if (!this.#listEl) return;
+    const idx = this.#order.indexOf(msgId);
+    if (idx === -1) return;
+    const bubbles = this.#listEl.querySelectorAll('[role="article"]');
+    const el = bubbles[idx] as HTMLElement | undefined;
+    if (!el) return;
+    const pinBtn = el.querySelector('.oxp-pin-btn') as HTMLElement | null;
+    if (pinBtn) {
+      const isPinned = this.#pinnedBanner?.isPinned(msgId) ?? false;
+      pinBtn.setAttribute('aria-pressed', String(isPinned));
+      pinBtn.setAttribute('aria-label', t(isPinned ? 'unpinMessageAria' : 'pinMessageAria', this.#lang));
+    }
   }
 
   /** Handle live reaction event from subscribe onReaction callback. */
@@ -1680,6 +1825,56 @@ export class MessageList {
    * clean no-op instead. #optimisticReplaceReaction assumes this lock is
    * already held — it does not reserve its own.
    */
+  /**
+   * #231: Toggle pin state for a message — optimistic update + rollback on
+   * error, mirroring #selectReaction's pattern. The SSE mutation event
+   * (op="pin"/"unpin") is the authoritative confirmation; this method
+   * updates the banner + button immediately so the user sees instant
+   * feedback, then the server response either confirms or triggers a
+   * rollback.
+   */
+  async #togglePin(msgId: string): Promise<void> {
+    if (!this.#client.pinMessage || !this.#client.unpinMessage) return;
+    // In-flight guard: prevent rapid double-click from launching two
+    // concurrent optimistic toggles that diverge from server truth.
+    // Uses a `pin:` prefix to avoid collision with reaction inflight keys.
+    const inflightKey = `pin:${msgId}`;
+    if (this.#inflight.has(inflightKey)) return;
+    this.#inflight.add(inflightKey);
+    try {
+      const wasPinned = this.#pinnedBanner?.isPinned(msgId) ?? false;
+      // Optimistic update.
+      if (wasPinned) {
+        this.#pinnedBanner?.removePin(msgId);
+      } else {
+        this.#pinnedBanner?.addPin(msgId, this.#selfUid, new Date().toISOString());
+      }
+      this.#updateBubblePinState(msgId);
+      try {
+        if (wasPinned) {
+          await this.#client.unpinMessage(this.#roomId, msgId);
+        } else {
+          await this.#client.pinMessage(this.#roomId, msgId);
+        }
+      } catch (err) {
+        // Rollback the optimistic update.
+        if (wasPinned) {
+          this.#pinnedBanner?.addPin(msgId, this.#selfUid, new Date().toISOString());
+        } else {
+          this.#pinnedBanner?.removePin(msgId);
+        }
+        this.#updateBubblePinState(msgId);
+        // L1: shared error reporting via #reportWriteFailure.
+        const reason = this.#reportWriteFailure('send', err);
+        if (reason === 'auth_expired') {
+          this.#onAuthExpired?.();
+        }
+      }
+    } finally {
+      this.#inflight.delete(inflightKey);
+    }
+  }
+
   async #selectReaction(msgId: string, emoji: string): Promise<void> {
     if (this.#inflight.has(msgId)) return;
     this.#inflight.add(msgId);
@@ -1756,8 +1951,7 @@ export class MessageList {
    * behaviour, unchanged).
    */
   #handleWriteFailure(op: WriteFailureOp, err: unknown, msgId: string, preSnapshot: ReactionState): void {
-    const reason = classifyWriteFailureReason(err);
-    this.#onWriteFailure?.(op, reason, err instanceof Error ? err.message : String(err));
+    const reason = this.#reportWriteFailure(op, err);
     if (reason === 'auth_expired') {
       this.#onAuthExpired?.();
       this.#scheduleDelayedRollback(msgId);
@@ -1765,6 +1959,18 @@ export class MessageList {
       this.#reactions.set(msgId, preSnapshot);
       this.#updateReactionCluster(msgId);
     }
+  }
+
+  /**
+   * L1: Shared error classification + telemetry hook for write-op failures.
+   * Used by #handleWriteFailure (reactions) and #togglePin (pin/unpin) so
+   * both paths report consistently via #onWriteFailure and return the
+   * classified reason for caller-specific handling.
+   */
+  #reportWriteFailure(op: WriteFailureOp, err: unknown): WriteFailureReason {
+    const reason = classifyWriteFailureReason(err);
+    this.#onWriteFailure?.(op, reason, err instanceof Error ? err.message : String(err));
+    return reason;
   }
 
   /**
@@ -2249,6 +2455,25 @@ export class MessageList {
         this.#onSetReply?.(this.#buildReplySnapshot(row));
       });
       footerEl.appendChild(replyBtn);
+    }
+
+    // #231: pin/unpin button — only when the client has a pin capability
+    // (feature-detected like sendReaction for the heart button) and the
+    // pinned-messages UI is enabled. A plain click toggles pin state
+    // optimistically; the SSE mutation confirms or rolls back.
+    if (this.#pinnedMessagesEnabled && this.#client.pinMessage && this.#client.unpinMessage) {
+      const pinBtn = document.createElement('button');
+      const isPinned = this.#pinnedBanner?.isPinned(row.msgId) ?? false;
+      pinBtn.className = 'oxp-pin-btn';
+      pinBtn.type = 'button';
+      pinBtn.setAttribute('aria-pressed', String(isPinned));
+      pinBtn.setAttribute('aria-label', t(isPinned ? 'unpinMessageAria' : 'pinMessageAria', this.#lang));
+      pinBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg>';
+      pinBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this.#togglePin(row.msgId);
+      });
+      footerEl.appendChild(pinBtn);
     }
 
     // Timestamp
