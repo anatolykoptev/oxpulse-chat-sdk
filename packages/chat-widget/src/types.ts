@@ -44,9 +44,13 @@ export interface WidgetConfig {
   allowLegacyToken?: boolean;
   /**
    * UID of the currently authenticated user.
-   * Used to determine which reaction chips are "own" (data-own=true).
-   * TODO(slice 5): derive automatically from JWT sub claim once SDK is wired.
-   * Passed via attribute self-uid or programmatic mount options.
+   * Used to determine which reaction chips are "own" (data-own=true) and
+   * to align own messages right (self/other bubble alignment).
+   *
+   * Resolution precedence: explicit `selfUid` / `self-uid` attribute >
+   * JWT `sub` claim (auto-derived via `selfUidFromJwt`) > anon-read mint
+   * `userId` (anon mode only). In most cases this can be left unset —
+   * the widget derives it from the JWT automatically.
    */
   selfUid?: string;
   // Reserved for v3.0 voice/video:
