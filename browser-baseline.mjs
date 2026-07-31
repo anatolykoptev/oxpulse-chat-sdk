@@ -89,7 +89,15 @@ export const ES_EDITION_MIN_ENGINE = {
  * rejected outright (fail closed — a flag nobody has heard of yet cannot ship).
  */
 export const REGEX_FLAG_MIN_ENGINE = {
-  d: [15, 0], // hasIndices
+  // hasIndices. Legal at this baseline, but reachable through the CONSTRUCTOR
+  // forms only: `d` is an ES2022 flag, so a `/x/d` LITERAL exceeds ES_CEILING
+  // (2020) and acorn rejects it before the flag check ever runs — it surfaces
+  // as a ceiling failure, not as a flag verdict. Not a hole: both outcomes are
+  // safe here, and esbuild lowers such a literal to `new RegExp("x","d")`,
+  // which this row then correctly accepts. Written down because a row that
+  // says "allowed" while the literal form cannot reach it is exactly the kind
+  // of thing that sends the next reader hunting the wrong knob.
+  d: [15, 0],
   g: [1, 0],
   i: [1, 0],
   m: [1, 0],
