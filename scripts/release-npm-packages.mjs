@@ -247,17 +247,27 @@ async function publishPackageOidc(pkg, localVersion) {
 			fail(1, `npm publish (OIDC) failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 		}
 
-		// Emit the "New tag:" line that changesets/action's runPublish() parses
-		// (regex: /New tag:\s+(@[^/]+\/[^@]+|[^/]+)@([^\s]+)/, run.ts:101).
-		// Without this line, changesets/action sets outputs.published='false' and
-		// the CDN publish steps (gated on published=='true') are permanently skipped.
-		// This also enables automatic GitHub Release creation by the action.
-		console.log(`New tag: ${pkg.name}@${localVersion}`);
 	} finally {
 		try { rmSync(scratch, { recursive: true, force: true }); } catch {}
 	}
 
-	tagAndPush(pkg.name, localVersion);
+	// Tag FIRST, then announce it. changesets/action's runPublish() parses
+	// "New tag: <pkg>@<ver>" out of this stdout (regex:
+	// /New tag:\s+(@[^/]+\/[^@]+|[^/]+)@([^\s]+)/, run.ts:101) to set
+	// outputs.published — which the CDN steps gate on — and to create a GitHub
+	// Release, pushing each parsed tag on the way.
+	//
+	// So the line is a claim the action acts on, and it must not be made before
+	// it is true. Printing it first is exactly how this pipeline ended up
+	// announcing tags it never created: the action then pushed refs that did not
+	// exist and failed AFTER npm publish had succeeded.
+	//
+	// If tagging fails we skip the line. That costs the CDN steps for this run —
+	// they are gated on published — but it keeps the run green and leaves a
+	// recoverable state, rather than failing the job on a ref we know is absent.
+	// The WARNING logged by tagAndPush names the version and the manual repair.
+	const tagged = tagAndPush(pkg.name, localVersion);
+	if (tagged) console.log(`New tag: ${pkg.name}@${localVersion}`);
 }
 
 async function publishPackageToken(pkg, localVersion) {
@@ -298,17 +308,45 @@ async function publishPackageToken(pkg, localVersion) {
 	tagAndPush(pkg.name, localVersion);
 }
 
+// Give a CI checkout a git identity so `git tag -a` works. Only sets what is
+// missing, so a local release keeps the operator's own identity.
+function ensureGitIdentity() {
+	const defaults = [
+		['user.name', 'krolik-release-bot'],
+		['user.email', 'krolik-release-bot@users.noreply.github.com'],
+	];
+	for (const [key, value] of defaults) {
+		const probe = spawnSync('git', ['config', '--get', key], {
+			cwd: REPO_ROOT,
+			encoding: 'utf8',
+		});
+		if (probe.status !== 0 || !String(probe.stdout || '').trim()) {
+			execFileSync('git', ['config', key, value], { cwd: REPO_ROOT, stdio: 'inherit' });
+		}
+	}
+}
+
 function tagAndPush(pkgName, localVersion) {
 	const tag = `${pkgName}@${localVersion}`;
-	// In OIDC/CI mode we deliberately do NOT git-tag. The release workflow now
-	// holds contents:write (changesets/action needs it to push the Version
-	// Packages bump commit), but tagging is still skipped here: CI runners have
-	// no git identity, and the release is identified by the npm version + the
-	// workflow run SHA. Tagging stays enabled for local token-mode releases.
-	if (OIDC_MODE) {
-		log(`OIDC mode: skipping git tag ${tag} (release id = npm version + run SHA)`);
-		return;
-	}
+	// Tag in BOTH modes.
+	//
+	// A published version that no tag points at is unreachable: `git log
+	// <old>..<new>` cannot run, no GitHub Release exists, and there is no way
+	// back from a registry version to a commit. Skipping this in CI is how 65 of
+	// this repo's 66 published versions ended up untraceable — every automated
+	// release published correctly and recorded nothing, and the one tag that did
+	// exist was left by the last manual release.
+	//
+	// The previous justification was that "CI runners have no git identity".
+	// That is two `git config` lines (ensureGitIdentity above); the job already
+	// holds contents: write.
+	//
+	// Loop-safety: pushing a tag cannot re-trigger the release workflow, which is
+	// filtered on `branches: [main]` — a branch filter never matches a tag ref.
+	// changesets/action also pushes each tag it parses out of the "New tag:"
+	// lines; pushing an identical existing tag is a no-op, so both paths are safe
+	// together and neither depends on the other having run.
+	if (OIDC_MODE) ensureGitIdentity();
 	try {
 		execFileSync('git', ['tag', '-a', tag, '-m', `release ${tag}`], {
 			cwd: REPO_ROOT,
@@ -319,10 +357,19 @@ function tagAndPush(pkgName, localVersion) {
 			stdio: 'inherit',
 		});
 		log(`tagged + pushed ${tag}`);
+		return true;
 	} catch (err) {
-		// Tag already exists if script ran twice for same version before npm view
-		// caught up. Publish already succeeded — that's the load-bearing op.
-		log(`tag/push warning (non-fatal): ${err.message ?? err}`);
+		// Deliberately non-fatal: npm publish has already succeeded by this point,
+		// and failing here would abort the job and skip the CDN steps that are
+		// gated on it — trading a missing tag for a missing bundle.
+		//
+		// But say plainly what was lost, because the quiet version of this message
+		// is what let the gap grow to 65 versions. A re-run is not enough: the
+		// version is already on the registry, so the tag must be placed by hand at
+		// the release commit — `git tag -a <tag> <sha> -m "release <tag>" && git
+		// push origin <tag>`.
+		log(`WARNING: ${tag} PUBLISHED BUT NOT TAGGED — this version is now untraceable until tagged by hand: ${err.message ?? err}`);
+		return false;
 	}
 }
 

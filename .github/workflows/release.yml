@@ -37,13 +37,20 @@
 # mode) before the trusted-publisher UI is reachable from its settings page;
 # add it to SOFT_PACKAGES_OIDC until its trusted publisher is configured.
 #
-# GitHub Releases note:
-#   changesets/action creates GitHub Releases automatically when the publish
-#   command emits "New tag: <name>@<version>" lines. The custom OIDC publisher
-#   (release-npm-packages.mjs) does NOT emit those lines (and intentionally
-#   skips git-tagging in OIDC mode — see tagAndPush() comment in that file).
-#   Therefore GitHub Releases are NOT auto-created by this pipeline. npm
-#   publishes still work correctly. GitHub Releases are a future follow-up.
+# Tags and GitHub Releases:
+#   changesets/action parses "New tag: <name>@<version>" lines out of the publish
+#   command's stdout. It uses them for two things: setting outputs.published (which
+#   the CDN steps below gate on) and creating a GitHub Release per tag.
+#
+#   Until 2026-07-31 the publisher printed those lines WITHOUT creating the tags,
+#   and createGithubReleases was set to false to stop the action from acting on a
+#   claim that was not true. That combination published correctly and recorded
+#   nothing: 65 of this repo's 66 published versions have no tag, so `git log
+#   <old>..<new>` cannot run for any of them and no version maps back to a commit.
+#
+#   tagAndPush() now creates and pushes the tag in OIDC mode too, so the "New tag:"
+#   lines are honest and createGithubReleases is back at true. Both the publisher
+#   and the action push each tag; pushing an identical existing tag is a no-op.
 
 name: Release (npm OIDC + Changesets)
 
@@ -62,11 +69,10 @@ on:
     #      bump commit to the SIDE BRANCH `changeset-release/main` and opens a
     #      PR from it (PR #226's headRefName is exactly that). A push to a side
     #      branch cannot match `branches: [main]` no matter who authored it.
-    #   2. The publish phase pushes nothing at all. The custom OIDC publisher
-    #      early-returns out of tagAndPush() in OIDC mode (see
-    #      scripts/release-npm-packages.mjs), and changesets/action is
-    #      configured with createGithubReleases: false, so no tag is pushed
-    #      either.
+    #   2. The publish phase pushes TAGS and nothing else — never a branch. A tag
+    #      push cannot match `branches: [main]`, because a branch filter never
+    #      matches a tag ref. (Before 2026-07-31 this phase pushed nothing at all;
+    #      the invariant that matters is unchanged — no step here writes to `main`.)
     #
     # So the only push to `main` in the whole cycle is a human merging the
     # Version Packages PR — one trigger per release, by construction. The
@@ -282,17 +288,17 @@ jobs:
           # child `tsc`, breaking the build with TS5112). The `release:ci` script
           # body IS executed by sh, so the "&&" inside it works correctly.
           publish: pnpm release:ci
-          # createGithubReleases: false — the OIDC publisher (release-npm-packages.mjs)
-          # deliberately does NOT create git tags in CI (tagAndPush() early-returns in
-          # OIDC_MODE). But it still logs "New tag: <pkg>@<ver>" so changesets/action
-          # sets outputs.published=true (which the CDN publish steps below gate on).
-          # With createGithubReleases at its default (true), the action parses those
-          # "New tag:" lines and tries to `git push origin <tag>` for each — tags that
-          # were never created — failing the job with "src refspec … does not match any"
-          # AFTER npm publish already succeeded, which then SKIPS the widget-CDN steps.
-          # Setting false keeps published=true (CDN steps run) without the tag push.
-          # GitHub Releases are not created by this pipeline anyway (see the header note).
-          createGithubReleases: false
+          # The publisher creates and pushes each tag before this action reads its
+          # stdout, so the "New tag:" lines it parses now refer to tags that exist.
+          # That makes the action's own `git push origin <tag>` a no-op rather than a
+          # "src refspec ... does not match any" failure — which is what forced this
+          # to false previously, and it failed AFTER npm publish had succeeded, so it
+          # skipped the widget-CDN steps below.
+          #
+          # If you ever make the publisher stop tagging, set this back to false in the
+          # SAME change. Emitting "New tag:" lines for tags that do not exist, with the
+          # action left to act on them, is the broken combination.
+          createGithubReleases: true
         env:
           # krolik-release-bot App installation token, NOT secrets.GITHUB_TOKEN.
           # This is what makes the Version Packages PR receive CI runs — see the
