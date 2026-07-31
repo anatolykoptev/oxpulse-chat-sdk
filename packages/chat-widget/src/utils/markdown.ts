@@ -27,7 +27,15 @@ const STRIKE_RE = /~~(.+?)~~/g;
 // non-/u regex would still mis-italicize Cyrillic (or any non-Latin) snake_case
 // identifiers — this SDK's primary userbase is Russian-speaking. \p{L}\p{N}_
 // with the /u flag treats any Unicode letter/number as a word char.
-const ITALIC_RE = /(?<![\p{L}\p{N}_])_(.+?)_(?![\p{L}\p{N}_])/gu;
+//
+// The leading guard is a CAPTURED group, not a lookbehind. A lookbehind is a
+// parse-time SyntaxError on WebKit before Safari 16.4 — and every browser on
+// iOS is WebKit — so the literal alone aborted evaluation of this module, and
+// with it the whole widget bundle, before a single line ran. That is a silent
+// total failure for those visitors, not a degraded markdown renderer. The
+// captured prefix is re-emitted as $1 by the replacement below; keep the two
+// in sync if either changes.
+const ITALIC_RE = /(^|[^\p{L}\p{N}_])_(.+?)_(?![\p{L}\p{N}_])/gu;
 const LINK_RE = /\[([^\]]+)]\(([^)]+)\)/g;
 const AUTOLINK_RE = /(https?:\/\/[^\s<"')\]]+)/g;
 
@@ -94,7 +102,7 @@ export function renderMarkdown(text: string): string {
   out = out.replace(BOLD_RE, '<strong>$1</strong>');
   out = out.replace(UNDERLINE_RE, '<u>$1</u>');
   out = out.replace(STRIKE_RE, '<del>$1</del>');
-  out = out.replace(ITALIC_RE, '<em>$1</em>');
+  out = out.replace(ITALIC_RE, '$1<em>$2</em>');
 
   // Links: [text](url) — allowlist schemes; drop link (keep text) if scheme not allowed
   out = out.replace(LINK_RE, (_, linkText: string, rawUrl: string) => {
