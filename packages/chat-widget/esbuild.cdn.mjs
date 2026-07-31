@@ -23,6 +23,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { esbuildTarget, describeEngine } from '../../browser-baseline.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
@@ -95,7 +96,12 @@ await build({
   format: 'esm',
   minify: true,
   sourcemap: true,
-  target: ['es2020'],
+  // Derived from browser-baseline.mjs — the ONE declaration of the oldest engine
+  // we support. Do NOT replace this with a literal: the gate in
+  // src/__tests__/browser-regex-compat.test.ts parses this bundle at the same
+  // ceiling, and two separately-typed numbers are how the artifact silently
+  // outruns the engines we claim to support.
+  target: [esbuildTarget()],
   platform: 'browser',
   outdir,
   loader: { '.wasm': 'file' },
@@ -128,7 +134,7 @@ const compressed = await gzipAsync(indexJsBuf, { level: 9 });
 const gzKb = (compressed.length / 1024).toFixed(1);
 
 console.log(
-  `[build:cdn] index.js: ${(indexJsBuf.length / 1024).toFixed(1)} KB raw, ${gzKb} KB gzip (budget: ${MAX_GZIP_BYTES / 1024} KB)`
+  `[build:cdn] index.js: ${(indexJsBuf.length / 1024).toFixed(1)} KB raw, ${gzKb} KB gzip (budget: ${MAX_GZIP_BYTES / 1024} KB), target ${esbuildTarget()} (baseline ${describeEngine()})`
 );
 
 if (compressed.length > MAX_GZIP_BYTES) {

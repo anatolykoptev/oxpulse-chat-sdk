@@ -101,21 +101,46 @@ jobs:
   release:
     runs-on: ubuntu-latest
 
+    # Without this the default is 360 minutes. Combined with the concurrency
+    # group above (cancel-in-progress: false, deliberately — a cancelled publish
+    # can leave some packages on npm and others not), ONE hung run would hold
+    # the group and block every release for six hours. 30 minutes is several
+    # times the observed run time and still fails the same day.
+    #
+    # Related, and the reason the concurrency group is not free: GitHub cancels a
+    # PENDING run when a newer one joins the group, keeping only the latest. Two
+    # release runs already landed 59 s apart on this repo, so three quick pushes
+    # to main can silently drop the middle one. That is tolerable for the version
+    # phase (changesets recomputes from the tree, so the newest run supersedes)
+    # but it means a queued run is not a guaranteed run — check the Actions tab
+    # after a burst instead of assuming every push produced a run.
+    timeout-minutes: 30
+
     # Permissions widening vs. the previous publish-only workflow:
     #   contents: write   — changesets/action must push the version bump commit
     #                       when creating/updating the "Version Packages" PR.
     #                       The old workflow had contents: read (no PR needed).
     #   pull-requests: write — changesets/action opens and labels the PR.
     #   id-token: write   — same as before: npm OIDC token exchange.
-    # Blast-radius note: these permissions are scoped to this single job.
-    # The environment: release gate (required reviewer) provides the human
-    # checkpoint before any publish step runs.
+    # Blast-radius note: these permissions are scoped to this single job, and
+    # that is the ONLY containment they have. An earlier version of this comment
+    # claimed "the environment: release gate (required reviewer) provides the
+    # human checkpoint before any publish step runs". Measured 2026-07-31:
+    #   gh api /repos/anatolykoptev/oxpulse-chat-sdk/environments
+    #     -> {"name":"release","protection_rules":[]}
+    # There is no reviewer and no wait timer; the job runs immediately. Claiming
+    # a control that is not wired is worse than claiming none, because the next
+    # person weighs a permission grant against protection that does not exist.
+    # Whether to add a required reviewer is the operator's call and is
+    # deliberately NOT made in this workflow.
     permissions:
       contents: write
       pull-requests: write
       id-token: write
 
-    # Gates this job behind the "release" environment.
+    # Declares the job's deployment environment. NOTE this currently gates
+    # NOTHING — "release" exists with protection_rules: [] (measured above), so
+    # it is a label plus an npm trusted-publisher binding, not a checkpoint.
     # Set a required reviewer in repo Settings → Environments → release.
     # If no protection rules are configured, GitHub auto-creates the environment
     # and the job runs immediately — harmless and forward-compatible.
