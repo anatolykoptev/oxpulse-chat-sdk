@@ -152,6 +152,21 @@ for (const msg of result.items) {
 
 ## Room management
 
+> **These calls need an app-wide scope and belong on your backend, not in the browser.**
+>
+> Room operations authorize against `rooms:read:*` / `rooms:write:*` — a literal `*` in
+> the resource position. The scope matcher is asymmetric (`granted == "*" || granted ==
+> required`), so a per-room grant such as `rooms:write:room-1` does **not** satisfy them.
+> The practical consequence: the only token that can create a room can create and mutate
+> **every** room in the app.
+>
+> Mint that token server-side and make these calls from your backend. Do not include
+> `rooms:write:*` in a token you hand to a browser — the auth model at the top of this
+> page assumes the browser holds a narrowly-scoped token, and this scope is the opposite
+> of that.
+>
+> The snippets below use `client.*` for brevity; run them against a server-side client.
+
 ```ts
 // Create a room
 const room = await client.createRoom({

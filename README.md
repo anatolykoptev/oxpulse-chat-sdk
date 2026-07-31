@@ -1,13 +1,16 @@
 # OxPulse Chat SDK
 
-Embeddable group chat for web applications. This monorepo contains multiple packages:
+Embeddable group chat for web applications. This monorepo contains multiple packages.
 
-- **`@oxpulse/wire-codec`** v0.4.0 — CBOR+zstd binary message codec for the OxPulse chat wire protocol
-- **`@oxpulse/chat-sdk`** v2.0.0 — core chat client: rooms, messages, SSE subscribe, E2EE, reactions, and member management
-- **`@oxpulse/chat-widget`** v0.4.0 — zero-third-party-dependency embeddable UI widget (Custom Element + iframe modes) built on top of `chat-sdk`. The CDN bundle is fully self-contained (`chat-sdk` inlined); the npm package declares `@oxpulse/chat-sdk` as a regular dependency. Available both via CDN (`https://cdn.oxpulse.chat/widget/0.4.0/index.js`, HTTP 200, immutable, CORS `*`) and npm (`npm install @oxpulse/chat-widget`) — CDN `<script>` tag remains the primary embed path for zero-build pages.
-- **`@oxpulse/crypto-primitives`** v0.1.0 — X25519+HKDF+AEAD primitives, MessageEnvelope v1 codec, pairwise-seal, and public constant-time comparison helpers (`timingSafeEqual`, `timingSafePubkeyEqualB64u`).
-- **`@oxpulse/url-contract`** v0.1.0 — heterogeneous room URL contract: generators, parsers, brands (ADR-0005).
-- **`@oxpulse/intro-protocol`** v0.1.0 (EXPERIMENTAL) — L2 introduction protocol as one bounded context: intro-crypto (X25519+HKDF+AEAD, constant-time pubkey comparison, session ID derivation), intro-wire (JSON+Zod wire codec), intro-safety-number (Signal-style safety number). Fixes CWE-208 timing oracle in `verifySessionIdRedundancy`. See [packages/intro-protocol/SECURITY.md](packages/intro-protocol/SECURITY.md).
+Versions are deliberately not listed here — they went stale before, silently, and npm
+already shows the current one for each package.
+
+- **`@oxpulse/wire-codec`** — CBOR+zstd binary message codec for the OxPulse chat wire protocol
+- **`@oxpulse/chat-sdk`** — core chat client: rooms, messages, SSE subscribe, E2EE, reactions, and member management
+- **`@oxpulse/chat-widget`** — zero-third-party-dependency embeddable UI widget (Custom Element + iframe modes) built on top of `chat-sdk`. The CDN bundle is fully self-contained (`chat-sdk` inlined); the npm package declares `@oxpulse/chat-sdk` as a regular dependency. Available both via CDN (`https://cdn.oxpulse.chat/widget/<version>/index.js` — immutable, CORS `*`; see [docs/embedding.md](docs/embedding.md) for the versioned-path contract) and npm (`npm install @oxpulse/chat-widget`) — CDN `<script>` tag remains the primary embed path for zero-build pages.
+- **`@oxpulse/crypto-primitives`** — X25519+HKDF+AEAD primitives, MessageEnvelope v1 codec, pairwise-seal, and public constant-time comparison helpers (`timingSafeEqual`, `timingSafePubkeyEqualB64u`).
+- **`@oxpulse/url-contract`** — heterogeneous room URL contract: generators, parsers, brands (ADR-0005).
+- **`@oxpulse/intro-protocol`** (EXPERIMENTAL) — L2 introduction protocol as one bounded context: intro-crypto (X25519+HKDF+AEAD, constant-time pubkey comparison, session ID derivation), intro-wire (JSON+Zod wire codec), intro-safety-number (Signal-style safety number). Fixes CWE-208 timing oracle in `verifySessionIdRedundancy`. See [packages/intro-protocol/SECURITY.md](packages/intro-protocol/SECURITY.md).
 
 ## Documentation
 
