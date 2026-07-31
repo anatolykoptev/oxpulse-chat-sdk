@@ -247,17 +247,27 @@ async function publishPackageOidc(pkg, localVersion) {
 			fail(1, `npm publish (OIDC) failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 		}
 
-		// Emit the "New tag:" line that changesets/action's runPublish() parses
-		// (regex: /New tag:\s+(@[^/]+\/[^@]+|[^/]+)@([^\s]+)/, run.ts:101).
-		// Without this line, changesets/action sets outputs.published='false' and
-		// the CDN publish steps (gated on published=='true') are permanently skipped.
-		// This also enables automatic GitHub Release creation by the action.
-		console.log(`New tag: ${pkg.name}@${localVersion}`);
 	} finally {
 		try { rmSync(scratch, { recursive: true, force: true }); } catch {}
 	}
 
-	tagAndPush(pkg.name, localVersion);
+	// Tag FIRST, then announce it. changesets/action's runPublish() parses
+	// "New tag: <pkg>@<ver>" out of this stdout (regex:
+	// /New tag:\s+(@[^/]+\/[^@]+|[^/]+)@([^\s]+)/, run.ts:101) to set
+	// outputs.published — which the CDN steps gate on — and to create a GitHub
+	// Release, pushing each parsed tag on the way.
+	//
+	// So the line is a claim the action acts on, and it must not be made before
+	// it is true. Printing it first is exactly how this pipeline ended up
+	// announcing tags it never created: the action then pushed refs that did not
+	// exist and failed AFTER npm publish had succeeded.
+	//
+	// If tagging fails we skip the line. That costs the CDN steps for this run —
+	// they are gated on published — but it keeps the run green and leaves a
+	// recoverable state, rather than failing the job on a ref we know is absent.
+	// The WARNING logged by tagAndPush names the version and the manual repair.
+	const tagged = tagAndPush(pkg.name, localVersion);
+	if (tagged) console.log(`New tag: ${pkg.name}@${localVersion}`);
 }
 
 async function publishPackageToken(pkg, localVersion) {
@@ -347,6 +357,7 @@ function tagAndPush(pkgName, localVersion) {
 			stdio: 'inherit',
 		});
 		log(`tagged + pushed ${tag}`);
+		return true;
 	} catch (err) {
 		// Deliberately non-fatal: npm publish has already succeeded by this point,
 		// and failing here would abort the job and skip the CDN steps that are
@@ -358,6 +369,7 @@ function tagAndPush(pkgName, localVersion) {
 		// the release commit — `git tag -a <tag> <sha> -m "release <tag>" && git
 		// push origin <tag>`.
 		log(`WARNING: ${tag} PUBLISHED BUT NOT TAGGED — this version is now untraceable until tagged by hand: ${err.message ?? err}`);
+		return false;
 	}
 }
 
