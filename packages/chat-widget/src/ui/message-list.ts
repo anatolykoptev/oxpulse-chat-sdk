@@ -804,6 +804,8 @@ export class MessageList {
   #pinnedBanner: PinnedBanner | null = null;
   /** #228: whether pinned-messages UI is enabled. */
   #pinnedMessagesEnabled = true;
+  /** #232: highlight timers for scrollToMsgId — cleared in destroy(). */
+  #highlightTimers: Set<ReturnType<typeof setTimeout>> = new Set();
   /** #121: presence overlay — tracks online users + renders avatar dots. */
   #presenceOverlay: PresenceOverlay | null = null;
   /** #122: read receipts — checkmarks on own messages. */
@@ -945,15 +947,6 @@ export class MessageList {
         resolveName: (uid) => this.#roster.get(uid)?.displayName,
         onJumpToMessage: (msgId) => this.scrollToMsgId(msgId),
       });
-      // #230: load initial pinned messages from listPins().
-      if (this.#client.listPins) {
-        void this.#client.listPins(this.#roomId).then((pins) => {
-          if (this.#signal.aborted) return;
-          this.#pinnedBanner?.setPins(pins);
-        }).catch(() => {
-          // Graceful: listPins failure doesn't break the widget — empty banner.
-        });
-      }
     }
     // #120: mount typing indicator below the message list.
     this.#typingIndicator = new TypingIndicator({
@@ -1021,6 +1014,26 @@ export class MessageList {
 
     // DM2: shared fetch-render-subscribe logic (also used by #retryMount).
     await this.#fetchAndRender();
+
+    // #230: load initial pinned messages from listPins() AFTER rows are
+    // fetched — the banner's resolvePreview reads from #rows, so pins must
+    // be hydrated after the row store is populated.
+    if (this.#pinnedMessagesEnabled && this.#client.listPins) {
+      this.#pinnedBanner?.setLoading(true);
+      void this.#client.listPins(this.#roomId).then((pins) => {
+        if (this.#signal.aborted) return;
+        this.#pinnedBanner?.setPins(pins);
+        // Refresh pin button states on all rendered bubbles — they were
+        // rendered before listPins resolved, so their aria-pressed is stale.
+        for (const pin of pins) {
+          this.#updateBubblePinState(pin.msgId);
+        }
+      }).catch(() => {
+        // M4: clear loading state on error — banner hides gracefully.
+        if (this.#signal.aborted) return;
+        this.#pinnedBanner?.setLoading(false);
+      });
+    }
   }
 
   /**
@@ -1073,7 +1086,13 @@ export class MessageList {
     if (!el) return;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     el.classList.add('oxp-pinned-jump-highlight');
-    setTimeout(() => el.classList.remove('oxp-pinned-jump-highlight'), 2000);
+    // Track the timer so destroy() can clear it — prevents the callback
+    // firing on a torn-down #listEl if the widget is destroyed mid-highlight.
+    const timer = setTimeout(() => {
+      this.#highlightTimers.delete(timer);
+      el.classList.remove('oxp-pinned-jump-highlight');
+    }, 2000);
+    this.#highlightTimers.add(timer);
   }
 
   /**
@@ -1084,10 +1103,11 @@ export class MessageList {
   #resolveRowPreview(msgId: string): string | undefined {
     const row = this.#rows.get(msgId);
     if (!row || row.deletedAt) return undefined;
-    if (row.text) return row.text;
+    if (row.text) return formatBodyPreview(row.text, 200);
     if (row.plaintext) {
       try {
-        return new TextDecoder().decode(row.plaintext).slice(0, 200);
+        const decoded = new TextDecoder().decode(row.plaintext);
+        return formatBodyPreview(decoded, 200);
       } catch {
         return undefined;
       }
@@ -1140,6 +1160,9 @@ export class MessageList {
     // #228: destroy pinned-messages banner.
     this.#pinnedBanner?.destroy();
     this.#pinnedBanner = null;
+    // #232: clear any pending jump-highlight timers.
+    for (const timer of this.#highlightTimers) clearTimeout(timer);
+    this.#highlightTimers.clear();
     // #121: destroy presence overlay (clears heartbeat + dots).
     this.#presenceOverlay?.destroy();
     this.#presenceOverlay = null;
@@ -1812,34 +1835,43 @@ export class MessageList {
    */
   async #togglePin(msgId: string): Promise<void> {
     if (!this.#client.pinMessage || !this.#client.unpinMessage) return;
-    const wasPinned = this.#pinnedBanner?.isPinned(msgId) ?? false;
-    // Optimistic update.
-    if (wasPinned) {
-      this.#pinnedBanner?.removePin(msgId);
-    } else {
-      this.#pinnedBanner?.addPin(msgId, this.#selfUid, new Date().toISOString());
-    }
-    this.#updateBubblePinState(msgId);
+    // In-flight guard: prevent rapid double-click from launching two
+    // concurrent optimistic toggles that diverge from server truth.
+    // Uses a `pin:` prefix to avoid collision with reaction inflight keys.
+    const inflightKey = `pin:${msgId}`;
+    if (this.#inflight.has(inflightKey)) return;
+    this.#inflight.add(inflightKey);
     try {
+      const wasPinned = this.#pinnedBanner?.isPinned(msgId) ?? false;
+      // Optimistic update.
       if (wasPinned) {
-        await this.#client.unpinMessage(this.#roomId, msgId);
-      } else {
-        await this.#client.pinMessage(this.#roomId, msgId);
-      }
-    } catch (err) {
-      // Rollback the optimistic update.
-      if (wasPinned) {
-        this.#pinnedBanner?.addPin(msgId, this.#selfUid, new Date().toISOString());
-      } else {
         this.#pinnedBanner?.removePin(msgId);
+      } else {
+        this.#pinnedBanner?.addPin(msgId, this.#selfUid, new Date().toISOString());
       }
       this.#updateBubblePinState(msgId);
-      const reason = classifyWriteFailureReason(err);
-      const errMsg = err instanceof Error ? err.message : String(err);
-      this.#onWriteFailure?.('send', reason, errMsg);
-      if (reason === 'auth_expired') {
-        this.#onAuthExpired?.();
+      try {
+        if (wasPinned) {
+          await this.#client.unpinMessage(this.#roomId, msgId);
+        } else {
+          await this.#client.pinMessage(this.#roomId, msgId);
+        }
+      } catch (err) {
+        // Rollback the optimistic update.
+        if (wasPinned) {
+          this.#pinnedBanner?.addPin(msgId, this.#selfUid, new Date().toISOString());
+        } else {
+          this.#pinnedBanner?.removePin(msgId);
+        }
+        this.#updateBubblePinState(msgId);
+        // L1: shared error reporting via #reportWriteFailure.
+        const reason = this.#reportWriteFailure('send', err);
+        if (reason === 'auth_expired') {
+          this.#onAuthExpired?.();
+        }
       }
+    } finally {
+      this.#inflight.delete(inflightKey);
     }
   }
 
@@ -1919,8 +1951,7 @@ export class MessageList {
    * behaviour, unchanged).
    */
   #handleWriteFailure(op: WriteFailureOp, err: unknown, msgId: string, preSnapshot: ReactionState): void {
-    const reason = classifyWriteFailureReason(err);
-    this.#onWriteFailure?.(op, reason, err instanceof Error ? err.message : String(err));
+    const reason = this.#reportWriteFailure(op, err);
     if (reason === 'auth_expired') {
       this.#onAuthExpired?.();
       this.#scheduleDelayedRollback(msgId);
@@ -1928,6 +1959,18 @@ export class MessageList {
       this.#reactions.set(msgId, preSnapshot);
       this.#updateReactionCluster(msgId);
     }
+  }
+
+  /**
+   * L1: Shared error classification + telemetry hook for write-op failures.
+   * Used by #handleWriteFailure (reactions) and #togglePin (pin/unpin) so
+   * both paths report consistently via #onWriteFailure and return the
+   * classified reason for caller-specific handling.
+   */
+  #reportWriteFailure(op: WriteFailureOp, err: unknown): WriteFailureReason {
+    const reason = classifyWriteFailureReason(err);
+    this.#onWriteFailure?.(op, reason, err instanceof Error ? err.message : String(err));
+    return reason;
   }
 
   /**

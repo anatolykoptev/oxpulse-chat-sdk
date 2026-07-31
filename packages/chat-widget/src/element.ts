@@ -235,8 +235,8 @@ export class OxpulseChatElement extends HTMLElement {
       applyTheme(this, value);
     }
 
-    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint, reactions-enabled)
-    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint' || name === 'reactions-enabled') {
+    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint, reactions-enabled, pinned-messages-enabled)
+    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint' || name === 'reactions-enabled' || name === 'pinned-messages-enabled') {
       // In-place iframe refresh keeps the jwt attribute (remount source-of-truth) in
       // sync but must NOT remount — refreshToken() applied the token via postMessage.
       if (name === 'jwt' && this.#suppressJwtReboot) return;
@@ -1200,6 +1200,8 @@ export class OxpulseChatElement extends HTMLElement {
         roleLabels: config.roleLabels,
         // Reactions toggle. Default true when omitted.
         reactionsEnabled: config.reactionsEnabled,
+        // Pinned messages toggle. Default true when omitted.
+        pinnedMessagesEnabled: config.pinnedMessagesEnabled,
         // W7: only show reply buttons when there is a composer wired to receive them.
         onSetReply: effectiveSendClient
           ? (snapshot) => { this.#composer?.setReplyTarget(snapshot); }
@@ -1248,6 +1250,11 @@ export class OxpulseChatElement extends HTMLElement {
           // #229: forward mutation events (edit/delete/pin/unpin) to the
           // MessageList's internal handler — was undefined before, so pin/unpin
           // SSE events were silently dropped on the reconnect path.
+          // M5: double-apply safety — Reconnector.#replaceSubscription tears
+          // down the old subscription before establishing the new one, so the
+          // old and new onMutation handlers never run concurrently. All current
+          // mutation ops are idempotent anyway (edit/delete just set timestamps;
+          // pin addPin is deduped, removePin is a no-op if absent).
           onMutation: (sdkEv) => {
             this.#messageList?.handleMutation({
               msgId: sdkEv.msgId,
@@ -1362,6 +1369,7 @@ export class OxpulseChatElement extends HTMLElement {
     const selfUid = this.getAttribute('self-uid') ?? selfUidFromJwt(jwt);
     const baseUrl = this.getAttribute('base-url') ?? undefined;
     const reactionsEnabled = this.getAttribute('reactions-enabled') !== 'false';
+    const pinnedMessagesEnabled = this.getAttribute('pinned-messages-enabled') !== 'false';
 
     return {
       appId,
@@ -1376,6 +1384,7 @@ export class OxpulseChatElement extends HTMLElement {
       allowWrite,
       writeMintEndpoint,
       reactionsEnabled,
+      pinnedMessagesEnabled,
       // Merge stored callbacks + test factory overrides
       onTokenExpired: this.#config?.onTokenExpired,
       onError: this.#config?.onError,
@@ -1458,6 +1467,9 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
   // reactions-enabled defaults to true; only set the attribute explicitly to keep
   // the HTML truthful and to trigger re-init on future attribute changes.
   el.setAttribute('reactions-enabled', config.reactionsEnabled === false ? 'false' : 'true');
+  // pinned-messages-enabled defaults to true; only set the attribute explicitly to keep
+  // the HTML truthful and to trigger re-init on future attribute changes.
+  el.setAttribute('pinned-messages-enabled', config.pinnedMessagesEnabled === false ? 'false' : 'true');
 
   // Store callbacks + test factory overrides (not representable as attributes)
   el._setCallbacks({

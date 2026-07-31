@@ -152,6 +152,13 @@ export interface WidgetConfig {
    * reaction events. Default: true.
    */
   reactionsEnabled?: boolean;
+
+  /**
+   * Enable/disable pinned messages UI. When false, the pinned messages
+   * banner is not mounted and pin/unpin buttons are hidden on bubbles.
+   * Default: true.
+   */
+  pinnedMessagesEnabled?: boolean;
 }
 
 // ── Custom Element observed attributes (kebab-case mirror of WidgetConfig) ───
@@ -170,6 +177,7 @@ export const OBSERVED_ATTRIBUTES = [
   'allow-write',
   'write-mint-endpoint',
   'reactions-enabled',
+  'pinned-messages-enabled',
 ] as const;
 
 /** @internal Not part of the package's public API surface; not re-exported from index.ts. Kept exported for cross-file use within the package. */

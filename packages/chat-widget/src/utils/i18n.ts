@@ -141,7 +141,6 @@ export type LocaleKey =
   // Pinned messages banner (#228)
   | 'pinnedBannerTitle'
   | 'pinnedBannerPinnedBy'
-  | 'pinnedBannerCount'
   | 'pinnedBannerNotLoaded'
   | 'pinnedBannerCloseAria'
   | 'pinnedBannerPrevAria'
@@ -267,8 +266,7 @@ const en: LocaleTable = {
 
   pinnedBannerTitle: 'Pinned message',
   pinnedBannerPinnedBy: 'Pinned by {name}',
-  pinnedBannerCount: '{n} pinned',
-  pinnedBannerNotLoaded: 'Message not loaded',
+  pinnedBannerNotLoaded: 'Pinned message not loaded',
   pinnedBannerCloseAria: 'Close pinned banner',
   pinnedBannerPrevAria: 'Previous pinned message',
   pinnedBannerNextAria: 'Next pinned message',
@@ -391,8 +389,7 @@ const ru: LocaleTable = {
 
   pinnedBannerTitle: 'Закреплённое сообщение',
   pinnedBannerPinnedBy: 'Закрепил(а) {name}',
-  pinnedBannerCount: 'Закреплённых: {n}',
-  pinnedBannerNotLoaded: 'Сообщение не загружено',
+  pinnedBannerNotLoaded: 'Закреплённое сообщение не загружено',
   pinnedBannerCloseAria: 'Закрыть баннер закреплённых',
   pinnedBannerPrevAria: 'Предыдущее закреплённое',
   pinnedBannerNextAria: 'Следующее закреплённое',

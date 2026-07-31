@@ -1177,7 +1177,11 @@ export const THEME_CSS = `
 /* Heart-first reactions (spec amendment 2026-07-14): a single heart button
  * replaces the old '+😀' text trigger — outline heart by default, tap
  * instantly toggles ❤️, hold/ArrowUp opens the full ReactionQuickBar. */
-.oxp-reaction-heart-btn {
+/* L3: shared base for bubble-footer icon buttons (heart, pin). Both use
+ * opacity:0 + hover/focus reveal, aria-pressed accent state, same padding. */
+.oxp-icon-btn,
+.oxp-reaction-heart-btn,
+.oxp-pin-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -1194,7 +1198,9 @@ export const THEME_CSS = `
   transition: opacity 0.1s, color 0.15s;
 }
 
-.oxp-reaction-heart-btn svg {
+.oxp-icon-btn svg,
+.oxp-reaction-heart-btn svg,
+.oxp-pin-btn svg {
   fill: none;
   stroke: currentColor;
 }
@@ -1277,27 +1283,9 @@ export const THEME_CSS = `
   opacity: 1;
 }
 
-/* #231: pin/unpin button on each bubble — mirrors heart button styling */
-.oxp-pin-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--oxp-fg-secondary);
-  padding: 2px 4px;
-  border-radius: 4px;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.1s, color 0.15s;
-}
-
-.oxp-pin-btn svg {
-  fill: none;
-  stroke: currentColor;
-}
-
+/* #231: pin/unpin button on each bubble — base styles shared with heart-btn
+ * via .oxp-icon-btn (L3); only the aria-pressed + hover/focus rules below
+ * are pin-specific. */
 .oxp-pin-btn[aria-pressed='true'] {
   color: var(--oxp-accent);
 }
@@ -1461,6 +1449,11 @@ export const THEME_CSS = `
   .oxp-reaction-chip { min-height: 44px; }
   /* W7: reply button visible + 44px touch target on mobile. */
   .oxp-reply-btn { opacity: 1; min-height: 44px; min-width: 44px; }
+  /* #231: pin button visible + 44px touch target on mobile — mirrors heart-btn. */
+  .oxp-pin-btn { opacity: 1; min-height: 44px; min-width: 44px; }
+  /* #228: pinned banner nav/close buttons must meet 44px touch target on mobile. */
+  .oxp-pinned-banner-nav-btn,
+  .oxp-pinned-banner-close { min-height: 44px; min-width: 44px; }
   /* DM1: cancel/retry buttons must meet Apple HIG 44px touch target on mobile. */
   .oxp-attachment-cancel,
   .oxp-attachment-retry { min-height: 44px; min-width: 44px; }

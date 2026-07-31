@@ -70,6 +70,8 @@ export class PinnedBanner {
   /** Whether the banner has been dismissed by the user (close button).
    *  A new pin/addPin re-shows it (the user dismissed the OLD set). */
   #dismissed = false;
+  /** M4: whether listPins() is in-flight — shows a loading placeholder. */
+  #loading = false;
 
   #root: HTMLElement | null = null;
   #previewEl: HTMLButtonElement | null = null;
@@ -100,6 +102,14 @@ export class PinnedBanner {
     this.#pins = [...pins];
     this.#currentIndex = 0;
     this.#dismissed = false;
+    this.#loading = false;
+    this.#render();
+  }
+
+  /** M4: Set loading state — called before listPins() resolves. */
+  setLoading(loading: boolean): void {
+    if (this.#destroyed) return;
+    this.#loading = loading;
     this.#render();
   }
 
@@ -152,6 +162,9 @@ export class PinnedBanner {
     this.#root = document.createElement('div');
     this.#root.className = 'oxp-pinned-banner';
     this.#root.style.display = 'none';
+    // M2: ARIA role + label so screen readers announce the banner region.
+    this.#root.setAttribute('role', 'region');
+    this.#root.setAttribute('aria-label', t('pinnedBannerTitle', this.#lang));
 
     // Pin icon
     const iconEl = document.createElement('span');
@@ -162,6 +175,8 @@ export class PinnedBanner {
     // Content area (preview + meta)
     const contentEl = document.createElement('div');
     contentEl.className = 'oxp-pinned-banner-content';
+    // M2: aria-live so screen readers announce when the pinned set changes.
+    contentEl.setAttribute('aria-live', 'polite');
 
     this.#previewEl = document.createElement('button');
     this.#previewEl.className = 'oxp-pinned-banner-preview';
@@ -243,6 +258,16 @@ export class PinnedBanner {
     if (!this.#root || !this.#previewEl || !this.#metaEl || !this.#counterEl) return;
 
     if (this.#pins.length === 0 || this.#dismissed) {
+      // M4: show banner with loading placeholder while listPins is in-flight.
+      if (this.#loading && !this.#dismissed) {
+        this.#root.style.display = 'flex';
+        this.#previewEl.textContent = t('pinnedBannerTitle', this.#lang);
+        this.#previewEl.setAttribute('data-not-loaded', 'true');
+        this.#metaEl.textContent = '';
+        this.#counterEl.style.display = 'none';
+        this.#root.removeAttribute('data-multi');
+        return;
+      }
       this.#root.style.display = 'none';
       return;
     }

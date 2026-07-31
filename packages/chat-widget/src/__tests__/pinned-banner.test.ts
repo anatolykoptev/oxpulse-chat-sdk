@@ -53,7 +53,7 @@ describe("PinnedBanner (#228)", () => {
     banner.setPins([{ msgId: "msg1", pinnedBy: "bob", pinnedAt: "2026-07-31T00:00:00Z" }]);
 
     const preview = container.querySelector(".oxp-pinned-banner-preview") as HTMLElement;
-    expect(preview.textContent).toBe("Message not loaded");
+    expect(preview.textContent).toBe("Pinned message not loaded");
     expect(preview.getAttribute("data-not-loaded")).toBe("true");
     banner.destroy();
   });
@@ -209,7 +209,7 @@ describe("PinnedBanner (#228)", () => {
     banner.setPins([{ msgId: "msg1", pinnedBy: "alice", pinnedAt: "2026-07-31T00:00:00Z" }]);
 
     const preview = container.querySelector(".oxp-pinned-banner-preview") as HTMLElement;
-    expect(preview.textContent).toBe("Сообщение не загружено");
+    expect(preview.textContent).toBe("Закреплённое сообщение не загружено");
 
     const meta = container.querySelector(".oxp-pinned-banner-meta") as HTMLElement;
     expect(meta.textContent).toBe("Закрепил(а) alice");
