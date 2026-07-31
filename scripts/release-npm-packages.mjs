@@ -262,10 +262,16 @@ async function publishPackageOidc(pkg, localVersion) {
 	// announcing tags it never created: the action then pushed refs that did not
 	// exist and failed AFTER npm publish had succeeded.
 	//
-	// If tagging fails we skip the line. That costs the CDN steps for this run —
-	// they are gated on published — but it keeps the run green and leaves a
-	// recoverable state, rather than failing the job on a ref we know is absent.
-	// The WARNING logged by tagAndPush names the version and the manual repair.
+	// If tagging fails we skip the line. What that costs is narrow: the GitHub
+	// Release for this version, and outputs.published. It does NOT cost the CDN
+	// steps — release.yml runs those unconditionally, on purpose, because
+	// published means "some package published this run" rather than "the bundle
+	// needs deploying", and gating on it once made a real CDN deploy skip in
+	// silence (see the Phase 3 comment there).
+	//
+	// The run stays green and the state is recoverable, which beats failing the
+	// job on a ref we already know is absent. The WARNING logged by tagAndPush
+	// names the version and the manual repair.
 	const tagged = tagAndPush(pkg.name, localVersion);
 	if (tagged) console.log(`New tag: ${pkg.name}@${localVersion}`);
 }
