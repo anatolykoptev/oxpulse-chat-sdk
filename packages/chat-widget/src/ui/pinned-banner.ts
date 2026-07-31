@@ -261,7 +261,7 @@ export class PinnedBanner {
       // M4: show banner with loading placeholder while listPins is in-flight.
       if (this.#loading && !this.#dismissed) {
         this.#root.style.display = 'flex';
-        this.#previewEl.textContent = t('pinnedBannerTitle', this.#lang);
+        this.#previewEl.textContent = t('pinnedBannerLoading', this.#lang);
         this.#previewEl.setAttribute('data-not-loaded', 'true');
         this.#metaEl.textContent = '';
         this.#counterEl.style.display = 'none';

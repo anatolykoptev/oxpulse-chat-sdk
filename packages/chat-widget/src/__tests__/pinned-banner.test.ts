@@ -215,4 +215,70 @@ describe("PinnedBanner (#228)", () => {
     expect(meta.textContent).toBe("Закрепил(а) alice");
     banner.destroy();
   });
+
+  // R2: setLoading shows a loading placeholder while listPins is in-flight.
+  it("shows loading placeholder when setLoading(true) is called with no pins", () => {
+    const banner = new PinnedBanner({ container, lang: "en" });
+    banner.setLoading(true);
+
+    const root = container.querySelector(".oxp-pinned-banner") as HTMLElement;
+    expect(root.style.display).toBe("flex");
+
+    const preview = container.querySelector(".oxp-pinned-banner-preview") as HTMLElement;
+    expect(preview.textContent).toBe("Loading pinned messages…");
+    expect(preview.getAttribute("data-not-loaded")).toBe("true");
+
+    const counter = container.querySelector(".oxp-pinned-banner-counter") as HTMLElement;
+    expect(counter.style.display).toBe("none");
+    banner.destroy();
+  });
+
+  it("hides banner when setLoading(false) is called with no pins", () => {
+    const banner = new PinnedBanner({ container, lang: "en" });
+    banner.setLoading(true);
+    banner.setLoading(false);
+
+    const root = container.querySelector(".oxp-pinned-banner") as HTMLElement;
+    expect(root.style.display).toBe("none");
+    banner.destroy();
+  });
+
+  // R3: ARIA attributes for accessibility.
+  it("sets role=region and aria-label on the banner root", () => {
+    const banner = new PinnedBanner({ container, lang: "en" });
+    banner.setPins([{ msgId: "msg1", pinnedBy: "alice", pinnedAt: "2026-07-31T00:00:00Z" }]);
+
+    const root = container.querySelector(".oxp-pinned-banner") as HTMLElement;
+    expect(root.getAttribute("role")).toBe("region");
+    expect(root.getAttribute("aria-label")).toBe("Pinned message");
+    banner.destroy();
+  });
+
+  it("sets aria-live=polite on the banner content area", () => {
+    const banner = new PinnedBanner({ container, lang: "en" });
+    banner.setPins([{ msgId: "msg1", pinnedBy: "alice", pinnedAt: "2026-07-31T00:00:00Z" }]);
+
+    const content = container.querySelector(".oxp-pinned-banner-content") as HTMLElement;
+    expect(content.getAttribute("aria-live")).toBe("polite");
+    banner.destroy();
+  });
+
+  it("sets aria-labels on nav and close buttons", () => {
+    const banner = new PinnedBanner({ container, lang: "en" });
+    banner.setPins([
+      { msgId: "msg1", pinnedBy: "alice", pinnedAt: "2026-07-31T00:00:00Z" },
+      { msgId: "msg2", pinnedBy: "bob", pinnedAt: "2026-07-31T00:01:00Z" },
+    ]);
+
+    // Both nav buttons share .oxp-pinned-banner-nav-btn — select by text content.
+    const navBtns = container.querySelectorAll(".oxp-pinned-banner-nav-btn");
+    expect(navBtns.length).toBe(2);
+    const prevBtn = navBtns[0] as HTMLElement;
+    const nextBtn = navBtns[1] as HTMLElement;
+    const closeBtn = container.querySelector(".oxp-pinned-banner-close") as HTMLElement;
+    expect(prevBtn.getAttribute("aria-label")).toBe("Previous pinned message");
+    expect(nextBtn.getAttribute("aria-label")).toBe("Next pinned message");
+    expect(closeBtn.getAttribute("aria-label")).toBe("Close pinned banner");
+    banner.destroy();
+  });
 });

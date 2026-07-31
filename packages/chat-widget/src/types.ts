@@ -157,6 +157,9 @@ export interface WidgetConfig {
    * Enable/disable pinned messages UI. When false, the pinned messages
    * banner is not mounted and pin/unpin buttons are hidden on bubbles.
    * Default: true.
+   *
+   * Note: only supported in `mode:'inline'`. In `mode:'iframe'` (experimental)
+   * no MessageList is mounted, so this flag has no effect.
    */
   pinnedMessagesEnabled?: boolean;
 }

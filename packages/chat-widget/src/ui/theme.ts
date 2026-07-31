@@ -1177,11 +1177,12 @@ export const THEME_CSS = `
 /* Heart-first reactions (spec amendment 2026-07-14): a single heart button
  * replaces the old '+😀' text trigger — outline heart by default, tap
  * instantly toggles ❤️, hold/ArrowUp opens the full ReactionQuickBar. */
-/* L3: shared base for bubble-footer icon buttons (heart, pin). Both use
- * opacity:0 + hover/focus reveal, aria-pressed accent state, same padding. */
+/* L3: shared base for bubble-footer icon buttons (heart, pin, reply). All use
+ * opacity:0 + hover/focus reveal, same padding/radius/color. */
 .oxp-icon-btn,
 .oxp-reaction-heart-btn,
-.oxp-pin-btn {
+.oxp-pin-btn,
+.oxp-reply-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -1200,7 +1201,8 @@ export const THEME_CSS = `
 
 .oxp-icon-btn svg,
 .oxp-reaction-heart-btn svg,
-.oxp-pin-btn svg {
+.oxp-pin-btn svg,
+.oxp-reply-btn svg {
   fill: none;
   stroke: currentColor;
 }
@@ -1259,17 +1261,10 @@ export const THEME_CSS = `
 }
 
 /* W7: reply button on each bubble */
+/* R5: .oxp-reply-btn base styles shared via .oxp-icon-btn selector above;
+ * only the reply-specific font-size remains here. */
 .oxp-reply-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
   font-size: 0.8rem;
-  color: var(--oxp-fg-secondary);
-  padding: 2px 4px;
-  border-radius: 4px;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.1s;
 }
 
 .oxp-bubble:hover .oxp-reply-btn,
