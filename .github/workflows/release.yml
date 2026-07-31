@@ -51,18 +51,70 @@ on:
   push:
     branches:
       - main
-    # Loop-safety (LOAD-BEARING): the Version Packages PR's bump commit is
-    # pushed by changesets/action using the built-in GITHUB_TOKEN. GitHub does
-    # NOT re-trigger `on: push` workflows for GITHUB_TOKEN-authored pushes, so
-    # there is no merge→push→re-trigger storm. If you ever switch the action to
-    # a PAT/app token, that protection is LOST and this workflow WILL loop.
+    # Loop-safety. An EARLIER version of this comment claimed the guarantee came
+    # from the built-in GITHUB_TOKEN (GitHub does not re-trigger `on: push`
+    # workflows for GITHUB_TOKEN-authored pushes) and warned that an App token
+    # "WILL loop". That was wrong, and it was actively harmful: it told the next
+    # person not to make the correct change. The App token is now wired
+    # (see "Mint krolik-release-bot token" below) and there is no loop, because:
+    #
+    #   1. This workflow never pushes to `main`. The version phase pushes the
+    #      bump commit to the SIDE BRANCH `changeset-release/main` and opens a
+    #      PR from it (PR #226's headRefName is exactly that). A push to a side
+    #      branch cannot match `branches: [main]` no matter who authored it.
+    #   2. The publish phase pushes nothing at all. The custom OIDC publisher
+    #      early-returns out of tagAndPush() in OIDC mode (see
+    #      scripts/release-npm-packages.mjs), and changesets/action is
+    #      configured with createGithubReleases: false, so no tag is pushed
+    #      either.
+    #
+    # So the only push to `main` in the whole cycle is a human merging the
+    # Version Packages PR — one trigger per release, by construction. The
+    # branch filter is the SECOND line of defence, not the first; the first is
+    # that no step here writes to `main`. If you ever add a step that commits
+    # to `main` (e.g. regenerating a lockfile on the release commit), that
+    # invariant is what you are breaking — re-derive the loop analysis then,
+    # and do not rely on token identity to save you.
+    #
+    # Deliberately NOT added as a belt-and-braces guard: skipping the job when
+    # the head commit was authored by the bot. It would wedge the pipeline the
+    # day anyone enables auto-merge on the Version Packages PR (the merge commit
+    # would then be bot-authored and the publish would silently never run) —
+    # trading a loop we cannot reach for a silent no-publish we can. The
+    # `concurrency` group below is the safe bound instead: it serialises release
+    # runs so even an unforeseen re-trigger cannot fan out.
   # Manual fallback: trigger a publish run directly without waiting for a
   # Version Packages PR, e.g. to re-publish after a transient npm outage.
+  # NOTE: this path runs the same test gate as any other run — see the
+  # "Typecheck"/"Test" steps below. It used to publish to npm with zero tests
+  # executed on that tree.
   workflow_dispatch:
+
+# Serialise release runs. Publishing is not safely concurrent (two runs would
+# race the same npm versions and the same CDN directory), and never cancel one
+# in flight — a cancelled run can leave some packages published and others not.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+
+    # Without this the default is 360 minutes. Combined with the concurrency
+    # group above (cancel-in-progress: false, deliberately — a cancelled publish
+    # can leave some packages on npm and others not), ONE hung run would hold
+    # the group and block every release for six hours. 30 minutes is several
+    # times the observed run time and still fails the same day.
+    #
+    # Related, and the reason the concurrency group is not free: GitHub cancels a
+    # PENDING run when a newer one joins the group, keeping only the latest. Two
+    # release runs already landed 59 s apart on this repo, so three quick pushes
+    # to main can silently drop the middle one. That is tolerable for the version
+    # phase (changesets recomputes from the tree, so the newest run supersedes)
+    # but it means a queued run is not a guaranteed run — check the Actions tab
+    # after a burst instead of assuming every push produced a run.
+    timeout-minutes: 30
 
     # Permissions widening vs. the previous publish-only workflow:
     #   contents: write   — changesets/action must push the version bump commit
@@ -70,15 +122,25 @@ jobs:
     #                       The old workflow had contents: read (no PR needed).
     #   pull-requests: write — changesets/action opens and labels the PR.
     #   id-token: write   — same as before: npm OIDC token exchange.
-    # Blast-radius note: these permissions are scoped to this single job.
-    # The environment: release gate (required reviewer) provides the human
-    # checkpoint before any publish step runs.
+    # Blast-radius note: these permissions are scoped to this single job, and
+    # that is the ONLY containment they have. An earlier version of this comment
+    # claimed "the environment: release gate (required reviewer) provides the
+    # human checkpoint before any publish step runs". Measured 2026-07-31:
+    #   gh api /repos/anatolykoptev/oxpulse-chat-sdk/environments
+    #     -> {"name":"release","protection_rules":[]}
+    # There is no reviewer and no wait timer; the job runs immediately. Claiming
+    # a control that is not wired is worse than claiming none, because the next
+    # person weighs a permission grant against protection that does not exist.
+    # Whether to add a required reviewer is the operator's call and is
+    # deliberately NOT made in this workflow.
     permissions:
       contents: write
       pull-requests: write
       id-token: write
 
-    # Gates this job behind the "release" environment.
+    # Declares the job's deployment environment. NOTE this currently gates
+    # NOTHING — "release" exists with protection_rules: [] (measured above), so
+    # it is a label plus an npm trusted-publisher binding, not a checkpoint.
     # Set a required reviewer in repo Settings → Environments → release.
     # If no protection rules are configured, GitHub auto-creates the environment
     # and the job runs immediately — harmless and forward-compatible.
@@ -95,11 +157,19 @@ jobs:
           # branch to detect which changesets are new.
           fetch-depth: 0
 
-      - name: Set up Node.js 22
+      - name: Set up Node.js 24
         # v4.4.0
+        #
+        # Was 22.x. Bumped to 24.x because this workflow now runs the test suite
+        # before publishing, and part of that suite (the SEC-CR-003 durable-replay
+        # tests) needs the Web Locks API, which node 22 does not have — the same
+        # reason preflight.yml selects nvm node 24 on the self-hosted runner. On
+        # node 22 the added gate would fail for a runtime reason rather than a
+        # code reason, which is the worst kind of gate. Publishing itself is
+        # unaffected: it runs through npm >= 11.5.1 (installed below) and OIDC.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '22.x'
+          node-version: '24.x'
           # registry-url puts the npm config in place; OIDC mode does NOT use
           # NODE_AUTH_TOKEN, but the registry URL is still needed for `npm view`.
           registry-url: 'https://registry.npmjs.org'
@@ -136,6 +206,61 @@ jobs:
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      # ── Test gate (LOAD-BEARING) ─────────────────────────────────────────────
+      # Until this existed, NOTHING on the publish path ran a test. preflight.yml
+      # triggers on `pull_request` only, so a `workflow_dispatch` re-publish — the
+      # documented manual fallback above — shipped to npm having executed zero
+      # tests on that tree. Combined with the release PR getting no CI runs at all
+      # (the GITHUB_TOKEN-authored-PR problem the App token below fixes), the
+      # release pipeline had no gate whatsoever.
+      #
+      # These steps mirror preflight.yml exactly. Keep them in sync: if a test
+      # needs a fixture provisioned there, it needs it here too.
+      - name: Assert Web Locks available
+        run: |
+          node --version
+          node -e "if (typeof navigator?.locks?.request !== 'function') { console.error('node lacks Web Locks (need node >= 24) — SEC-CR-003 tests would silently lose coverage'); process.exit(1) }"
+
+      # build:cdn is NOT part of the root build script, but
+      # chat-widget/src/__tests__/{cdn-bundle,browser-regex-compat}.test.ts assert
+      # against the dist-cdn/index.js artifact — provision it (never skip the test).
+      - name: Build (gate)
+        run: |
+          pnpm build
+          pnpm --filter @oxpulse/chat-widget build:cdn
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # ── Release identity ─────────────────────────────────────────────────────
+      # Fleet standard: releases are signed by the krolik-release-bot GitHub App
+      # (App 4335933), not by the built-in GITHUB_TOKEN and not by a personal PAT.
+      #
+      # The concrete reason here, not just consistency: a pull request opened by
+      # GITHUB_TOKEN gets NO workflow runs — GitHub suppresses them to prevent
+      # recursion. That is why the "Version Packages" PR #226 sat at
+      # mergeStateStatus UNSTABLE with zero checks and was merged on that basis.
+      # An App-opened PR does get CI runs, so preflight.yml actually gates the
+      # release PR.
+      #
+      # Credentials are provisioned per repo as the variable RELEASE_BOT_APP_ID
+      # and the secret RELEASE_BOT_PRIVATE_KEY. The action masks the minted token
+      # in logs and revokes it when the job ends.
+      #
+      # Not touched by this: the npm publish path, which authenticates with OIDC
+      # (id-token: write) and never sees any GitHub token.
+      - name: Mint krolik-release-bot token
+        # SHA-pinned. v2.2.2
+        # Source: https://github.com/actions/create-github-app-token/releases/tag/v2.2.2
+        id: bot-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - name: Create Version PR or Publish
         # SHA-pinned. v1.9.0
         # Source: https://github.com/changesets/action/releases/tag/v1.9.0
@@ -169,7 +294,11 @@ jobs:
           # GitHub Releases are not created by this pipeline anyway (see the header note).
           createGithubReleases: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # krolik-release-bot App installation token, NOT secrets.GITHUB_TOKEN.
+          # This is what makes the Version Packages PR receive CI runs — see the
+          # "Mint krolik-release-bot token" step above for why that matters and
+          # the `on:` block for why it does not create a trigger loop.
+          GITHUB_TOKEN: ${{ steps.bot-token.outputs.token }}
           # TRUSTED_PUBLISH=1 activates the OIDC path in release-npm-packages.mjs.
           # NPM_TOKEN must NOT be set (the whole point is to publish without it).
           #
