@@ -154,16 +154,34 @@ for (const msg of result.items) {
 
 > **These calls need an app-wide scope and belong on your backend, not in the browser.**
 >
-> Room operations authorize against `rooms:read:*` / `rooms:write:*` — a literal `*` in
-> the resource position. The scope matcher is asymmetric (`granted == "*" || granted ==
-> required`), so a per-room grant such as `rooms:write:room-1` does **not** satisfy them.
-> The practical consequence: the only token that can create a room can create and mutate
-> **every** room in the app.
+> Room operations first **gate on** `rooms:read:*` / `rooms:write:*` — a literal `*` in
+> the resource position. `check_scope` compares each of the three scope components with
+> `granted == "*" || granted == required`, so a `*` means "any" only on the granted side:
+> a per-room grant such as `rooms:write:room-1` does **not** satisfy them. The scope is
+> app-wide and cannot be narrowed to one room.
 >
-> Mint that token server-side and make these calls from your backend. Do not include
-> `rooms:write:*` in a token you hand to a browser — the auth model at the top of this
-> page assumes the browser holds a narrowly-scoped token, and this scope is the opposite
-> of that.
+> That scope is admission control, not authorization. Each mutating call applies a
+> second, per-room check against the caller's own member row:
+>
+> | Call | Second gate |
+> |---|---|
+> | `createRoom` | **none** — the creator becomes owner |
+> | `updateRoom` | caller must be an active `owner` |
+> | `addMember` / `removeMember` | owner or moderator in open rooms; any active, non-banned member otherwise |
+> | `getRoom` | caller must be an effective member |
+> | `listRooms` | results are scoped to the caller's own memberships |
+>
+> Two consequences worth planning around:
+>
+> 1. **The unbounded power is room creation.** A `rooms:write:*` holder can create
+>    unlimited rooms. It cannot silently rewrite an arbitrary existing room.
+> 2. **A "service" token will 403 on almost everything.** The gates key on the JWT `sub`,
+>    not on the token having been minted server-side. If `sub` holds no member rows you
+>    get an empty `listRooms` and 403 from `getRoom`, `updateRoom`, `addMember` and
+>    `removeMember` — only `createRoom` works. Mint for a `sub` that owns the target room.
+>
+> Do not include `rooms:write:*` in a token you hand to a browser: the auth model at the
+> top of this page assumes a narrowly-scoped browser token, and this scope is app-wide.
 >
 > The snippets below use `client.*` for brevity; run them against a server-side client.
 
