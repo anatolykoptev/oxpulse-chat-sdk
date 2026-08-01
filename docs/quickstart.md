@@ -30,7 +30,8 @@ Your server ◄──── { jwt } ──────────────�
 Browser (holds scoped JWT only — never the minting secret)
 ```
 
-The scoped JWT carries permission claims of the form:
+The scoped JWT carries permission claims of the form `<namespace>:<verb>:<resource>`. The ones
+a browser token should carry are all per-room:
 
 ```
 chat:read:<roomId>
@@ -38,7 +39,15 @@ chat:write:<roomId>
 chat:subscribe:<roomId>
 ```
 
-Your server controls which rooms and operations each user may access.
+Room management is a separate, **app-wide** family that cannot be narrowed to one room:
+
+```
+rooms:read:*
+rooms:write:*
+```
+
+Mint those only for a server-side client — see the warning above the room-management snippets
+below. Your server controls which rooms and operations each user may access.
 
 ## Minimal example
 
@@ -168,8 +177,9 @@ for (const msg of result.items) {
 > | `createRoom` | **none** — the creator becomes owner |
 > | `updateRoom` | caller must be an active `owner` |
 > | `addMember` / `removeMember` | owner or moderator in open rooms; any active, non-banned member otherwise |
-> | `getRoom` | caller must be an effective member |
+> | `getRoom` | caller must be an *effective* member — in a room whose visibility is `open` that means anyone not banned, member row or not; in any other room it means an active member row |
 > | `listRooms` | results are scoped to the caller's own memberships |
+> | `deleteRoom` (clears the message log) | caller must be an `owner` or `moderator` of that room |
 >
 > Two consequences worth planning around:
 >
@@ -177,8 +187,9 @@ for (const msg of result.items) {
 >    unlimited rooms. It cannot silently rewrite an arbitrary existing room.
 > 2. **A "service" token will 403 on almost everything.** The gates key on the JWT `sub`,
 >    not on the token having been minted server-side. If `sub` holds no member rows you
->    get an empty `listRooms` and 403 from `getRoom`, `updateRoom`, `addMember` and
->    `removeMember` — only `createRoom` works. Mint for a `sub` that owns the target room.
+>    get an empty `listRooms` and 403 from `updateRoom`, `addMember`, `removeMember` and
+>    `deleteRoom` — only `createRoom` works, and `getRoom` works only where the room is
+>    `open`. Mint for a `sub` that owns the target room.
 >
 > Do not include `rooms:write:*` in a token you hand to a browser: the auth model at the
 > top of this page assumes a narrowly-scoped browser token, and this scope is app-wide.
@@ -197,12 +208,28 @@ const room = await client.createRoom({
 await client.addMember(room.roomId, 'user-789', 'member');
 await client.removeMember(room.roomId, 'user-456');
 
-// List rooms the JWT has access to
+// List the rooms this token's `sub` is a member of — NOT every room the scope reaches
 const { items } = await client.listRooms();
 
 // Fetch full room info (includes members)
 const full = await client.getRoom(room.roomId);
+
+// Rename / reconfigure a room — active owner only
+await client.updateRoom(room.roomId, { title: 'Support thread #42 (closed)' });
+
+// Erase the room's message history — owner or moderator only. See the caveat below.
+await client.deleteRoom(room.roomId);
 ```
+
+> **`deleteRoom()` does not delete the room.** It clears the room's *message log*
+> (`DELETE /api/sdk/messages/{roomId}`); the room, its title and its memberships all survive,
+> and `getRoom()` keeps returning it. There is no endpoint that deletes a room — if you need
+> one, track [#248](https://github.com/anatolykoptev/oxpulse-chat-sdk/issues/248).
+>
+> The erase is a hard delete with no tombstone and no recovery, and since v0.15.10 of the
+> server it requires an `owner` or `moderator` role on that room. A plain `chat:write` holder
+> — which is what a browser token carries — now gets 403. Before v0.15.10 it succeeded, so if
+> you built a flow that let participants clear a room, it will start failing on upgrade.
 
 ## Reactions
 
@@ -225,6 +252,12 @@ const pins = await client.listPins('room-abc');
 ```
 
 Edit and delete events arrive on the SSE stream via `onMutation` in `SubscribeArgs`.
+
+**Who may delete a message.** `deleteMessage()` needs `chat:write:<roomId>`, but that scope is
+only admission control: a plain participant may soft-delete **their own** messages and gets 403
+on anyone else's (404 if the message does not exist — the two are kept distinct on purpose, so a
+denial does not leak whether a message is there). An `owner` or `moderator` of the room may
+delete any message in it. The delete is soft — the message is tombstoned, not erased.
 
 ## Optimistic send (outbox)
 
