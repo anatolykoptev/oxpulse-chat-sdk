@@ -12,7 +12,7 @@ Both modes require a scoped JWT from your backend. See [quickstart.md](./quickst
 ## CDN delivery (primary embed channel)
 
 The widget is distributed as a self-contained single-file ES module from `cdn.oxpulse.chat`.
-This is the **primary embed channel** for 0.x — the npm package channel is not yet bootstrapped.
+This is the **primary embed channel** for zero-build pages. The npm package channel is also live (`npm install @oxpulse/chat-widget`) — use it when you already have a bundler.
 
 ### Versioned path (production — recommended)
 
@@ -21,8 +21,8 @@ verifies the file has not changed since it was built:
 
 ```html
 <script type="module"
-  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
-  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  src="https://cdn.oxpulse.chat/widget/0.22.1/index.js"
+  integrity="sha384-sP1U/QKMIBAGdoWA5BNKA/dpDdzwXLTUOGLyY5jKublrxNjpGU7QR6dMWsfRv9hZ"
   crossorigin="anonymous"></script>
 ```
 
@@ -58,7 +58,7 @@ wasm origin; the CDN URL covers both.
 ### Architecture note
 
 `cdn.oxpulse.chat` is served by Caddy `file_server` behind an nginx SNI front on the
-OxPulse infrastructure. Immutable versioned paths (`/widget/0.3.0/`) receive
+OxPulse infrastructure. Immutable versioned paths (`/widget/0.22.1/`) receive
 `Cache-Control: public, max-age=31536000, immutable`. The `latest/` symlink is served
 without `immutable`.
 
@@ -71,8 +71,8 @@ without `immutable`.
 ```html
 <!-- CDN (versioned, with SRI) — recommended -->
 <script type="module"
-  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
-  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  src="https://cdn.oxpulse.chat/widget/0.22.1/index.js"
+  integrity="sha384-sP1U/QKMIBAGdoWA5BNKA/dpDdzwXLTUOGLyY5jKublrxNjpGU7QR6dMWsfRv9hZ"
   crossorigin="anonymous"></script>
 
 <!-- Or npm + bundler -->
@@ -320,8 +320,8 @@ write token minted by your backend. The widget remains read-only by default; ena
 ```html
 <!-- 1. Load the widget (CDN or npm+bundler) -->
 <script type="module"
-  src="https://cdn.oxpulse.chat/widget/0.3.0/index.js"
-  integrity="sha384-Rduwmo6bm8airXxQcfWhaCImjnCrTltJ9NA0X35O4iUh6rrvA/3JnAp5wEmZRp9d"
+  src="https://cdn.oxpulse.chat/widget/0.22.1/index.js"
+  integrity="sha384-sP1U/QKMIBAGdoWA5BNKA/dpDdzwXLTUOGLyY5jKublrxNjpGU7QR6dMWsfRv9hZ"
   crossorigin="anonymous"></script>
 
 <!-- 2. Add the element with allow-write -->
