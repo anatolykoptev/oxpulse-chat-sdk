@@ -174,7 +174,7 @@ for (const msg of result.items) {
 >
 > | Call | Second gate |
 > |---|---|
-> | `createRoom` | **none** — the creator becomes owner |
+> | `createRoom` | **none** — the creator becomes owner, *but only if it did not list itself in `initialMembers`*: the owner row is seeded only when the caller is absent from that array, so passing yourself with `role: 'member'` silently forfeits ownership and every later `updateRoom` 403s |
 > | `updateRoom` | caller must be an active `owner` |
 > | `addMember` / `removeMember` | owner or moderator in open rooms; any active, non-banned member otherwise |
 > | `getRoom` | caller must be an *effective* member — in a room whose visibility is `open` that means anyone not banned, member row or not; in any other room it means an active member row |
@@ -215,15 +215,17 @@ await client.removeMember(room.roomId, 'user-456');
 // List the rooms this token's `sub` is a member of — NOT every room the scope reaches
 const { rooms } = await client.listRooms();
 
-// Fetch full room info. The member list is only populated for an owner or
-// moderator — everyone else, including a plain member of an open room, gets
-// `members: []` rather than a 403.
+// Fetch full room info. Whether `members` is populated depends on visibility:
+// in a `member` room (the default, and what the createRoom above produced) every
+// active non-banned member gets the full roster; in an `open` room only an owner
+// or moderator does, and everyone else gets `members: []` rather than a 403.
 const full = await client.getRoom(room.roomId);
 
 // Rename / reconfigure a room — active owner only
 await client.updateRoom(room.roomId, { title: 'Support thread #42 (closed)' });
 
-// Erase the room's message history — owner or moderator only. See the caveat below.
+// Erase the room's message history — needs owner/moderator OR a concrete
+// chat:moderate scope. See the caveat below.
 await client.deleteRoom(room.roomId);
 ```
 
@@ -271,13 +273,17 @@ Edit and delete events arrive on the SSE stream via `onMutation` in `SubscribeAr
 
 **Who may delete a message.** `deleteMessage()` needs `chat:write:<roomId>`, but that
 scope is only admission control: a plain participant may soft-delete **their own**
-messages and gets 403 on anyone else's, 404 if the message does not exist.
+messages and gets 403 on anyone else's, 404 if the message does not exist — or has
+already been soft-deleted, since the lookup carries `deleted_at IS NULL`.
 
-Those two statuses are kept distinct deliberately, and the trade is the opposite of what
-it looks like. Returning 404 for both cases would hide existence but leak *ownership* —
-the SQL matches on sender, so a 404 on a message you can see would tell you it is not
-yours. Splitting them keeps ownership private and accepts that a 403 confirms the message
-exists. Do not build enumeration defences on the assumption that a denial hides presence.
+The two statuses are kept distinct deliberately, and it is worth being precise about what
+that buys, because the server's own comment overstates it. Collapsing both to 404 would
+disclose *less*, not more: the delete matches on sender, so without the split a "not
+yours" and a genuinely-missing message look identical. Splitting them **adds** an
+existence oracle — a 403 confirms the message exists, including for ids the caller never
+saw — in exchange for an error a client can act on. It buys clarity, not privacy:
+ownership is already public, since `list()` returns `senderUid` for every message. Do not
+build enumeration defences on the assumption that a denial hides presence.
 
 Privilege comes from either an `owner`/`moderator` row **or** a `chat:moderate` scope —
 and on this route the scope form is the permissive one: a single `chat:moderate:*` grant
