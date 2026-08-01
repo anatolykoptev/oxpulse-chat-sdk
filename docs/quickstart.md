@@ -169,15 +169,16 @@ for (const msg of result.items) {
 > a per-room grant such as `rooms:write:room-1` does **not** satisfy them. The scope is
 > app-wide and cannot be narrowed to one room.
 >
-> That scope is admission control, not authorization. Each mutating call applies a
-> second, per-room check against the caller's own member row:
+> That scope is admission control, not authorization. Each call below applies a second,
+> per-room check — for most of them against the caller's own member row, though
+> `listRooms` instead scopes its query and returns fewer rows rather than a 403:
 >
 > | Call | Second gate |
 > |---|---|
 > | `createRoom` | **none** — the creator becomes owner, *but only if it did not list itself in `initialMembers`*: the owner row is seeded only when the caller is absent from that array, so passing yourself with `role: 'member'` silently forfeits ownership and every later `updateRoom` 403s |
 > | `updateRoom` | caller must be an active `owner` |
 > | `addMember` / `removeMember` | owner or moderator in open rooms; any active, non-banned member otherwise |
-> | `getRoom` | caller must be an *effective* member — in a room whose visibility is `open` that means anyone not banned, member row or not; in any other room it means an active member row |
+> | `getRoom` | caller must be an *effective* member — in a room whose visibility is `open` that means anyone not banned, member row or not; in any other room it means an active, **non-banned** member row (the row can be active and still carry `role: 'banned'`) |
 > | `listRooms` | results are scoped to the caller's own memberships |
 >
 > `deleteRoom()` is deliberately **absent** from this table: despite the name it is a
@@ -187,7 +188,9 @@ for (const msg of result.items) {
 > Two consequences worth planning around:
 >
 > 1. **The unbounded power is room creation.** A `rooms:write:*` holder can create
->    unlimited rooms. It cannot silently rewrite an arbitrary existing room — reusing a
+>    rooms without bound *in number* — there is no room-count cap, though the write
+>    routes are rate-limited and a billing quota can return 402. It cannot silently
+>    rewrite an arbitrary existing room — reusing a
 >    `roomId` that belongs to someone else is rejected 409, not taken over.
 > 2. **A "service" token will 403 on almost everything.** The gates key on the JWT `sub`,
 >    not on the token having been minted server-side. If `sub` holds no member rows you
@@ -224,8 +227,9 @@ const full = await client.getRoom(room.roomId);
 // Rename / reconfigure a room — active owner only
 await client.updateRoom(room.roomId, { title: 'Support thread #42 (closed)' });
 
-// Erase the room's message history — needs owner/moderator OR a concrete
-// chat:moderate scope. See the caveat below.
+// Erase the room's message history — needs chat:write:<roomId> FIRST, then
+// owner/moderator or a concrete chat:moderate scope. A rooms:write:* token
+// fails at the first gate. See the caveat below.
 await client.deleteRoom(room.roomId);
 ```
 
@@ -286,10 +290,11 @@ ownership is already public, since `list()` returns `senderUid` for every messag
 build enumeration defences on the assumption that a denial hides presence.
 
 Privilege comes from either an `owner`/`moderator` row **or** a `chat:moderate` scope —
-and on this route the scope form is the permissive one: a single `chat:moderate:*` grant
-authorizes deleting any message in **every** room of the app. The stricter concrete-room
-form is required only by the room-log erase. The delete itself is soft: the message is
-tombstoned, not removed.
+and on this route the scope form is the permissive one, so `chat:moderate:*` makes the
+caller a moderator in every room *the same token can already write to*. It does not
+stand alone: `chat:write:<roomId>` is still checked first and a `moderate` verb cannot
+satisfy it. The stricter concrete-room form is required only by the room-log erase. The
+delete itself is soft: the message is tombstoned, not removed.
 
 ## Optimistic send (outbox)
 
