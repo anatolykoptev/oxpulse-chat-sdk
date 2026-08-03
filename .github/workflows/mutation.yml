@@ -22,7 +22,7 @@ permissions:
 jobs:
   mutation:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
+    timeout-minutes: 20
     continue-on-error: true
 
     strategy:
