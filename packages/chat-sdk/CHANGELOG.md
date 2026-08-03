@@ -1,5 +1,12 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.1.2
+
+### Patch Changes
+
+- Updated dependencies [cd19dc8]
+  - @oxpulse/wire-codec@0.6.0
+
 ## 3.1.1
 
 ### Patch Changes
