@@ -5,3 +5,8 @@ dist-cdn/
 .DS_Store
 
 .claude/
+
+# Stryker mutation testing artifacts
+.stryker-tmp/
+reports/mutation/
+**/reports/stryker-incremental.json

@@ -1,0 +1,63 @@
+name: mutation
+# Stryker mutation testing — non-blocking baseline (continue-on-error).
+# Runs on PRs that touch source files in any package. Serial per package
+# (concurrency: 1 in stryker.config.json) to avoid OOM on the 4-core runner.
+# After baseline, raise thresholds.break and remove continue-on-error.
+on:
+  pull_request:
+    paths:
+      - "packages/*/src/**/*.ts"
+      - "packages/*/stryker.config.json"
+      - "packages/*/vitest.stryker.config.mjs"
+      - ".github/workflows/mutation.yml"
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      # Run Stryker per package — serial, each package is an independent scope.
+      # The root has no stryker config; we iterate the packages.
+      - name: Run Stryker mutation testing (all packages)
+        run: |
+          for pkg in packages/*/; do
+            if [ -f "$pkg/stryker.config.json" ]; then
+              echo "::group::Stryker: $pkg"
+              (cd "$pkg" && pnpm stryker) || echo "::warning::Stryker failed for $pkg (non-blocking baseline)"
+              echo "::endgroup::"
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stryker-reports
+          path: packages/*/reports/mutation/
+          retention-days: 14
