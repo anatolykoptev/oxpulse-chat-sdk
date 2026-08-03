@@ -38,7 +38,7 @@ import {
   type WireCap,
 } from '../codec.ts';
 import { ALL_DICTS } from '../dicts.ts';
-import { ROOM_EPOCH, KIND_TO_BYTE } from '../envelope-v2.ts';
+import { ROOM_EPOCH, KIND_TO_BYTE, canEncodeAsV3, toV3, fromV3 } from '../envelope-v2.ts';
 
 beforeAll(async () => {
   await ensureWireCodecReady();
@@ -595,6 +595,637 @@ describe('Phase 2.F.A — envelope-v2 (0xC8 magic, compact id/ts/k)', () => {
     const a = encode(env, { cbor: true, zstd: true });
     const b = encode(env, { cbor: true, zstd: true, envelope: 1 });
     expect(a).toEqual(b);
+  });
+});
+
+// ─── Phase 2.F.B — envelope-v3 (peer-index compaction) ───────────────────────
+
+describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () => {
+  const sampleEnv = (over: Partial<Record<string, unknown>> = {}) => ({
+    v: 1,
+    id: '01234567-89ab-cdef-0123-456789abcdef',
+    ts: ROOM_EPOCH + 60_000,
+    from: 'a'.repeat(64),
+    kind: 'chat-msg',
+    body: 'Привет',
+    ...over,
+  });
+
+  // Simulated ratchet peer_index_map: uint8 → 64-char hex pubkey.
+  const PEER_MAP: Record<number, string> = {
+    0: 'a'.repeat(64),
+    1: 'b'.repeat(64),
+    42: 'c'.repeat(64),
+  };
+  const EPOCH = 1;
+  const resolvePeer = (_epoch: number, idx: number) => PEER_MAP[idx];
+
+  it('roundtrip dictless (0xCA 0x00 <peerIndex>)', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xCA);
+    expect(bytes[1]).toBe(0x00);
+    expect(bytes[2]).toBe(0x00);
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+    expect(decoded.from).toBe(env.from);
+    expect(decoded.kind).toBe(env.kind);
+    expect(decoded.body).toBe(env.body);
+    expect(decoded.id).toBe(env.id);
+    expect(decoded.ts).toBe(env.ts);
+    expect(decoded.v).toBe(1);
+  });
+
+  it('roundtrip with each shipped dict (0xCA 0x01/0x02/0x03 <peerIndex>)', () => {
+    const cases: Array<{ dict: 'zstd-dict-ru-v1' | 'zstd-dict-fa-v1' | 'zstd-dict-en-v1'; id: number; body: string }> = [
+      { dict: 'zstd-dict-ru-v1', id: 0x01, body: 'Привет, как дела? Уже еду к тебе, буду через 20 минут.' },
+      { dict: 'zstd-dict-fa-v1', id: 0x02, body: 'سلام، حالت چطوره؟ من تا ده دقیقه دیگه میرسم.' },
+      { dict: 'zstd-dict-en-v1', id: 0x03, body: 'hey, on my way — be there in 10 min' },
+    ];
+    for (const c of cases) {
+      const env = sampleEnv({ body: c.body });
+      const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 1, dict: c.dict });
+      expect(bytes[0]).toBe(0xCA);
+      expect(bytes[1]).toBe(c.id);
+      expect(bytes[2]).toBe(0x01);
+      const decoded = decode(bytes, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+      expect(decoded.from).toBe(PEER_MAP[1]);
+      expect(decoded.body).toBe(c.body);
+    }
+  });
+
+  it('v3 frames are smaller than v2 (peer-index replaces 64-char hex)', () => {
+    const inputs = ['ок', 'Привет', 'Да'];
+    for (const body of inputs) {
+      const env = sampleEnv({ body });
+      const v2 = encode(env, { cbor: true, zstd: true, envelope: 2 });
+      const v3 = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+      // eslint-disable-next-line no-console
+      console.log(`[2FB-size] body="${body}": v2=${v2.length}B v3=${v3.length}B Δ=${v2.length - v3.length}B`);
+      expect(v3.length).toBeLessThan(v2.length);
+    }
+  });
+
+  it('negotiateEnvelopeVersion: 3 when all peers advertise envelope-v3, 2 when v2-only, 1 otherwise', () => {
+    const mineV3: readonly WireCap[] = ALL_CAPS;
+    const mineV2: readonly WireCap[] = ['cbor', 'cbor+zstd', 'envelope-v2'];
+    const mineV1: readonly WireCap[] = ['cbor', 'cbor+zstd'];
+    // v3 universal → 3
+    expect(negotiateEnvelopeVersion(mineV3, [['cbor', 'cbor+zstd', 'envelope-v2', 'envelope-v3']])).toBe(3);
+    expect(negotiateEnvelopeVersion(mineV3, [['envelope-v3'], ['envelope-v2', 'envelope-v3']])).toBe(3);
+    // v3 not universal but v2 universal → 2
+    expect(negotiateEnvelopeVersion(mineV3, [['cbor', 'cbor+zstd', 'envelope-v2']])).toBe(2);
+    expect(negotiateEnvelopeVersion(mineV3, [['envelope-v2', 'envelope-v3'], ['envelope-v2']])).toBe(2);
+    // neither universal → 1
+    expect(negotiateEnvelopeVersion(mineV3, [['cbor', 'cbor+zstd']])).toBe(1);
+    // I lack v3 but have v2, peers have v3 → 2 (I can't encode v3, fall to v2)
+    expect(negotiateEnvelopeVersion(mineV2, [['envelope-v3']])).toBe(1);
+    // I lack both → 1
+    expect(negotiateEnvelopeVersion(mineV1, [['envelope-v3']])).toBe(1);
+    // Solo → 1
+    expect(negotiateEnvelopeVersion(mineV3, [])).toBe(1);
+  });
+
+  it('decoder without resolvePeer returns from=undefined + preserves f', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 42 });
+    const decoded = decode(bytes) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(42);
+    expect(decoded.kind).toBe(env.kind);
+  });
+
+  it('decoder with resolvePeer but missing epoch → from=undefined (safe drop)', () => {
+    // Crypto-critical: if epoch is not passed, the SDK MUST NOT call
+    // resolvePeer — it would resolve against the wrong epoch's map (UKS).
+    // Instead, from=undefined + f preserved → caller drops the frame.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(0);
+  });
+
+  it('decoder threads epoch from DecodeOpts to resolvePeer', () => {
+    // Verify the SDK passes the epoch from DecodeOpts to resolvePeer —
+    // not just ignores it. The resolver checks the epoch matches.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 5 });
+    const resolvePeerEpochAware = (epoch: number, idx: number) =>
+      epoch === 42 ? 'd'.repeat(64) : undefined;
+    const decoded = decode(bytes, { epoch: 42, resolvePeer: resolvePeerEpochAware }) as Record<string, unknown>;
+    expect(decoded.from).toBe('d'.repeat(64));
+    // Wrong epoch → unresolved
+    const decoded2 = decode(bytes, { epoch: 99, resolvePeer: resolvePeerEpochAware }) as Record<string, unknown>;
+    expect(decoded2.from).toBeUndefined();
+    expect(decoded2.f).toBe(5);
+  });
+
+  it('decoder with resolvePeer returning undefined (peer not in map) → from=undefined + f preserved', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 99 });
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: () => undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(99);
+  });
+
+  it('decoder of 0xCA with unknown enum byte returns forward-compat sentinel', async () => {
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const bogus = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 60_000,
+      f: 0,
+      k: 0xFF,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(bogus);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    const result = decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+    expect(result.kind).toBe('chat-unknown-future');
+    expect(result.raw).toBe(0xFF);
+    expect(result.from).toBe(PEER_MAP[0]);
+  });
+
+  it('rejects 0xCA frame whose compressed length exceeds the cap', () => {
+    const big = new Uint8Array(70 * 1024);
+    big[0] = 0xCA;
+    big[1] = 0x00;
+    big[2] = 0x00;
+    expect(() => decode(asWireBytes(big))).toThrow(/exceeds compressed-size cap/);
+  });
+
+  it('rejects 0xCA frame with bomb-shape FCS = 4 GiB', () => {
+    const bomb = new Uint8Array([
+      0x28, 0xb5, 0x2f, 0xfd,
+      0xc0, 0x40,
+      0xff, 0xff, 0xff, 0xff,
+      0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00,
+    ]);
+    const wire = new Uint8Array(3 + bomb.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(bomb, 3);
+    expect(() => decode(asWireBytes(wire))).toThrow(/Frame_Content_Size .* exceeds cap/);
+  });
+
+  it('rejects truncated 0xCA frame (< 3 header bytes)', () => {
+    const wire = new Uint8Array([0xCA, 0x00]);
+    expect(() => decode(asWireBytes(wire))).toThrow(/truncated zstd-v3 frame/);
+  });
+
+  it('encoder falls back to v2 when peerIndex is missing', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('encoder falls back to v2 when peerIndex is out of uint8 range', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 256 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('encoder falls back to v2 when from is missing (v2 does not require from)', () => {
+    const env = sampleEnv();
+    delete (env as Record<string, unknown>).from;
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    // v3 requires `from` (to replace with peer-index). v2 does NOT require from
+    // (it keeps from as-is, and missing from is a valid v2 frame). So fallback
+    // goes v3→v2 (0xC8), not v3→v1.
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('encoder falls back to v1 when kind is unknown', () => {
+    const env = sampleEnv({ kind: 'future-kind' });
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC6);
+  });
+
+  it('preserves unknown fields through v3 round-trip', () => {
+    const env = sampleEnv({ futureField: 'survive', nested: { a: 1, b: [1, 2, 3] } });
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+    expect(decoded.futureField).toBe('survive');
+    expect(decoded.from).toBe(env.from);
+  });
+
+  it('decoder accepts mixed-roster v3/v2/v1 frames (decoder branches independent of negotiation)', () => {
+    const env = sampleEnv();
+    const v1 = encode(env, { cbor: true, zstd: true, envelope: 1 });
+    const v2 = encode(env, { cbor: true, zstd: true, envelope: 2 });
+    const v3 = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(decode(v1, { epoch: EPOCH, resolvePeer })).toEqual(env);
+    expect(decode(v2, { epoch: EPOCH, resolvePeer })).toEqual(env);
+    const d3 = decode(v3, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+    expect(d3.from).toBe(env.from);
+    expect(d3.kind).toBe(env.kind);
+    expect(d3.body).toBe(env.body);
+  });
+
+  it('0xCA magic byte is distinct from 0xC8 (v2) and 0xC9 (mesh-bundle)', () => {
+    expect(0xCA).not.toBe(0xC8);
+    expect(0xCA).not.toBe(0xC9);
+    // Encode a v3 frame and verify the magic byte.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xCA);
+  });
+
+  // ─── Mutation-testing hardening ──────────────────────────────────────────
+  // These tests kill mutants that roundtrip tests miss because fromV3
+  // reconstructs the v1 shape, masking internal encoding errors.
+
+  it('toV3 removes `from` from the wire CBOR (not just replaces it)', async () => {
+    // If a mutant keeps `from` in the v3 CBOR, the frame is larger than
+    // necessary but still roundtrips. Decode the raw CBOR to verify `from`
+    // is absent and `f` is present.
+    const { decode: cborDecode } = await import('cbor-x/index-no-eval');
+    const { decompress } = await import('@bokuweb/zstd-wasm');
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 7 });
+    // Strip 0xCA + dict-id + peer-index (3 bytes), decompress, decode CBOR.
+    const compressed = bytes.subarray(3);
+    const cborBytes = decompress(compressed);
+    const raw = cborDecode(cborBytes) as Record<string, unknown>;
+    expect(raw.v).toBe(3);
+    expect(raw.f).toBe(7);
+    expect(raw.k).toBe(KIND_TO_BYTE['chat-msg']);
+    expect(raw.from).toBeUndefined();
+    expect(raw.id).toBeInstanceOf(Uint8Array);
+    expect((raw.id as Uint8Array).length).toBe(16);
+  });
+
+  it('toV3 sets v=3 in the wire CBOR (magic byte is authoritative but v must match)', async () => {
+    // If a mutant changes out.v = 3 to out.v = 1, the magic byte still
+    // routes to fromV3, and fromV3 doesn't check v. The frame roundtrips
+    // correctly. But the wire shape is wrong — a future decoder that checks
+    // v for validation would break. Verify v=3 in the raw CBOR.
+    const { decode: cborDecode } = await import('cbor-x/index-no-eval');
+    const { decompress } = await import('@bokuweb/zstd-wasm');
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    const compressed = bytes.subarray(3);
+    const cborBytes = decompress(compressed);
+    const raw = cborDecode(cborBytes) as Record<string, unknown>;
+    expect(raw.v).toBe(3);
+  });
+
+  it('outer peer-index byte (bytes[2]) matches the CBOR f field', async () => {
+    // The outer peer-index byte is currently write-only in decode (we read
+    // `f` from the CBOR). But it MUST match the CBOR `f` for future
+    // quick-filter routers. Verify they agree.
+    const { decode: cborDecode } = await import('cbor-x/index-no-eval');
+    const { decompress } = await import('@bokuweb/zstd-wasm');
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 42 });
+    expect(bytes[2]).toBe(42);
+    const compressed = bytes.subarray(3);
+    const cborBytes = decompress(compressed);
+    const raw = cborDecode(cborBytes) as Record<string, unknown>;
+    expect(raw.f).toBe(42);
+    expect(raw.f).toBe(bytes[2]);
+  });
+
+  // ─── Boundary tests (mutation-testing gap killers) ───────────────────────
+  // These kill surviving mutants identified by stryker: off-by-one on
+  // peerIndex range, missing negative/non-integer checks, envelope=2
+  // ignoring peerIndex, and fromV3 boundary values.
+
+  it('peerIndex=255 (max uint8) produces 0xCA, not fallback', () => {
+    // Kills the mutant `peerIndex > 0xff` → `peerIndex >= 0xff` (off-by-one
+    // that would reject 255).
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
+    expect(bytes[0]).toBe(0xCA);
+    expect(bytes[2]).toBe(255);
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: (_e, i) => i === 255 ? 'z'.repeat(64) : undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBe('z'.repeat(64));
+    // f is deleted on successful resolution (only preserved on failure).
+    expect(decoded.f).toBeUndefined();
+  });
+
+  it('peerIndex=-1 (negative) falls back to v2', () => {
+    // Kills the mutant that removes the `peerIndex < 0` check.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: -1 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('peerIndex=1.5 (non-integer) falls back to v2', () => {
+    // Kills the mutant that removes the `!Number.isInteger(peerIndex)` check.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 1.5 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('envelope=2 with peerIndex=0 produces 0xC8, not 0xCA', () => {
+    // Kills the mutant `opts.envelope === 3` → `true` on the useV3 line.
+    // With the mutant, envelope=2 + peerIndex=0 + v3-encodable value would
+    // produce 0xCA instead of 0xC8.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 2, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('envelope=1 with peerIndex=0 produces 0xC6, not 0xCA', () => {
+    // Same mutant killer as above, for envelope=1.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 1, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC6);
+  });
+
+  it('fromV3 with f=255 resolves correctly (boundary)', () => {
+    // Kills the mutant `f > 0xff` → `f >= 0xff` in fromV3 (off-by-one).
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: (_e, i) => i === 255 ? 'w'.repeat(64) : undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBe('w'.repeat(64));
+    // f deleted on successful resolution.
+    expect(decoded.f).toBeUndefined();
+  });
+
+  it('fromV3 with f=255 and failed resolution preserves f (boundary)', () => {
+    // Same boundary, but resolution fails → f must be preserved for diagnostics.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: () => undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(255);
+  });
+
+  it('fromV3 with ts at uint32 boundary (0 delta) resolves correctly', async () => {
+    // Kills the mutant `tsDelta < 0` → `tsDelta <= 0` in fromV3 (off-by-one
+    // that would reject ts=ROOM_EPOCH, delta=0).
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 0, // delta = 0 (boundary)
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    const result = decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+    expect(result.ts).toBe(ROOM_EPOCH); // 0 + ROOM_EPOCH
+    expect(result.from).toBe(PEER_MAP[0]);
+  });
+
+  // ─── Forged-frame boundary tests (kill remaining stryker survivors) ──────
+
+  it('encoder falls back to v2 when from is empty string', () => {
+    // Kills the mutant that removes the `o.from.length === 0` check in
+    // canEncodeAsV3. With the mutant, empty from → v3 frame with f but no
+    // from to replace. Without the mutant, empty from → v2 fallback.
+    const env = sampleEnv({ from: '' });
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('fromV3 rejects forged frame with f=256 (out of uint8 range)', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the f check in
+    // fromV3. With the mutant, any f value is accepted. Without, f=256
+    // throws. CBOR can encode integers > 255, so this is a realistic forge.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 60_000,
+      f: 256, // out of uint8 range
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/f must be uint8/);
+  });
+
+  it('fromV3 rejects forged frame with f=-1 (negative)', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the f < 0 check.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 60_000,
+      f: -1,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/f must be uint8/);
+  });
+
+  it('fromV3 rejects forged frame with non-Uint8Array id', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the id check.
+    // With the mutant, any id type is accepted → bytesToUuid crashes or
+    // produces garbage. Without, it throws cleanly.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: 'not-a-uint8array', // wrong type
+      ts: 60_000,
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/id must be 16-byte Uint8Array/);
+  });
+
+  it('fromV3 accepts forged frame with tsDelta=0xffffffff (max uint32 boundary)', async () => {
+    // Kills the `tsDelta > 0xffff_ffff` → `tsDelta >= 0xffff_ffff` mutant
+    // (off-by-one that would reject the max valid value).
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 0xffff_ffff, // max uint32 delta
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    const result = decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
+    expect(result.ts).toBe(ROOM_EPOCH + 0xffff_ffff);
+  });
+
+  it('fromV3 rejects forged frame with tsDelta=0x100000000 (just over max uint32)', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the tsDelta > 0xffffffff
+    // check. With the mutant, any ts is accepted.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 0x1_0000_0000, // just over max uint32
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/ts out of uint32 window/);
+  });
+});
+
+// ─── Direct toV3/fromV3 unit tests (kill defensive-check mutants) ───────────
+// These call toV3/fromV3 directly with invalid inputs, bypassing the
+// canEncodeAsV3 gate. The encode() path never reaches these checks because
+// canEncodeAsV3 filters first — but the checks exist as a public-API
+// safety net, so mutants that disable them must die.
+
+describe('Phase 2.F.B — toV3/fromV3 direct unit tests', () => {
+  const validEnv = () => ({
+    v: 1,
+    id: '01234567-89ab-cdef-0123-456789abcdef',
+    ts: ROOM_EPOCH + 60_000,
+    from: 'a'.repeat(64),
+    kind: 'chat-msg',
+    body: 'hi',
+  });
+
+  describe('toV3 defensive checks', () => {
+    it('throws on peerIndex=-1 (direct call, bypasses canEncodeAsV3)', () => {
+      expect(() => toV3(validEnv(), -1)).toThrow(/peerIndex must be uint8/);
+    });
+
+    it('throws on peerIndex=256 (direct call)', () => {
+      expect(() => toV3(validEnv(), 256)).toThrow(/peerIndex must be uint8/);
+    });
+
+    it('throws on peerIndex=1.5 (non-integer, direct call)', () => {
+      expect(() => toV3(validEnv(), 1.5)).toThrow(/peerIndex must be uint8/);
+    });
+
+    it('throws on unknown kind (direct call, bypasses canEncodeAsV3)', () => {
+      const env = { ...validEnv(), kind: 'future-kind' };
+      expect(() => toV3(env, 0)).toThrow(/not a known wire kind/);
+    });
+
+    it('accepts peerIndex=0 and peerIndex=255 (boundary)', () => {
+      expect(() => toV3(validEnv(), 0)).not.toThrow();
+      expect(() => toV3(validEnv(), 255)).not.toThrow();
+    });
+  });
+
+  describe('fromV3 defensive checks', () => {
+    it('throws on non-Uint8Array id (direct call)', () => {
+      const v3 = { v: 3, id: 'bad', ts: 60_000, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/id must be 16-byte Uint8Array/);
+    });
+
+    it('throws on Uint8Array id with wrong length (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(15), ts: 60_000, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/id must be 16-byte Uint8Array/);
+    });
+
+    it('throws on ts=-1 (negative, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: -1, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/ts out of uint32 window/);
+    });
+
+    it('throws on ts=0x100000000 (over max uint32, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 0x1_0000_0000, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/ts out of uint32 window/);
+    });
+
+    it('accepts ts=0 and ts=0xffffffff (boundary, direct call)', () => {
+      const v3a = { v: 3, id: new Uint8Array(16), ts: 0, f: 0, k: 0x01, body: 'x' };
+      const v3b = { v: 3, id: new Uint8Array(16), ts: 0xffff_ffff, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3a, () => 'x'.repeat(64))).not.toThrow();
+      expect(() => fromV3(v3b, () => 'x'.repeat(64))).not.toThrow();
+    });
+
+    it('throws on f=-1 (negative, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: -1, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on f=256 (over max uint8, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 256, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on f="x" (non-number, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 'x', k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on f=1.5 (non-integer, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 1.5, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on missing k (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 0, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/missing or non-numeric kind byte/);
+    });
+
+    it('throws on non-numeric k (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 0, k: 'x', body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/missing or non-numeric kind byte/);
+    });
+
+    it('returns chat-unknown-future for unknown k byte (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 0, k: 0xFF, body: 'x' };
+      const result = fromV3(v3, () => 'x'.repeat(64));
+      expect(result.kind).toBe('chat-unknown-future');
+      expect(result.raw).toBe(0xFF);
+    });
   });
 });
 

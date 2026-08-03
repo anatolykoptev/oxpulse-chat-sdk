@@ -52,6 +52,7 @@ import {
   type DictName,
 } from "./dicts";
 import { canEncodeAsV2, toV2, fromV2 } from "./envelope-v2";
+import { canEncodeAsV3, toV3, fromV3 } from "./envelope-v2";
 import { WireCodecError } from "./errors.js";
 import { asWireBytes, asHttpWireBytes } from "./brands";
 import type { WireBytes, HttpWireBytes } from "./brands";
@@ -65,7 +66,8 @@ export type WireCap =
   | "zstd-dict-ru-v1"
   | "zstd-dict-fa-v1"
   | "zstd-dict-en-v1"
-  | "envelope-v2";
+  | "envelope-v2"
+  | "envelope-v3";
 
 /** All capabilities this build can encode AND decode.
  *  Note: dict caps are advertised statically (build-time). At encode time, if the
@@ -81,6 +83,7 @@ export const ALL_CAPS: readonly WireCap[] = [
   "zstd-dict-fa-v1",
   "zstd-dict-en-v1",
   "envelope-v2",
+  "envelope-v3",
 ] as const;
 
 export interface EncodeOpts {
@@ -92,8 +95,43 @@ export interface EncodeOpts {
   dict?: DictName;
   /** Phase 2.F.A: envelope wire-shape version. 2 → 0xC8 magic + compact id/ts/k.
    *  Requires zstd=true. Falls back to v1 (0xC6/0xC7) per-frame if value isn't
-   *  v2-encodable (unknown kind, non-UUID id, ts outside uint32 window). Default: 1. */
-  envelope?: 1 | 2;
+   *  v2-encodable (unknown kind, non-UUID id, ts outside uint32 window). Default: 1.
+   *
+   *  Phase 2.F.B: envelope=3 → 0xCA magic + compact id/ts/k/f (peer-index).
+   *  Requires zstd=true AND peerIndex. Falls back to v2 (then v1) per-frame if
+   *  value isn't v3-encodable (unknown kind, non-UUID id, ts outside uint32
+   *  window, missing/empty `from`, peerIndex out of uint8 range). */
+  envelope?: 1 | 2 | 3;
+  /** Phase 2.F.B: uint8 peer-index for envelope-v3. Required when envelope=3.
+   *  Must be 0..255. Ignored for envelope=1/2. */
+  peerIndex?: number;
+}
+
+/** Phase 2.F.B: decode options. `resolvePeer` maps the uint8 peer-index (the
+ *  `f` field in envelope-v3) back to the 64-char hex pubkey string via the
+ *  ratchet's epoch-specific peer_index_map.
+ *
+ *  **Epoch binding (crypto-critical):** `resolvePeer` receives the `epoch`
+ *  from `DecodeOpts.epoch` — the SDK threads it to the resolver. The caller
+ *  MUST pass the AEAD-authenticated epoch from the SFrame header (NOT the
+ *  current epoch) to prevent cross-epoch sender misattribution (UKS). If
+ *  `epoch` is missing, v3 frames get `from=undefined` (safe drop). See
+ *  RFC 9420 §4.1.1: each epoch has a distinct ratchet tree, and the sender's
+ *  leaf index is bound to that epoch's tree.
+ *
+ *  If a v3 frame is decoded without a resolver, or the resolver returns
+ *  undefined (peer not in map, epoch wiped), `from` is set to undefined
+ *  and `f` is preserved on the output for caller diagnostics — the caller
+ *  MUST drop such frames (same as chat-unknown-future).
+ *
+ *  Backward-compatible: decode(bytes) with no opts works for all pre-v3 magic
+ *  bytes (JSON / CBOR / 0xC6 / 0xC7 / 0xC8 / 0xC9). */
+export interface DecodeOpts {
+  /** AEAD-authenticated epoch from the SFrame header. Required for v3
+   *  peer-index resolution — passed to `resolvePeer(epoch, peerIndex)`.
+   *  Pre-v3 frames ignore this. */
+  epoch?: number;
+  resolvePeer?: (epoch: number, peerIndex: number) => string | undefined;
 }
 
 const enc = new TextEncoder();
@@ -109,6 +147,10 @@ const ZSTD_MAGIC_PREFIX = 0xc6; // cbor + zstd (dictless), envelope-v1
 const ZSTD_DICT_MAGIC_PREFIX = 0xc7; // cbor + zstd + shared-dict, envelope-v1 (Phase 2.E.B)
 // Phase 2.F.A: envelope-v2. Magic byte + 1-byte dict-id (0x00 = dictless).
 const ZSTD_V2_MAGIC_PREFIX = 0xc8;
+// Phase 2.F.B: envelope-v3 (peer-index compaction). Magic byte + 1-byte dict-id
+// (0x00 = dictless) + 1-byte peer-index. Same zstd-of-CBOR payload shape as v2
+// but with `f` (uint8) replacing `from` (64-char hex string) inside the CBOR.
+const ZSTD_V3_MAGIC_PREFIX = 0xca;
 // MESH_BUNDLE_MAGIC_V1 / MESH_BUNDLE_VERSION live in `./mesh-bundle.ts` and are
 // re-exported from `./index.ts`. The duplicates here were dead.
 const ZSTD_LEVEL = 3;
@@ -295,10 +337,47 @@ export function encode(value: unknown, opts: EncodeOpts = {}): WireBytes {
         "wire-codec.encode: zstd not initialized — await ensureWireCodecReady() first",
       );
     }
+    // Phase 2.F.B: per-frame opportunistic v3 envelope (peer-index compaction).
+    // If envelope=3 AND peerIndex is a valid uint8 AND the value is v3-encodable,
+    // emit 0xCA. Falls back to v2 (then v1) per-frame — no protocol break.
+    const useV3 =
+      opts.envelope === 3 &&
+      typeof opts.peerIndex === "number" &&
+      canEncodeAsV3(value, opts.peerIndex);
+    // v2 fallback: when envelope=3 fails v3 checks, try v2 (if value is
+    // v2-encodable). Also handles envelope=2 directly.
+    const useV2 =
+      !useV3 &&
+      (opts.envelope === 2 || opts.envelope === 3) &&
+      canEncodeAsV2(value);
+    if (useV3) {
+      const cborSrc = toV3(value as Record<string, unknown>, opts.peerIndex!);
+      const cborBytes = sharedCborEncoder.encode(cborSrc);
+      // 0xCA + dict-id byte (0x00 = dictless) + peer-index byte.
+      let compressed: Uint8Array;
+      let dictId = 0x00;
+      if (opts.dict !== undefined) {
+        const dictBytes = getDictBytes(opts.dict);
+        const id = DICT_NAME_TO_ID[opts.dict];
+        if (dictBytes !== undefined && id !== undefined && cctxHandle !== null) {
+          compressed = compressUsingDict(cctxHandle, cborBytes, dictBytes, ZSTD_LEVEL);
+          dictId = id;
+        } else {
+          compressed = zstdCompress(cborBytes, ZSTD_LEVEL);
+        }
+      } else {
+        compressed = zstdCompress(cborBytes, ZSTD_LEVEL);
+      }
+      const out = new Uint8Array(3 + compressed.length);
+      out[0] = ZSTD_V3_MAGIC_PREFIX;
+      out[1] = dictId;
+      out[2] = opts.peerIndex! & 0xff;
+      out.set(compressed, 3);
+      return asWireBytes(out);
+    }
     // Phase 2.F.A: per-frame opportunistic v2 envelope. If the value can't fit
     // the v2 shape (unknown kind / bad id / ts out of window) we silently emit
     // v1 — byte-identical to pre-2.F.A output, no protocol break.
-    const useV2 = opts.envelope === 2 && canEncodeAsV2(value);
     const cborSrc = useV2 ? toV2(value as Record<string, unknown>) : value;
     const cborBytes = sharedCborEncoder.encode(cborSrc);
     if (useV2) {
@@ -351,13 +430,76 @@ export function encode(value: unknown, opts: EncodeOpts = {}): WireBytes {
   return asWireBytes(enc.encode(JSON.stringify(value)));
 }
 
-export function decode(bytes: WireBytes): unknown {
+export function decode(bytes: WireBytes, opts?: DecodeOpts): unknown {
   if (bytes.length === 0) {
     throw new WireCodecError("EMPTY_INPUT", "wire-codec.decode: empty input");
   }
   const first = bytes[0];
   if (first === JSON_OPEN_BRACE || first === JSON_OPEN_BRACKET) {
     return JSON.parse(dec.decode(bytes));
+  }
+  if (first === ZSTD_V3_MAGIC_PREFIX) {
+    if (!zstdReady) {
+      throw new WireCodecError(
+        "ZSTD_NOT_INITIALIZED",
+        "wire-codec.decode: zstd-v3 payload received before ensureWireCodecReady()",
+      );
+    }
+    if (bytes.length < 3) {
+      throw new WireCodecError(
+        "ZSTD_DECODE_FAILED",
+        "wire-codec.decode: truncated zstd-v3 frame (need 3 header bytes)",
+      );
+    }
+    if (bytes.length - 3 > ZSTD_MAX_COMPRESSED_BYTES) {
+      throw new WireCodecError(
+        "COMPRESSED_TOO_LARGE",
+        "wire-codec.decode: zstd-v3 payload exceeds compressed-size cap",
+        { limit: ZSTD_MAX_COMPRESSED_BYTES, size: bytes.length - 3 },
+      );
+    }
+    const dictId = bytes[1]!;
+    // bytes[2] = peer-index — carried on the wire for observer consistency
+    // with the SFrame header, but the authoritative `f` is INSIDE the CBOR
+    // envelope (ciphertext). The outer byte is informational; fromV3 reads
+    // `f` from the decoded CBOR.
+    const compressed = bytes.subarray(3);
+    validateZstdFrame(compressed, ZSTD_MAX_DECOMPRESSED_BYTES);
+    let cborBytes: Uint8Array;
+    if (dictId === 0x00) {
+      cborBytes = zstdDecompress(compressed, ZSTD_DECOMPRESS_OPTS);
+    } else {
+      const dictName = DICT_ID_TO_NAME[dictId];
+      if (dictName === undefined) {
+        throw new WireCodecError(
+          "UNKNOWN_DICT_ID",
+          `wire-codec.decode: unknown zstd dict-id 0x${dictId.toString(16)} (v3)`,
+          { dictId },
+        );
+      }
+      const dictBytes = getDictBytes(dictName);
+      if (dictBytes === undefined) {
+        throw new WireCodecError(
+          "DICT_NOT_LOADED",
+          `wire-codec.decode: dict ${dictName} not loaded — protocol error (negotiation should have prevented this)`,
+        );
+      }
+      if (dctxHandle === null) {
+        throw new WireCodecError(
+          "ZSTD_NOT_INITIALIZED",
+          "wire-codec.decode: zstd-v3 dict path not initialized",
+        );
+      }
+      cborBytes = decompressUsingDict(dctxHandle, compressed, dictBytes, ZSTD_DECOMPRESS_OPTS);
+    }
+    if (cborBytes.length > ZSTD_MAX_DECOMPRESSED_BYTES) {
+      throw new WireCodecError(
+        "DECOMPRESSED_TOO_LARGE",
+        "wire-codec.decode: zstd-v3 payload exceeds decompressed-size cap",
+        { limit: ZSTD_MAX_DECOMPRESSED_BYTES, size: cborBytes.length },
+      );
+    }
+    return fromV3(cborDecode(cborBytes) as Record<string, unknown>, opts?.epoch, opts?.resolvePeer);
   }
   if (first === ZSTD_MAGIC_PREFIX) {
     if (!zstdReady) {
@@ -581,6 +723,7 @@ export function capToOpts(cap: WireCap): EncodeOpts {
     case "zstd-dict-fa-v1":
     case "zstd-dict-en-v1":
     case "envelope-v2":
+    case "envelope-v3":
       // Dict + envelope caps imply cbor+zstd; selection layered via opts.dict / opts.envelope.
       return { cbor: true, zstd: true };
   }
@@ -741,14 +884,27 @@ export function decodeHttpBody(bytes: HttpWireBytes | string): unknown {
 }
 
 
+/**
+ * Phase 2.F.A + 2.F.B: pick envelope version. Returns the highest version that
+ * WE support AND every peer in the room advertises. Solo room → 1 (defensive:
+ * same shape as negotiateDict's solo-pin in useBurnerChat). Mirrors negotiateDict
+ * shape so the caller wires both with the same triggers.
+ *
+ * Preference: v3 > v2 > 1. v3 requires 'envelope-v3' in mine AND every peer.
+ * Falls back to v2 if v3 isn't universal, then to 1 if v2 isn't universal.
+ */
 export function negotiateEnvelopeVersion(
   mine: readonly WireCap[],
   othersCaps: readonly (readonly WireCap[])[],
-): 1 | 2 {
-  if (!mine.includes("envelope-v2")) return 1;
+): 1 | 2 | 3 {
   if (othersCaps.length === 0) return 1;
-  for (const peer of othersCaps) {
-    if (!peer.includes("envelope-v2" as WireCap)) return 1;
+  // v3: requires 'envelope-v3' in mine AND every peer.
+  if (mine.includes("envelope-v3")) {
+    if (othersCaps.every((peer) => peer.includes("envelope-v3" as WireCap))) return 3;
   }
-  return 2;
+  // v2: requires 'envelope-v2' in mine AND every peer.
+  if (mine.includes("envelope-v2")) {
+    if (othersCaps.every((peer) => peer.includes("envelope-v2" as WireCap))) return 2;
+  }
+  return 1;
 }
