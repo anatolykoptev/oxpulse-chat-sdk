@@ -3,6 +3,9 @@
   "_comment": "Mutation testing for @oxpulse/chat-sdk — client, sframe, outbox, roster, crypto chain. Non-blocking baseline. Crypto-critical: sframe.ts, room-decrypt-chain.ts are highest value.",
   "packageManager": "pnpm",
   "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vitest.stryker.config.mjs"
+  },
   "plugins": ["@stryker-mutator/vitest-runner", "@stryker-mutator/typescript-checker"],
   "checkers": ["typescript"],
   "tsconfigFile": "tsconfig.json",

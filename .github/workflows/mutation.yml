@@ -1,8 +1,8 @@
 name: mutation
 # Stryker mutation testing — non-blocking baseline (continue-on-error).
-# Runs on PRs that touch source files in any package. Serial per package
-# (concurrency: 1 in stryker.config.json) to avoid OOM on the 4-core runner.
-# After baseline, raise thresholds.break and remove continue-on-error.
+# Matrix: each package runs in its own job (parallel), serial mutants within
+# each (concurrency: 1 in stryker.config.json). After baseline, raise
+# thresholds.break and remove continue-on-error.
 on:
   pull_request:
     paths:
@@ -22,12 +22,26 @@ permissions:
 jobs:
   mutation:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 15
     continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - chat-sdk
+          - chat-widget
+          - crypto-primitives
+          - intro-protocol
+          - url-contract
+          - voice-core
+          - wire-codec
 
     steps:
       - uses: actions/checkout@v5
 
+      # NO `version:` — pnpm/action-setup@v6 auto-detects from packageManager
+      # in package.json. Specifying both causes ERR_PNPM_BAD_PM_VERSION.
       - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v5
@@ -41,21 +55,13 @@ jobs:
       - name: Build workspace
         run: pnpm build
 
-      # Run Stryker per package — serial, each package is an independent scope.
-      # The root has no stryker config; we iterate the packages.
-      - name: Run Stryker mutation testing (all packages)
-        run: |
-          for pkg in packages/*/; do
-            if [ -f "$pkg/stryker.config.json" ]; then
-              echo "::group::Stryker: $pkg"
-              (cd "$pkg" && pnpm stryker) || echo "::warning::Stryker failed for $pkg (non-blocking baseline)"
-              echo "::endgroup::"
-            fi
-          done
+      - name: Run Stryker (${{ matrix.package }})
+        working-directory: packages/${{ matrix.package }}
+        run: pnpm stryker || echo "::warning::Stryker failed for ${{ matrix.package }} (non-blocking baseline)"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: stryker-reports
-          path: packages/*/reports/mutation/
+          name: stryker-report-${{ matrix.package }}
+          path: packages/${{ matrix.package }}/reports/mutation/
           retention-days: 14
