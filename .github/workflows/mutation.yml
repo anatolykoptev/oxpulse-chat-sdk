@@ -1,19 +1,19 @@
 name: mutation
-# Stryker mutation testing — non-blocking baseline (continue-on-error).
+# Stryker mutation testing — nightly baseline (continue-on-error).
 # Matrix: each package runs in its own job (parallel), serial mutants within
 # each (concurrency: 1 in stryker.config.json). After baseline, raise
 # thresholds.break and remove continue-on-error.
+# Nightly only — mutation testing is too heavy for per-PR (chat-sdk: 2462
+# mutants ~17 min, chat-widget scoped to security-critical files). preflight
+# remains the per-PR gate; mutation scores are collected overnight.
 on:
-  pull_request:
-    paths:
-      - "packages/*/src/**/*.ts"
-      - "packages/*/stryker.config.json"
-      - "packages/*/vitest.stryker.config.mjs"
-      - ".github/workflows/mutation.yml"
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC nightly
+  workflow_dispatch: {}   # manual trigger for baseline collection
 
 concurrency:
-  group: mutation-${{ github.ref }}
-  cancel-in-progress: true
+  group: mutation-nightly
+  cancel-in-progress: false
 
 permissions:
   contents: read
