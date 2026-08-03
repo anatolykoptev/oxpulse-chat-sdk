@@ -45,14 +45,14 @@ beforeEach(async () => {
 describe('SFrame unseal — AbortSignal honoring preserves durable-replay integrity (SEC-CR-47-01)', () => {
   it('an already-aborted unseal rejects WITHOUT recording — the frame stays re-deliverable', async () => {
     const key = await makeHkdfKey();
-    const sender = createSFrameProvider({ getKey: async () => key });
-    const receiver = createSFrameProvider({ getKey: async () => key });
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayNamespace: 'abort-test' });
+    const receiver = createSFrameProvider({ getKey: async () => key, durableReplayNamespace: 'abort-test' });
     const frame = await sender.seal(pt('approve payment'), CTX);
 
     const ac = new AbortController();
     ac.abort(new Error('unseal deadline exceeded (5000ms)'));
 
-    // Entry throwIfAborted fires before parseHeader/check/decrypt/accept.
+    // Entry throwIfAborted fires before the library's check/decrypt/accept.
     await expect(receiver.unseal(frame, CTX, ac.signal)).rejects.toThrow(/deadline/);
 
     // Records nothing → a fresh unseal of the SAME frame SUCCEEDS (not a replay-reject).
@@ -63,8 +63,8 @@ describe('SFrame unseal — AbortSignal honoring preserves durable-replay integr
 
   it('a non-aborted signal still records the accepted CTR — a genuine replay is still rejected', async () => {
     const key = await makeHkdfKey();
-    const sender = createSFrameProvider({ getKey: async () => key });
-    const receiver = createSFrameProvider({ getKey: async () => key });
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayNamespace: 'abort-test' });
+    const receiver = createSFrameProvider({ getKey: async () => key, durableReplayNamespace: 'abort-test' });
     const frame = await sender.seal(pt('hello world'), CTX);
 
     const ac = new AbortController(); // constructed but NEVER aborted
@@ -80,8 +80,8 @@ describe('SFrame unseal — AbortSignal honoring preserves durable-replay integr
 
   it('backward-compat: a 2-arg unseal call (no signal) is unchanged', async () => {
     const key = await makeHkdfKey();
-    const sender = createSFrameProvider({ getKey: async () => key });
-    const receiver = createSFrameProvider({ getKey: async () => key });
+    const sender = createSFrameProvider({ getKey: async () => key, durableReplayNamespace: 'abort-test' });
+    const receiver = createSFrameProvider({ getKey: async () => key, durableReplayNamespace: 'abort-test' });
     const frame = await sender.seal(pt('no signal'), CTX);
 
     const view = await receiver.unseal(frame, CTX); // no 3rd arg
