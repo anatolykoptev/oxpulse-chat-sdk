@@ -10,11 +10,17 @@
  *
  * ## Threat model (see design doc § C)
  * - Defends: message confidentiality, integrity, in-session sender auth, replay —
- *   including cross-reload replay when IndexedDB is available (SEC-CR-003, see
- *   `durableReplay` below and `sframe-replay.ts`).
+ *   including cross-reload replay when IndexedDB is available (SEC-CR-003).
  * - Does NOT defend: forward secrecy, post-compromise security, sender deniability
  *   (symmetric key — any room member can forge messages from any other member).
  *   Document loudly in production SDKs.
+ *
+ * ## Durable replay (SEC-CR-003, CWE-294)
+ * Since sframe-ratchet 0.5.5 the library's `createChatProvider` builds the
+ * `DurableReplayGuard` internally when `durableReplay` is not `false` and a
+ * `namespace` is supplied. The SDK delegates entirely to the library — the
+ * former custom 365-line guard (`sframe-replay.ts`) was removed and the
+ * `namespace` / `durableReplayWindow` options are forwarded transparently.
  *
  * @example
  * ```ts
@@ -29,10 +35,8 @@
  * ```
  */
 
-import { createChatProvider, ReplayError } from 'sframe-ratchet/chat';
+import { createChatProvider } from 'sframe-ratchet/chat';
 import type { ChatSFrameProvider, ChatProviderOptions } from 'sframe-ratchet/chat';
-import { parseHeader } from 'sframe-ratchet';
-import { DurableReplayGuard } from './sframe-replay.js';
 import type { CryptoProvider, SealContext } from './types.js';
 
 export interface SFrameProviderOptions {
@@ -64,52 +68,57 @@ export interface SFrameProviderOptions {
   replayWindow?: number;
 
   /**
-   * SEC-CR-003: durable, cross-reload receiver-side anti-replay. Default ON when IndexedDB is
-   * available, graceful no-op (with a one-time warning) when it is not (SSR / Node / private
-   * mode). Set `false` to opt out entirely (reverts to the library's session-scoped in-memory
-   * window only).
+   * SEC-CR-003: durable, cross-reload receiver-side anti-replay. Default ON when a
+   * `durableReplayNamespace` (or `ctrKeyspace`) is provided, graceful no-op (with a
+   * one-time warning) when IndexedDB / Web Locks is unavailable (SSR / Node / private
+   * mode / legacy Safari <15.4). Set `false` to opt out entirely (reverts to the
+   * library's session-scoped in-memory window only).
+   *
+   * Since sframe-ratchet 0.5.5 the guard is built inside `createChatProvider`; the
+   * SDK forwards `namespace` and `durableReplayWindow` transparently.
    */
   durableReplay?: boolean;
-  /** Namespace for the durable replay IDB store (isolate independent key-spaces). Default `'default'`. */
+  /**
+   * Namespace for the durable replay IDB store (isolate independent key-spaces).
+   * Required when `durableReplay` is not `false`. Defaults to `ctrKeyspace` when
+   * available, otherwise the caller (SDKChatClient) supplies `appId`.
+   */
   durableReplayNamespace?: string;
   /**
-   * Durable replay window size (distinct recent CTRs per sender per room). Default 1024
-   * (equals `replayWindow`'s default, so both windows are configured EQUAL out of the box).
-   *
-   * SEC-CR-189-02: recommend `durableReplayWindow <= replayWindow`. `DurableReplayGuard`'s
-   * in-memory cache can — for a bounded stretch while a persist write is still in flight
-   * (`sframe-replay.ts`'s `persisting` guard) — release a not-yet-durable CTR slightly earlier
-   * than the window would normally evict it. This is harmless at equal windows: sframe-ratchet's
-   * OWN in-memory `replayWindow` (same CTR span) still rejects that in-session replay as a
-   * backstop. Setting `durableReplayWindow` LARGER than `replayWindow` removes that backstop for
-   * the extra span and reopens a narrow in-session replay window. Both currently default to
-   * 1024 and no caller in this repo sets them independently.
+   * Durable replay window size (distinct recent CTRs per sender per room). Default
+   * equals `replayWindow` (1024). Must be <= `replayWindow` — the in-memory window
+   * is the session-scoped backstop, and a durable window LARGER than the in-memory
+   * one removes that backstop for the extra span (reopens a narrow in-session replay
+   * window). `0` disables the durable window (mirrors `replayWindow: 0`).
    */
   durableReplayWindow?: number;
 }
 
 /**
- * Create a CryptoProvider backed by sframe-ratchet v0.5 chat-mode.
+ * Create a CryptoProvider backed by sframe-ratchet v0.5.5+ chat-mode.
  *
- * The returned provider is stateful (key cache + replay window).
+ * The returned provider is stateful (key cache + replay window + durable guard).
  * Create one instance per application lifetime and share it across
  * SDKChatClient instances that share the same key space.
  */
 export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvider {
-  const chatOpts: ChatProviderOptions = { getKey: opts.getKey };
-  if (opts.ctrStrategy !== undefined) chatOpts.ctrStrategy = opts.ctrStrategy;
-  if (opts.ctrKeyspace !== undefined) chatOpts.ctrKeyspace = opts.ctrKeyspace;
-  if (opts.replayWindow !== undefined) chatOpts.replayWindow = opts.replayWindow;
+  // Resolve the durable-replay namespace: explicit override → ctrKeyspace → none.
+  // sframe-ratchet 0.5.5+ enables durable replay by default when a namespace is
+  // provided (issue #41). The library constructs and owns the DurableReplayGuard
+  // internally — the SDK no longer ships its own.
+  const namespace = opts.durableReplayNamespace ?? opts.ctrKeyspace;
+  const chatOpts: ChatProviderOptions = {
+    getKey: opts.getKey,
+    ...(opts.ctrStrategy !== undefined ? { ctrStrategy: opts.ctrStrategy } : {}),
+    ...(opts.ctrKeyspace !== undefined ? { ctrKeyspace: opts.ctrKeyspace } : {}),
+    ...(opts.replayWindow !== undefined ? { replayWindow: opts.replayWindow } : {}),
+    ...(opts.durableReplay !== undefined ? { durableReplay: opts.durableReplay } : {}),
+    ...(namespace !== undefined ? { namespace } : {}),
+    ...(opts.durableReplayWindow !== undefined
+      ? { durableReplayWindow: opts.durableReplayWindow }
+      : {}),
+  };
   const inner: ChatSFrameProvider = createChatProvider(chatOpts);
-
-  // SEC-CR-003: durable receiver-side replay window (default-on when IndexedDB is available).
-  const durable =
-    opts.durableReplay === false
-      ? null
-      : new DurableReplayGuard({
-          namespace: opts.durableReplayNamespace ?? opts.ctrKeyspace,
-          window: opts.durableReplayWindow,
-        });
 
   return {
     async seal(plaintext: ArrayBuffer, ctx: SealContext): Promise<ArrayBuffer> {
@@ -119,58 +128,20 @@ export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvide
       return result.slice().buffer as ArrayBuffer;
     },
 
-    async unseal(sealed: ArrayBuffer, ctx: SealContext, signal?: AbortSignal): Promise<ArrayBuffer> {
+    async unseal(
+      sealed: ArrayBuffer,
+      ctx: SealContext,
+      signal?: AbortSignal,
+    ): Promise<ArrayBuffer> {
       // Advisory cancel: the SDK aborts `signal` at its per-row deadline. We honor it
       // (stdlib signal.throwIfAborted) only at await boundaries, because the AES-GCM
-      // decrypt below is atomic and non-cancellable; an abort during a slow durable step
-      // skips the uncancellable decrypt entirely. Once the decrypt has run we complete
-      // normally (record + return) — a valid plaintext is never discarded.
+      // decrypt inside inner.unseal is atomic and non-cancellable; an abort during a
+      // slow durable pre-check skips the uncancellable decrypt entirely. Once the
+      // decrypt has run we complete normally (record + return) — a valid plaintext is
+      // never discarded.
       signal?.throwIfAborted();
       const bytes = new Uint8Array(sealed);
-
-      // Durable pre-filter: reject a CTR we have already accepted (survives page reload).
-      // The CTR lives in the RFC 9605 header, which is the AEAD AAD — authenticated, so the
-      // server cannot alter it without failing AEAD below.
-      //
-      // check() and accept() straddle the `await inner.unseal` — the same check→decrypt→accept
-      // ordering the library uses internally. Cross-reload replay protection is NOT weakened by
-      // this gap: hydrate() atomically loads the persisted CTRs before any check() resolves, so a
-      // frame accepted in a PRIOR session is always rejected regardless of concurrency.
-      //
-      // The only residual is a within-session double-DELIVERY of one genuinely-new CTR when two
-      // unseal() calls for the same frame overlap. subscribe()/reconnect route every unseal
-      // through the client's per-room serial decrypt chain (SEC-CR-14-01), so they are safe;
-      // list() (client.ts) calls unseal() directly in a loop and is NOT serialized, so two
-      // concurrent list() calls could double-deliver. This is a pre-existing, idempotent residual
-      // tracked as tasks #44 / #42 (the public-list()-off-chain concurrency case) — not a replay
-      // bypass introduced here.
-      let ctr: bigint | undefined;
-      if (durable?.available) {
-        try {
-          ctr = parseHeader(bytes).ctr;
-        } catch {
-          // Malformed header — let inner.unseal raise the authoritative parse/AEAD error.
-        }
-        if (ctr !== undefined && !(await durable.check(ctx.roomId, ctx.senderUid, ctr))) {
-          throw new ReplayError(
-            `sframe-chat: durable cross-reload replay detected ` +
-              `(ctr=${ctr}, room=${ctx.roomId}, uid=${ctx.senderUid})`,
-            { roomId: ctx.roomId, senderUid: ctx.senderUid, ctr },
-          );
-        }
-      }
-
-      // Last chance to skip the (uncancellable) decrypt if the deadline fired during
-      // the durable pre-filter above. Past this point the decrypt runs to completion.
-      signal?.throwIfAborted();
       const result = await inner.unseal(bytes, ctx);
-
-      // Record ONLY after a successful AEAD verify (inner.unseal throws on forgery / in-session
-      // replay), so a forged frame with a novel CTR cannot poison the durable window.
-      if (durable?.available && ctr !== undefined) {
-        await durable.accept(ctx.roomId, ctx.senderUid, ctr);
-      }
-
       // Same pooled-buffer defense: materialize a fresh isolated ArrayBuffer.
       return result.slice().buffer as ArrayBuffer;
     },
