@@ -4,7 +4,7 @@
 export { WireCodecError } from './errors.ts';
 export type { WireCodecErrorCode, WireCodecErrorDetail, WireCodecErrorDetails } from './errors.ts';
 
-export type { WireCap, EncodeOpts } from './codec.ts';
+export type { WireCap, EncodeOpts, DecodeOpts } from './codec.ts';
 export {
   ALL_CAPS,
   ensureWireCodecReady,
@@ -44,6 +44,9 @@ export {
   canEncodeAsV2,
   toV2,
   fromV2,
+  canEncodeAsV3,
+  toV3,
+  fromV3,
 } from './envelope-v2.ts';
 
 export {

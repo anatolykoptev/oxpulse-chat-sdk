@@ -191,3 +191,145 @@ export function fromV2(v2: Record<string, unknown>): Record<string, unknown> {
 	out.kind = BYTE_TO_KIND[k];
 	return out;
 }
+
+// ─── Phase 2.F.B: envelope-v3 (peer-index compaction) ──────────────────────
+//
+// v3 = v2 + replace `from` (64-char hex pubkey string) with `f` (uint8 peer-index).
+// Saves ~64 B/msg — the biggest single wire win in the ladder.
+//
+// Wire shape (inside zstd-of-CBOR):
+//   v3: { v: 3, id: Uint8Array(16), ts: uint32, f: uint8, k: uint8, body, ... }
+//
+// The peer-index is the same uint8 already carried in the SFrame AEAD header
+// (| epoch(4B) | peerIndex(1B) | ctr(8B) |). v3 just mirrors it INSIDE the
+// ciphertext envelope so the receiver can resolve `from` → pubkey via the
+// ratchet's peer_index_map without the 64-char hex string on the wire.
+//
+// A passive observer already sees peerIndex in the SFrame header (cleartext
+// AAD), so mirroring it inside the ciphertext leaks nothing new.
+//
+// Forward-compat: fromV3 with an unknown `f` (peer not in map) returns
+// `from: undefined` + `f: byte` so the caller can log + drop without crashing.
+// This mirrors the v2 `chat-unknown-future` sentinel pattern.
+
+/**
+ * Decision: an event is v3-encodable iff it is v2-encodable AND `from` is a
+ * non-empty string (the pubkey to replace) AND peerIndex is a valid uint8.
+ * Misses → caller falls back to v2 (then v1) for THIS frame.
+ * Opportunistic per-frame, no wire break.
+ */
+export function canEncodeAsV3(
+	value: unknown,
+	peerIndex: number,
+): value is Record<string, unknown> {
+	if (!canEncodeAsV2(value)) return false;
+	if (!Number.isInteger(peerIndex) || peerIndex < 0 || peerIndex > 0xff) return false;
+	const o = value as Record<string, unknown>;
+	if (typeof o.from !== "string" || o.from.length === 0) return false;
+	return true;
+}
+
+/**
+ * Transform v1-shape → v3-shape (compact, with peer-index).
+ *
+ * Caller MUST check canEncodeAsV3 first. Throws if kind is not in KIND_TO_BYTE
+ * or peerIndex is out of uint8 range.
+ *
+ * Replaces:
+ *   `from: string` (64-char hex pubkey) → `f: uint8` (peer-index)
+ *   `id: string` (UUID) → `id: Uint8Array(16)` (same as v2)
+ *   `ts: number` (abs ms) → `ts: uint32` (same as v2)
+ *   `kind: string` → `k: uint8` (same as v2)
+ */
+export function toV3(
+	v1: Record<string, unknown>,
+	peerIndex: number,
+): Record<string, unknown> {
+	if (!Number.isInteger(peerIndex) || peerIndex < 0 || peerIndex > 0xff) {
+		throw new Error(`wire-envelope-v3: peerIndex must be uint8 (0..255), got ${peerIndex}`);
+	}
+	const kByte = KIND_TO_BYTE[v1.kind as string];
+	if (kByte === undefined) {
+		throw new Error(`wire-envelope-v3: cannot encode kind "${String(v1.kind)}" — not a known wire kind`);
+	}
+	const idBytes = uuidToBytes(v1.id as string)!;
+	const out: Record<string, unknown> = { ...v1 };
+	delete out.kind;
+	delete out.from;
+	out.v = 3;
+	out.id = idBytes;
+	out.ts = (v1.ts as number) - ROOM_EPOCH;
+	out.k = kByte;
+	out.f = peerIndex;
+	return out;
+}
+
+/**
+ * Transform v3-shape → v1-shape (consumer-facing).
+ *
+ * `resolvePeer` maps the uint8 peer-index back to the 64-char hex pubkey
+ * string via the ratchet's peer_index_map. If resolvePeer is not provided or
+ * returns undefined (peer not in map — e.g. race during roster transition),
+ * `from` is set to undefined and `f` is preserved so the caller can log + drop.
+ *
+ * Forward-compat: unknown `k` byte → `kind: "chat-unknown-future"` + `raw: k`
+ * (same sentinel as fromV2).
+ *
+ * Still throws for structurally invalid frames (bad id, out-of-window ts,
+ * missing/non-numeric kind) — same as fromV2.
+ */
+export function fromV3(
+	v3: Record<string, unknown>,
+	resolvePeer?: (peerIndex: number) => string | undefined,
+): Record<string, unknown> {
+	const k = v3.k;
+	const idRaw = v3.id;
+	const f = v3.f;
+	if (!(idRaw instanceof Uint8Array) || idRaw.length !== 16) {
+		throw new Error("wire-envelope-v3: id must be 16-byte Uint8Array");
+	}
+	const tsDelta = v3.ts;
+	if (typeof tsDelta !== "number" || !Number.isFinite(tsDelta) || tsDelta < 0 || tsDelta > 0xffff_ffff) {
+		throw new Error("wire-envelope-v3: ts out of uint32 window");
+	}
+	if (typeof f !== "number" || !Number.isInteger(f) || f < 0 || f > 0xff) {
+		throw new Error(`wire-envelope-v3: f must be uint8 (0..255), got ${typeof f === "number" ? f : typeof f}`);
+	}
+
+	const out: Record<string, unknown> = { ...v3 };
+	delete out.k;
+	delete out.f;
+	out.v = 1;
+	out.id = bytesToUuid(idRaw);
+	out.ts = tsDelta + ROOM_EPOCH;
+
+	// Resolve peer-index → pubkey. If resolver is missing or returns undefined
+	// (peer not in map), leave `from` undefined + preserve `f` for caller
+	// diagnostics. The caller MUST handle `from === undefined` by dropping the
+	// frame (same as chat-unknown-future).
+	if (resolvePeer !== undefined) {
+		const pubkey = resolvePeer(f);
+		if (pubkey !== undefined) {
+			out.from = pubkey;
+		} else {
+			out.from = undefined;
+			out.f = f; // preserve for caller diagnostics
+		}
+	} else {
+		out.from = undefined;
+		out.f = f; // preserve for caller diagnostics
+	}
+
+	if (typeof k !== "number") {
+		throw new Error(`wire-envelope-v3: fromV3: missing or non-numeric kind byte (got ${typeof k})`);
+	}
+	if (BYTE_TO_KIND[k] === undefined) {
+		// Forward-compat: numeric k byte allocated in a future protocol version.
+		out.kind = "chat-unknown-future";
+		out.raw = k;
+		return out;
+	}
+
+	out.kind = BYTE_TO_KIND[k];
+	return out;
+}

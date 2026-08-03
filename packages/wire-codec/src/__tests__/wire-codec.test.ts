@@ -598,6 +598,222 @@ describe('Phase 2.F.A — envelope-v2 (0xC8 magic, compact id/ts/k)', () => {
   });
 });
 
+// ─── Phase 2.F.B — envelope-v3 (peer-index compaction) ───────────────────────
+
+describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () => {
+  const sampleEnv = (over: Partial<Record<string, unknown>> = {}) => ({
+    v: 1,
+    id: '01234567-89ab-cdef-0123-456789abcdef',
+    ts: ROOM_EPOCH + 60_000,
+    from: 'a'.repeat(64),
+    kind: 'chat-msg',
+    body: 'Привет',
+    ...over,
+  });
+
+  // Simulated ratchet peer_index_map: uint8 → 64-char hex pubkey.
+  const PEER_MAP: Record<number, string> = {
+    0: 'a'.repeat(64),
+    1: 'b'.repeat(64),
+    42: 'c'.repeat(64),
+  };
+  const resolvePeer = (idx: number) => PEER_MAP[idx];
+
+  it('roundtrip dictless (0xCA 0x00 <peerIndex>)', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xCA);
+    expect(bytes[1]).toBe(0x00);
+    expect(bytes[2]).toBe(0x00);
+    const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+    expect(decoded.from).toBe(env.from);
+    expect(decoded.kind).toBe(env.kind);
+    expect(decoded.body).toBe(env.body);
+    expect(decoded.id).toBe(env.id);
+    expect(decoded.ts).toBe(env.ts);
+    expect(decoded.v).toBe(1);
+  });
+
+  it('roundtrip with each shipped dict (0xCA 0x01/0x02/0x03 <peerIndex>)', () => {
+    const cases: Array<{ dict: 'zstd-dict-ru-v1' | 'zstd-dict-fa-v1' | 'zstd-dict-en-v1'; id: number; body: string }> = [
+      { dict: 'zstd-dict-ru-v1', id: 0x01, body: 'Привет, как дела? Уже еду к тебе, буду через 20 минут.' },
+      { dict: 'zstd-dict-fa-v1', id: 0x02, body: 'سلام، حالت چطوره؟ من تا ده دقیقه دیگه میرسم.' },
+      { dict: 'zstd-dict-en-v1', id: 0x03, body: 'hey, on my way — be there in 10 min' },
+    ];
+    for (const c of cases) {
+      const env = sampleEnv({ body: c.body });
+      const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 1, dict: c.dict });
+      expect(bytes[0]).toBe(0xCA);
+      expect(bytes[1]).toBe(c.id);
+      expect(bytes[2]).toBe(0x01);
+      const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+      expect(decoded.from).toBe(PEER_MAP[1]);
+      expect(decoded.body).toBe(c.body);
+    }
+  });
+
+  it('v3 frames are smaller than v2 (peer-index replaces 64-char hex)', () => {
+    const inputs = ['ок', 'Привет', 'Да'];
+    for (const body of inputs) {
+      const env = sampleEnv({ body });
+      const v2 = encode(env, { cbor: true, zstd: true, envelope: 2 });
+      const v3 = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+      // eslint-disable-next-line no-console
+      console.log(`[2FB-size] body="${body}": v2=${v2.length}B v3=${v3.length}B Δ=${v2.length - v3.length}B`);
+      expect(v3.length).toBeLessThan(v2.length);
+    }
+  });
+
+  it('negotiateEnvelopeVersion: 3 when all peers advertise envelope-v3, 2 when v2-only, 1 otherwise', () => {
+    const mineV3: readonly WireCap[] = ALL_CAPS;
+    const mineV2: readonly WireCap[] = ['cbor', 'cbor+zstd', 'envelope-v2'];
+    const mineV1: readonly WireCap[] = ['cbor', 'cbor+zstd'];
+    // v3 universal → 3
+    expect(negotiateEnvelopeVersion(mineV3, [['cbor', 'cbor+zstd', 'envelope-v2', 'envelope-v3']])).toBe(3);
+    expect(negotiateEnvelopeVersion(mineV3, [['envelope-v3'], ['envelope-v2', 'envelope-v3']])).toBe(3);
+    // v3 not universal but v2 universal → 2
+    expect(negotiateEnvelopeVersion(mineV3, [['cbor', 'cbor+zstd', 'envelope-v2']])).toBe(2);
+    expect(negotiateEnvelopeVersion(mineV3, [['envelope-v2', 'envelope-v3'], ['envelope-v2']])).toBe(2);
+    // neither universal → 1
+    expect(negotiateEnvelopeVersion(mineV3, [['cbor', 'cbor+zstd']])).toBe(1);
+    // I lack v3 but have v2, peers have v3 → 2 (I can't encode v3, fall to v2)
+    expect(negotiateEnvelopeVersion(mineV2, [['envelope-v3']])).toBe(1);
+    // I lack both → 1
+    expect(negotiateEnvelopeVersion(mineV1, [['envelope-v3']])).toBe(1);
+    // Solo → 1
+    expect(negotiateEnvelopeVersion(mineV3, [])).toBe(1);
+  });
+
+  it('decoder without resolvePeer returns from=undefined + preserves f', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 42 });
+    const decoded = decode(bytes) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(42);
+    expect(decoded.kind).toBe(env.kind);
+  });
+
+  it('decoder with resolvePeer returning undefined (peer not in map) → from=undefined + f preserved', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 99 });
+    const decoded = decode(bytes, { resolvePeer: () => undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(99);
+  });
+
+  it('decoder of 0xCA with unknown enum byte returns forward-compat sentinel', async () => {
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const bogus = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 60_000,
+      f: 0,
+      k: 0xFF,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(bogus);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    const result = decode(asWireBytes(wire), { resolvePeer }) as Record<string, unknown>;
+    expect(result.kind).toBe('chat-unknown-future');
+    expect(result.raw).toBe(0xFF);
+    expect(result.from).toBe(PEER_MAP[0]);
+  });
+
+  it('rejects 0xCA frame whose compressed length exceeds the cap', () => {
+    const big = new Uint8Array(70 * 1024);
+    big[0] = 0xCA;
+    big[1] = 0x00;
+    big[2] = 0x00;
+    expect(() => decode(asWireBytes(big))).toThrow(/exceeds compressed-size cap/);
+  });
+
+  it('rejects 0xCA frame with bomb-shape FCS = 4 GiB', () => {
+    const bomb = new Uint8Array([
+      0x28, 0xb5, 0x2f, 0xfd,
+      0xc0, 0x40,
+      0xff, 0xff, 0xff, 0xff,
+      0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00,
+    ]);
+    const wire = new Uint8Array(3 + bomb.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(bomb, 3);
+    expect(() => decode(asWireBytes(wire))).toThrow(/Frame_Content_Size .* exceeds cap/);
+  });
+
+  it('rejects truncated 0xCA frame (< 3 header bytes)', () => {
+    const wire = new Uint8Array([0xCA, 0x00]);
+    expect(() => decode(asWireBytes(wire))).toThrow(/truncated zstd-v3 frame/);
+  });
+
+  it('encoder falls back to v2 when peerIndex is missing', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('encoder falls back to v2 when peerIndex is out of uint8 range', () => {
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 256 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('encoder falls back to v2 when from is missing (v2 does not require from)', () => {
+    const env = sampleEnv();
+    delete (env as Record<string, unknown>).from;
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    // v3 requires `from` (to replace with peer-index). v2 does NOT require from
+    // (it keeps from as-is, and missing from is a valid v2 frame). So fallback
+    // goes v3→v2 (0xC8), not v3→v1.
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('encoder falls back to v1 when kind is unknown', () => {
+    const env = sampleEnv({ kind: 'future-kind' });
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC6);
+  });
+
+  it('preserves unknown fields through v3 round-trip', () => {
+    const env = sampleEnv({ futureField: 'survive', nested: { a: 1, b: [1, 2, 3] } });
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+    expect(decoded.futureField).toBe('survive');
+    expect(decoded.from).toBe(env.from);
+  });
+
+  it('decoder accepts mixed-roster v3/v2/v1 frames (decoder branches independent of negotiation)', () => {
+    const env = sampleEnv();
+    const v1 = encode(env, { cbor: true, zstd: true, envelope: 1 });
+    const v2 = encode(env, { cbor: true, zstd: true, envelope: 2 });
+    const v3 = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(decode(v1, { resolvePeer })).toEqual(env);
+    expect(decode(v2, { resolvePeer })).toEqual(env);
+    const d3 = decode(v3, { resolvePeer }) as Record<string, unknown>;
+    expect(d3.from).toBe(env.from);
+    expect(d3.kind).toBe(env.kind);
+    expect(d3.body).toBe(env.body);
+  });
+
+  it('0xCA magic byte is distinct from 0xC8 (v2) and 0xC9 (mesh-bundle)', () => {
+    expect(0xCA).not.toBe(0xC8);
+    expect(0xCA).not.toBe(0xC9);
+    // Encode a v3 frame and verify the magic byte.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xCA);
+  });
+});
+
 // FOLLOWUPS A9 — canonicalizeEnvelope produces byte-identical CBOR for two
 // equivalent objects whose keys were inserted in different orders. Required
 // when a future code path takes a hash over wire bytes (dedup / idempotency
