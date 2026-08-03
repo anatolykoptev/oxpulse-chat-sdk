@@ -867,6 +867,99 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     expect(raw.f).toBe(42);
     expect(raw.f).toBe(bytes[2]);
   });
+
+  // ─── Boundary tests (mutation-testing gap killers) ───────────────────────
+  // These kill surviving mutants identified by stryker: off-by-one on
+  // peerIndex range, missing negative/non-integer checks, envelope=2
+  // ignoring peerIndex, and fromV3 boundary values.
+
+  it('peerIndex=255 (max uint8) produces 0xCA, not fallback', () => {
+    // Kills the mutant `peerIndex > 0xff` → `peerIndex >= 0xff` (off-by-one
+    // that would reject 255).
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
+    expect(bytes[0]).toBe(0xCA);
+    expect(bytes[2]).toBe(255);
+    const decoded = decode(bytes, { resolvePeer: (i) => i === 255 ? 'z'.repeat(64) : undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBe('z'.repeat(64));
+    // f is deleted on successful resolution (only preserved on failure).
+    expect(decoded.f).toBeUndefined();
+  });
+
+  it('peerIndex=-1 (negative) falls back to v2', () => {
+    // Kills the mutant that removes the `peerIndex < 0` check.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: -1 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('peerIndex=1.5 (non-integer) falls back to v2', () => {
+    // Kills the mutant that removes the `!Number.isInteger(peerIndex)` check.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 1.5 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('envelope=2 with peerIndex=0 produces 0xC8, not 0xCA', () => {
+    // Kills the mutant `opts.envelope === 3` → `true` on the useV3 line.
+    // With the mutant, envelope=2 + peerIndex=0 + v3-encodable value would
+    // produce 0xCA instead of 0xC8.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 2, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('envelope=1 with peerIndex=0 produces 0xC6, not 0xCA', () => {
+    // Same mutant killer as above, for envelope=1.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 1, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC6);
+  });
+
+  it('fromV3 with f=255 resolves correctly (boundary)', () => {
+    // Kills the mutant `f > 0xff` → `f >= 0xff` in fromV3 (off-by-one).
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
+    const decoded = decode(bytes, { resolvePeer: (i) => i === 255 ? 'w'.repeat(64) : undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBe('w'.repeat(64));
+    // f deleted on successful resolution.
+    expect(decoded.f).toBeUndefined();
+  });
+
+  it('fromV3 with f=255 and failed resolution preserves f (boundary)', () => {
+    // Same boundary, but resolution fails → f must be preserved for diagnostics.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
+    const decoded = decode(bytes, { resolvePeer: () => undefined }) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(255);
+  });
+
+  it('fromV3 with ts at uint32 boundary (0 delta) resolves correctly', async () => {
+    // Kills the mutant `tsDelta < 0` → `tsDelta <= 0` in fromV3 (off-by-one
+    // that would reject ts=ROOM_EPOCH, delta=0).
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 0, // delta = 0 (boundary)
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    const result = decode(asWireBytes(wire), { resolvePeer }) as Record<string, unknown>;
+    expect(result.ts).toBe(ROOM_EPOCH); // 0 + ROOM_EPOCH
+    expect(result.from).toBe(PEER_MAP[0]);
+  });
 });
 
 // FOLLOWUPS A9 — canonicalizeEnvelope produces byte-identical CBOR for two
