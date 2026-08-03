@@ -35,7 +35,7 @@ const HEX = '0123456789abcdef';
 
 function randomHex(rng: () => number, len: number): string {
 	const chars: string[] = new Array(len);
-	for (let i = 0; i < len; i++) chars[i] = HEX[rng() & 0xf];
+	for (let i = 0; i < len; i++) chars[i] = HEX[rng() & 0xf]!;
 	return chars.join('');
 }
 

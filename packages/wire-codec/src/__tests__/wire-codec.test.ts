@@ -812,6 +812,61 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
     expect(bytes[0]).toBe(0xCA);
   });
+
+  // ─── Mutation-testing hardening ──────────────────────────────────────────
+  // These tests kill mutants that roundtrip tests miss because fromV3
+  // reconstructs the v1 shape, masking internal encoding errors.
+
+  it('toV3 removes `from` from the wire CBOR (not just replaces it)', async () => {
+    // If a mutant keeps `from` in the v3 CBOR, the frame is larger than
+    // necessary but still roundtrips. Decode the raw CBOR to verify `from`
+    // is absent and `f` is present.
+    const { decode: cborDecode } = await import('cbor-x/index-no-eval');
+    const { decompress } = await import('@bokuweb/zstd-wasm');
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 7 });
+    // Strip 0xCA + dict-id + peer-index (3 bytes), decompress, decode CBOR.
+    const compressed = bytes.subarray(3);
+    const cborBytes = decompress(compressed);
+    const raw = cborDecode(cborBytes) as Record<string, unknown>;
+    expect(raw.v).toBe(3);
+    expect(raw.f).toBe(7);
+    expect(raw.k).toBe(KIND_TO_BYTE['chat-msg']);
+    expect(raw.from).toBeUndefined();
+    expect(raw.id).toBeInstanceOf(Uint8Array);
+    expect((raw.id as Uint8Array).length).toBe(16);
+  });
+
+  it('toV3 sets v=3 in the wire CBOR (magic byte is authoritative but v must match)', async () => {
+    // If a mutant changes out.v = 3 to out.v = 1, the magic byte still
+    // routes to fromV3, and fromV3 doesn't check v. The frame roundtrips
+    // correctly. But the wire shape is wrong — a future decoder that checks
+    // v for validation would break. Verify v=3 in the raw CBOR.
+    const { decode: cborDecode } = await import('cbor-x/index-no-eval');
+    const { decompress } = await import('@bokuweb/zstd-wasm');
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    const compressed = bytes.subarray(3);
+    const cborBytes = decompress(compressed);
+    const raw = cborDecode(cborBytes) as Record<string, unknown>;
+    expect(raw.v).toBe(3);
+  });
+
+  it('outer peer-index byte (bytes[2]) matches the CBOR f field', async () => {
+    // The outer peer-index byte is currently write-only in decode (we read
+    // `f` from the CBOR). But it MUST match the CBOR `f` for future
+    // quick-filter routers. Verify they agree.
+    const { decode: cborDecode } = await import('cbor-x/index-no-eval');
+    const { decompress } = await import('@bokuweb/zstd-wasm');
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 42 });
+    expect(bytes[2]).toBe(42);
+    const compressed = bytes.subarray(3);
+    const cborBytes = decompress(compressed);
+    const raw = cborDecode(cborBytes) as Record<string, unknown>;
+    expect(raw.f).toBe(42);
+    expect(raw.f).toBe(bytes[2]);
+  });
 });
 
 // FOLLOWUPS A9 — canonicalizeEnvelope produces byte-identical CBOR for two
