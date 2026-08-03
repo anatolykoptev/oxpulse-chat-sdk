@@ -271,7 +271,7 @@ describe('SEC-CR-001 poisoned room refuses every content-bearing send entrypoint
         productRef: 'p1',
         productMeta: {
           title: 't',
-          price: '1',
+          price: 1,
           currency: 'USD',
           imageUrl: 'http://x/i.png',
           productUrl: 'http://x/p',

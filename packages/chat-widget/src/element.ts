@@ -26,7 +26,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID } from '@oxpulse/chat-sdk';
+import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
@@ -235,8 +235,8 @@ export class OxpulseChatElement extends HTMLElement {
       applyTheme(this, value);
     }
 
-    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint, reactions-enabled, pinned-messages-enabled)
-    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint' || name === 'reactions-enabled' || name === 'pinned-messages-enabled') {
+    // Attribute changes that require re-init (JWT, room, app-id, self-uid, base-url, allow-anon-read, allow-write, write-mint-endpoint, reactions-enabled, pinned-messages-enabled, seller-catalog)
+    if (name === 'jwt' || name === 'room-id' || name === 'app-id' || name === 'self-uid' || name === 'base-url' || name === 'allow-anon-read' || name === 'allow-write' || name === 'write-mint-endpoint' || name === 'reactions-enabled' || name === 'pinned-messages-enabled' || name === 'seller-catalog') {
       // In-place iframe refresh keeps the jwt attribute (remount source-of-truth) in
       // sync but must NOT remount — refreshToken() applied the token via postMessage.
       if (name === 'jwt' && this.#suppressJwtReboot) return;
@@ -376,7 +376,7 @@ export class OxpulseChatElement extends HTMLElement {
    * Not exposed as attributes — only via the JS API.
    * @internal
    */
-  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'onWriteError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken'>): void {
+  _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'onWriteError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken' | '_createCatalogClient'>): void {
     this.#config = {
       ...(this.#config ?? { appId: '', jwt: '', roomId: '' }),
       ...config,
@@ -1174,6 +1174,23 @@ export class OxpulseChatElement extends HTMLElement {
           // #120: typing indicator — forward to the SDK client's sendTyping.
           sendTyping: capturedSendClient.sendTyping?.bind(capturedSendClient),
         };
+        // #196: construct the seller-catalog client from the SAME resolved
+        // jwt + baseUrl the main SDK client already uses (no re-derivation),
+        // and pass it to the Composer so the product-picker toolbar button
+        // renders. Opt-in via the `seller-catalog` attribute (default OFF —
+        // no catalogClient, no button, no behaviour change). Only constructed
+        // when a composer is actually mounting (effectiveSendClient !== null)
+        // — the picker is a compose-side feature, pointless read-only.
+        // Tests inject a mock via config._createCatalogClient (mirrors
+        // _createClient) to avoid a real network call.
+        let catalogClient: SDKCatalogClient | undefined;
+        if (config.sellerCatalog && resolvedJwt) {
+          const catalogOpts = { jwt: resolvedJwt, baseUrl: resolvedBaseUrl };
+          catalogClient = config._createCatalogClient
+            ? config._createCatalogClient(catalogOpts)
+            : new SDKCatalogClient(catalogOpts);
+        }
+
         this.#composer = new Composer({
           client: composerClient,
           roomId: config.roomId,
@@ -1181,6 +1198,7 @@ export class OxpulseChatElement extends HTMLElement {
           signal: signal,
           lang,
           shadowHost: this.#shadow ?? undefined,
+          catalogClient,
         });
         this.#composer.mount();
       }
@@ -1354,6 +1372,7 @@ export class OxpulseChatElement extends HTMLElement {
     const allowAnonRead = this.hasAttribute('allow-anon-read');
     const allowWrite = this.hasAttribute('allow-write');
     const writeMintEndpoint = this.getAttribute('write-mint-endpoint') ?? undefined;
+    const sellerCatalog = this.hasAttribute('seller-catalog');
 
     // jwt is required unless allow-anon-read is set (anon mode mints its own token)
     if (!appId || !roomId) return null;
@@ -1385,6 +1404,7 @@ export class OxpulseChatElement extends HTMLElement {
       writeMintEndpoint,
       reactionsEnabled,
       pinnedMessagesEnabled,
+      sellerCatalog,
       // Merge stored callbacks + test factory overrides
       onTokenExpired: this.#config?.onTokenExpired,
       onError: this.#config?.onError,
@@ -1393,6 +1413,7 @@ export class OxpulseChatElement extends HTMLElement {
       _createClient: this.#config?._createClient,
       _mintAnonReadToken: this.#config?._mintAnonReadToken,
       _mintNamedWriteToken: this.#config?._mintNamedWriteToken,
+      _createCatalogClient: this.#config?._createCatalogClient,
     };
   }
 
@@ -1471,6 +1492,9 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
   // the HTML truthful and to trigger re-init on future attribute changes.
   el.setAttribute('pinned-messages-enabled', config.pinnedMessagesEnabled === false ? 'false' : 'true');
 
+  // #196: opt-in seller-catalog picker — boolean attribute, default OFF.
+  if (config.sellerCatalog) el.setAttribute('seller-catalog', '');
+
   // Store callbacks + test factory overrides (not representable as attributes)
   el._setCallbacks({
     onTokenExpired: config.onTokenExpired,
@@ -1480,6 +1504,7 @@ export function mount(target: HTMLElement, config: MountOptions): { destroy: () 
     _createClient: config._createClient,
     _mintAnonReadToken: config._mintAnonReadToken,
     _mintNamedWriteToken: config._mintNamedWriteToken,
+    _createCatalogClient: config._createCatalogClient,
   });
 
   target.appendChild(el);

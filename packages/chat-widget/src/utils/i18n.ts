@@ -93,6 +93,17 @@ export type LocaleKey =
   | 'productViewAria'
   | 'productCardAttached'
   | 'removeProductCard'
+  // Product picker (seller catalog)
+  | 'productPickerAria'
+  | 'productPickerSearch'
+  | 'productPickerSearchAria'
+  | 'productPickerLoading'
+  | 'productPickerLoadError'
+  | 'productPickerNoProducts'
+  | 'productPickerNoMatches'
+  | 'productPickerBtnAria'
+  | 'productPickerList'
+  | 'productPickerUntitled'
   // Reconnect banner
   | 'sessionExpired'
   | 'refresh'
@@ -224,6 +235,16 @@ const en: LocaleTable = {
   productViewAria: 'View product: {title}',
   productCardAttached: 'Product card attached: {title}',
   removeProductCard: 'Remove product card',
+  productPickerAria: 'Product catalog',
+  productPickerSearch: 'Search products…',
+  productPickerSearchAria: 'Search products',
+  productPickerLoading: 'Loading…',
+  productPickerLoadError: 'Failed to load catalog',
+  productPickerNoProducts: 'No products in catalog',
+  productPickerNoMatches: 'No matches',
+  productPickerBtnAria: 'Open product catalog',
+  productPickerList: 'Product list',
+  productPickerUntitled: 'Untitled product',
 
   sessionExpired: 'Session expired.',
   refresh: 'Refresh',
@@ -348,6 +369,16 @@ const ru: LocaleTable = {
   productViewAria: 'Открыть товар: {title}',
   productCardAttached: 'Карточка товара: {title}',
   removeProductCard: 'Убрать карточку товара',
+  productPickerAria: 'Каталог товаров',
+  productPickerSearch: 'Поиск товаров…',
+  productPickerSearchAria: 'Поиск товаров',
+  productPickerLoading: 'Загрузка…',
+  productPickerLoadError: 'Не удалось загрузить каталог',
+  productPickerNoProducts: 'В каталоге нет товаров',
+  productPickerNoMatches: 'Ничего не найдено',
+  productPickerBtnAria: 'Открыть каталог товаров',
+  productPickerList: 'Список товаров',
+  productPickerUntitled: 'Товар без названия',
 
   sessionExpired: 'Сессия истекла.',
   refresh: 'Обновить',
@@ -452,4 +483,47 @@ export function t(
   return template.replace(/\{(\w+)\}/g, (match, name: string) =>
     Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match,
   );
+}
+
+/**
+ * Map a widget `Locale` to the BCP-47 tag `Intl.NumberFormat` consumes for
+ * currency formatting. Kept here (next to `resolveLocale`) so the picker and
+ * the message-list share one locale→tag source of truth.
+ */
+const INTL_LOCALE_TAG: Record<Locale, string> = {
+  en: 'en',
+  ru: 'ru',
+};
+
+/**
+ * #207: format a numeric `price` for display using `Intl.NumberFormat` with
+ * `style: 'currency'`. `price` is now a JSON number (server contract), not a
+ * host-pre-formatted string, so the widget owns locale-aware rendering.
+ *
+ * Graceful fallback: if `currency` is not a valid ISO-4217 alpha code (the
+ * normalizer only checks it's a non-empty string ≤16 chars, so a peer can
+ * still send "dollars" or "US Dollars"), or `Intl.NumberFormat` throws (an
+ * environment without full ICU), the raw number is returned as a plain
+ * string rather than throwing or rendering "undefined". A non-finite price
+ * (defensive — the normalizer already rejects these for received messages)
+ * also falls back to the raw value.
+ *
+ * Note: Node's full-ICU `Intl` does NOT throw on a 3-letter nonsense code
+ * like "FOO" — it renders it verbatim ("FOO 19.99"). That is an acceptable
+ * degraded render (not "undefined", not a throw); the shape guard below
+ * catches the realistic malformed cases (lowercase, >3 chars, numeric).
+ */
+const ISO_4217_ALPHA = /^[A-Z]{3}$/;
+export function formatPrice(price: number, currency: string, lang: Locale): string {
+  if (!Number.isFinite(price)) return String(price);
+  if (typeof currency !== 'string' || !ISO_4217_ALPHA.test(currency)) return String(price);
+  try {
+    return new Intl.NumberFormat(INTL_LOCALE_TAG[lang] ?? 'en', {
+      style: 'currency',
+      currency,
+    }).format(price);
+  } catch {
+    // Environment without full ICU, or a 3-letter code it still rejects.
+    return String(price);
+  }
 }

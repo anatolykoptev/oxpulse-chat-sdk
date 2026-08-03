@@ -1318,6 +1318,69 @@ describe('Composer', () => {
     expect(container.querySelector('.oxp-composer-product-chip')).toBeNull();
   });
 
+  // ── #202: end-to-end composer→ProductPicker→onSelect→setProductCard wiring ──
+
+  it('#202 product_button_opens_picker_then_onSelect_stages_product_card_chip', async () => {
+    // Mock catalog client — listProducts resolves with one product.
+    const catalogClient = {
+      listProducts: vi.fn().mockResolvedValue({
+        products: [
+          {
+            productRef: 'sku-1',
+            productMeta: {
+              title: 'Widget Pro',
+              price: 19.99,
+              currency: 'USD',
+              imageUrl: '',
+              productUrl: '',
+            },
+            createdAt: '2026-07-16T00:00:00Z',
+            updatedAt: '2026-07-16T00:00:00Z',
+            archivedAt: null,
+          },
+        ],
+        hasMore: false,
+      }),
+    } as unknown as import('@oxpulse/chat-sdk').SDKCatalogClient;
+
+    const client = makeStubClient({});
+    const composer = new Composer({ client, roomId: 'r1', container, catalogClient });
+    composer.mount();
+
+    // The product picker button only renders when catalogClient is provided.
+    const productBtn = container.querySelector('.oxp-composer-product-btn') as HTMLButtonElement;
+    expect(productBtn).not.toBeNull();
+
+    // Before: chip hidden, no picker items.
+    const chipBefore = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chipBefore.hidden).toBe(true);
+    expect(container.querySelector('.oxp-product-picker-item')).toBeNull();
+
+    // Click → picker.show() (async load).
+    productBtn.click();
+    // Drain microtasks so the async listProducts resolves + items render.
+    await drain(20);
+
+    // Picker opened and rendered the catalog item.
+    const items = container.querySelectorAll('.oxp-product-picker-item');
+    expect(items.length).toBe(1);
+    expect(catalogClient.listProducts).toHaveBeenCalled();
+
+    // Simulate onSelect by clicking the rendered item → setProductCard.
+    (items[0] as HTMLButtonElement).click();
+    await drain(5);
+
+    // The product-card chip is now visible with the product title.
+    const chip = container.querySelector('.oxp-composer-product-chip') as HTMLElement;
+    expect(chip).not.toBeNull();
+    expect(chip.hidden).toBe(false);
+    expect(chip.textContent).toContain('Widget Pro');
+    // Picker auto-hides after select.
+    expect(container.querySelector('.oxp-product-picker-item')).toBeNull();
+
+    composer.destroy();
+  });
+
   it('setReplyTarget_renders_preview_and_send_includes_threadRootMsgId', async () => {
     const client = makeStubClient({});
     const composer = new Composer({ client, roomId: 'r1', container });

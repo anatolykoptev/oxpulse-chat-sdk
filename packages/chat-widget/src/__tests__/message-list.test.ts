@@ -1291,7 +1291,7 @@ describe('MessageList — W9 product card', () => {
   function makeProductMeta() {
     return {
       title: 'Widget Pro',
-      price: '999',
+      price: 999,
       currency: 'USD',
       imageUrl: 'https://example.com/img.png',
       productUrl: 'https://example.com/p/1',
@@ -1316,7 +1316,11 @@ describe('MessageList — W9 product card', () => {
     const card = bubble!.querySelector('.oxp-bubble-product');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('Widget Pro');
-    expect(card!.textContent).toContain('999 USD');
+    // #207: price is now a JSON number, formatted locale-aware via
+    // Intl.NumberFormat (en + USD → "$999.00"), NOT the old verbatim
+    // "999 USD" string coercion.
+    expect(card!.textContent).not.toContain('999 USD');
+    expect(card!.textContent).toMatch(/999/);
 
     const link = card!.querySelector('.oxp-product-link') as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
@@ -1485,7 +1489,7 @@ describe('MessageList — W9 product card', () => {
   it('omits_product_link_when_productUrl_is_unsafe', async () => {
     const meta = {
       title: 'Unsafe',
-      price: '1',
+      price: 1,
       currency: 'USD',
       imageUrl: 'javascript://alert(1)',
       productUrl: 'javascript://alert(2)',

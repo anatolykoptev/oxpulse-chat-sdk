@@ -713,6 +713,100 @@ export const THEME_CSS = `
   background: var(--oxp-tint);
 }
 
+/* ── Product picker (seller catalog, #196/#197) ──────────────────────── */
+/* Mirrors .oxp-emoji-picker 1:1 (container surface/border/radius/shadow) +
+   list-item flex row with space-between + ellipsis so title and price never
+   collide into "Widget19.99". Uses existing tokens only — no new tokens. */
+.oxp-product-picker {
+  background: var(--oxp-surface, #fff);
+  border: 1px solid var(--oxp-border, #e2e8f0);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+}
+.oxp-product-picker-search { padding: 8px; }
+.oxp-product-picker-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--oxp-border, #e2e8f0);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  background: var(--oxp-surface, #fff);
+  color: var(--oxp-fg, #1a1a1a);
+}
+.oxp-product-picker-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 8px;
+}
+.oxp-product-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--oxp-fg, #1a1a1a);
+  text-align: left;
+}
+.oxp-product-picker-item:hover {
+  background: var(--oxp-tint, #f1f5f9);
+}
+.oxp-product-picker-item:focus-visible {
+  outline: 2px solid var(--oxp-accent, #3b82f6);
+  outline-offset: -1px;
+}
+.oxp-product-picker-item-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.oxp-product-picker-item-price {
+  flex: 0 0 auto;
+  color: var(--oxp-fg-secondary, #64748b);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.oxp-product-picker-loading,
+.oxp-product-picker-error,
+.oxp-product-picker-empty {
+  text-align: center;
+  padding: 24px 0;
+  color: var(--oxp-fg-secondary, #64748b);
+  font-size: 0.8rem;
+}
+.oxp-product-picker-error {
+  color: var(--oxp-danger, #dc2626);
+}
+.oxp-composer-product-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--oxp-fg-secondary, #64748b);
+}
+.oxp-composer-product-btn:hover {
+  background: var(--oxp-tint);
+}
+
 /* ── Thread panel (#126) ─────────────────────────────────────────────── */
 .oxp-thread-panel {
   position: absolute;

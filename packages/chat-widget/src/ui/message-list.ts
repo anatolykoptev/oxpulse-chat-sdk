@@ -15,7 +15,7 @@ import type { AttachmentMeta } from '../utils/attachments.js';
 import { isSafeAttachmentUrl, replyBodySnapshotForMessage } from '../utils/attachments.js';
 import { shouldAutoScroll, isChained, formatTime, formatDuration, tombstoneText, unsealErrorText, unsealErrorAriaText, isSelf as isSelfMatch, cssEscape } from '../utils/list-helpers.js';
 import { reactionButtonAriaLabel, HEART_EMOJI } from '../utils/reaction-types.js';
-import { t, resolveLocale, type Locale } from '../utils/i18n.js';
+import { t, resolveLocale, formatPrice, type Locale } from '../utils/i18n.js';
 import { formatBodyPreview, type ReplySnapshot } from '../utils/reply-helpers.js';
 import { ReactionQuickBar } from './reaction-quick-bar.js';
 import { ReactionTrigger } from './reaction-trigger.js';
@@ -633,7 +633,6 @@ function renderAttachment(
 }
 
 const PRODUCT_TITLE_MAX = 200;
-const PRODUCT_PRICE_MAX = 40;
 const PRODUCT_CURRENCY_MAX = 16;
 const PRODUCT_URL_MAX = 2048;
 
@@ -645,22 +644,28 @@ const PRODUCT_URL_MAX = 2048;
  * multi-MB title (layout DoS-lite; body text is char-capped, product_meta is
  * not). Returns a safe ProductMeta, or null when the always-shown display
  * fields are unusable (→ the card is skipped, the message still renders).
+ *
+ * #207: `price` is now a JSON number (non-negative, finite), not a
+ * host-pre-formatted string. `renderProduct` formats it locale-aware via
+ * `formatPrice` (Intl.NumberFormat, currency style) — graceful fallback to
+ * the raw number if `currency` is not a valid ISO-4217 code.
  */
 function normalizeProductMeta(raw: unknown): ProductMeta | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const m = raw as Record<string, unknown>;
   // Core display fields (title + price + currency are always shown) must be
-  // non-empty strings, else there's no sensible card to draw.
+  // present and valid, else there's no sensible card to draw.
   if (typeof m.title !== 'string' || m.title.length === 0) return null;
-  if (typeof m.price !== 'string' || m.price.length === 0) return null;
   if (typeof m.currency !== 'string' || m.currency.length === 0) return null;
+  // #207: price must be a non-negative finite number.
+  if (typeof m.price !== 'number' || !Number.isFinite(m.price) || m.price < 0) return null;
   // URLs are optional; a non-string or over-cap value degrades to '' so the
   // isSafeAttachmentUrl gate in renderProduct simply omits the image/link.
   const cappedUrl = (v: unknown): string =>
     typeof v === 'string' && v.length <= PRODUCT_URL_MAX ? v : '';
   return {
     title: m.title.slice(0, PRODUCT_TITLE_MAX),
-    price: m.price.slice(0, PRODUCT_PRICE_MAX),
+    price: m.price,
     currency: m.currency.slice(0, PRODUCT_CURRENCY_MAX),
     imageUrl: cappedUrl(m.imageUrl),
     productUrl: cappedUrl(m.productUrl),
@@ -694,7 +699,7 @@ function renderProduct(meta: ProductMeta, lang: Locale): HTMLElement {
 
   const price = document.createElement('div');
   price.className = 'oxp-product-price';
-  price.textContent = `${meta.price} ${meta.currency}`;
+  price.textContent = formatPrice(meta.price, meta.currency, lang);
   card.appendChild(price);
 
   if (safeUrl) {

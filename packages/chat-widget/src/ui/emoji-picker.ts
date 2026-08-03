@@ -20,6 +20,7 @@
 import { EMOJI_CATEGORIES, searchEmojis, type EmojiEntry } from "../utils/emoji-data.js";
 import { t, resolveLocale, type Locale } from "../utils/i18n.js";
 import { computeFloatingPosition } from "../utils/floating-position.js";
+import { useFloatingDismiss } from "../utils/floating-dismiss.js";
 
 export interface EmojiPickerOptions {
   /** Container element to render the picker inside. */
@@ -58,9 +59,7 @@ export class EmojiPicker {
   #categoryNavEl: HTMLElement | null = null;
   #gridButtons: HTMLButtonElement[] = [];
 
-  #outsideClickHandler: ((e: MouseEvent) => void) | null = null;
-  #keydownHandler: ((e: KeyboardEvent) => void) | null = null;
-  #abortListener: (() => void) | null = null;
+  #dismissTeardown: (() => void) | null = null;
   #currentQuery = "";
 
   constructor(opts: EmojiPickerOptions) {
@@ -88,46 +87,14 @@ export class EmojiPicker {
     // Focus search input
     this.#searchInput?.focus();
 
-    // Outside dismissal
-    this.#outsideClickHandler = (e: MouseEvent) => {
-      if (this.#pickerEl && !this.#pickerEl.contains(e.target as Node) &&
-          e.target !== anchorEl && !anchorEl.contains(e.target as Node)) {
-        this.hide();
-      }
-    };
-    document.addEventListener("pointerdown", this.#outsideClickHandler, true);
-
-    // Escape + Tab trap
-    this.#keydownHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        const restore = this.#restoreFocusEl;
-        this.hide();
-        queueMicrotask(() => restore?.focus());
-      } else if (e.key === "Tab" && this.#pickerEl) {
-        // Simple focus trap: keep Tab within picker
-        const focusable = this.#pickerEl.querySelectorAll<HTMLElement>(
-          'input, button:not([disabled])',
-        );
-        if (focusable.length === 0) return;
-        const first = focusable[0]!;
-        const last = focusable[focusable.length - 1]!;
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", this.#keydownHandler);
-
-    if (this.#signal) {
-      this.#abortListener = () => this.hide();
-      this.#signal.addEventListener("abort", this.#abortListener, { once: true });
-    }
+    // #203: outside-pointerdown dismiss + Escape/Tab focus-trap + abort
+    // wiring deduplicated into the shared helper (was a ~60-line clone of
+    // ProductPicker). Behavior is identical.
+    this.#dismissTeardown = useFloatingDismiss(this.#pickerEl, anchorEl, {
+      onHide: () => this.hide(),
+      getRestoreFocusEl: () => this.#restoreFocusEl,
+      signal: this.#signal,
+    });
   }
 
   /** Hide the picker without firing onSelect. */
@@ -143,18 +110,8 @@ export class EmojiPicker {
 
   #removePicker(): void {
     const wasOpen = this.#pickerEl !== null;
-    if (this.#outsideClickHandler) {
-      document.removeEventListener("pointerdown", this.#outsideClickHandler, true);
-      this.#outsideClickHandler = null;
-    }
-    if (this.#keydownHandler) {
-      document.removeEventListener("keydown", this.#keydownHandler);
-      this.#keydownHandler = null;
-    }
-    if (this.#abortListener && this.#signal) {
-      this.#signal.removeEventListener("abort", this.#abortListener);
-      this.#abortListener = null;
-    }
+    this.#dismissTeardown?.();
+    this.#dismissTeardown = null;
     if (this.#pickerEl?.parentNode) {
       this.#pickerEl.parentNode.removeChild(this.#pickerEl);
     }

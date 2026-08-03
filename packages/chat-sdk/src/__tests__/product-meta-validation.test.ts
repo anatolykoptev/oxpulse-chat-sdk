@@ -1,5 +1,5 @@
 /**
- * product-meta-validation.test.ts — #117 SDK-side product_meta validation.
+ * product-meta-validation.test.ts — #117 / #207 SDK-side product_meta validation.
  *
  * Verifies rowToMessageRow normalizes product_meta at the receive boundary:
  *   - partial (missing core fields) → null
@@ -7,6 +7,10 @@
  *   - oversized strings → capped
  *   - bad/oversized URLs → ''
  *   - valid → passed through
+ *
+ * #207: `price` is now a JSON number (non-negative, finite) — not a string.
+ * Number-specific validation (negative / non-finite / non-number) is covered
+ * by the dedicated cases below.
  *
  * Tested through list() which calls rowToMessageRow on each server row.
  */
@@ -51,7 +55,7 @@ function stubFetch(responseBody: unknown) {
   }) as unknown as Response));
 }
 
-describe('rowToMessageRow — product_meta validation (#117)', () => {
+describe('rowToMessageRow — product_meta validation (#117 / #207)', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
@@ -59,7 +63,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
   it('valid product_meta passes through', async () => {
     const meta = {
       title: 'Widget Pro',
-      price: '999',
+      price: 999,
       currency: 'USD',
       imageUrl: 'https://example.com/img.png',
       productUrl: 'https://example.com/p/1',
@@ -115,7 +119,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: '', price: '999', currency: 'USD' },
+        product_meta: { title: '', price: 999, currency: 'USD' },
       }),
     ]));
 
@@ -130,7 +134,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: longTitle, price: '999', currency: 'USD' },
+        product_meta: { title: longTitle, price: 999, currency: 'USD' },
       }),
     ]));
 
@@ -139,15 +143,59 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
 
     expect(result.items[0].productMeta).not.toBeNull();
     expect(result.items[0].productMeta!.title.length).toBe(200);
-    expect(result.items[0].productMeta!.price).toBe('999');
+    expect(result.items[0].productMeta!.price).toBe(999);
   });
 
-  it('oversized price (41 chars) → capped to 40', async () => {
-    const longPrice = '9'.repeat(41);
+  // #207: price is a number now — the old "oversized price string → capped to
+  // 40" case is obsolete. These cases guard the new numeric validation.
+  it('negative price → null', async () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: 'Widget', price: longPrice, currency: 'USD' },
+        product_meta: { title: 'Widget', price: -1, currency: 'USD' },
+      }),
+    ]));
+
+    const client = makeClient();
+    const result = await client.list('room-1');
+
+    expect(result.items[0].productMeta).toBeNull();
+  });
+
+  it('non-finite price (NaN) → null', async () => {
+    stubFetch(makeListResponse([
+      makeServerRow({
+        product_ref: 'sku-1',
+        product_meta: { title: 'Widget', price: NaN, currency: 'USD' },
+      }),
+    ]));
+
+    const client = makeClient();
+    const result = await client.list('room-1');
+
+    expect(result.items[0].productMeta).toBeNull();
+  });
+
+  it('non-number price (string) → null', async () => {
+    stubFetch(makeListResponse([
+      makeServerRow({
+        product_ref: 'sku-1',
+        product_meta: { title: 'Widget', price: '999', currency: 'USD' },
+      }),
+    ]));
+
+    const client = makeClient();
+    const result = await client.list('room-1');
+
+    // #207: a string price is the OLD contract — rejected at the boundary.
+    expect(result.items[0].productMeta).toBeNull();
+  });
+
+  it('zero price is valid (passes through)', async () => {
+    stubFetch(makeListResponse([
+      makeServerRow({
+        product_ref: 'sku-1',
+        product_meta: { title: 'Widget', price: 0, currency: 'USD' },
       }),
     ]));
 
@@ -155,7 +203,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     const result = await client.list('room-1');
 
     expect(result.items[0].productMeta).not.toBeNull();
-    expect(result.items[0].productMeta!.price.length).toBe(40);
+    expect(result.items[0].productMeta!.price).toBe(0);
   });
 
   it('oversized currency (17 chars) → capped to 16', async () => {
@@ -163,7 +211,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: 'Widget', price: '999', currency: longCurrency },
+        product_meta: { title: 'Widget', price: 999, currency: longCurrency },
       }),
     ]));
 
@@ -179,7 +227,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: 'Widget', price: '999', currency: 'USD', imageUrl: longUrl },
+        product_meta: { title: 'Widget', price: 999, currency: 'USD', imageUrl: longUrl },
       }),
     ]));
 
@@ -196,7 +244,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: 'Widget', price: '999', currency: 'USD', imageUrl: 123 },
+        product_meta: { title: 'Widget', price: 999, currency: 'USD', imageUrl: 123 },
       }),
     ]));
 
@@ -211,7 +259,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: 'Widget', price: '999', currency: 'USD', productUrl: false },
+        product_meta: { title: 'Widget', price: 999, currency: 'USD', productUrl: false },
       }),
     ]));
 
@@ -226,7 +274,7 @@ describe('rowToMessageRow — product_meta validation (#117)', () => {
     stubFetch(makeListResponse([
       makeServerRow({
         product_ref: 'sku-1',
-        product_meta: { title: 42, price: '999', currency: 'USD' },
+        product_meta: { title: 42, price: 999, currency: 'USD' },
       }),
     ]));
 
