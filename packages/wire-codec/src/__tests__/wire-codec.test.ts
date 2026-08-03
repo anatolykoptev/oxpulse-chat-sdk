@@ -617,7 +617,8 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     1: 'b'.repeat(64),
     42: 'c'.repeat(64),
   };
-  const resolvePeer = (idx: number) => PEER_MAP[idx];
+  const EPOCH = 1;
+  const resolvePeer = (_epoch: number, idx: number) => PEER_MAP[idx];
 
   it('roundtrip dictless (0xCA 0x00 <peerIndex>)', () => {
     const env = sampleEnv();
@@ -625,7 +626,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     expect(bytes[0]).toBe(0xCA);
     expect(bytes[1]).toBe(0x00);
     expect(bytes[2]).toBe(0x00);
-    const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
     expect(decoded.from).toBe(env.from);
     expect(decoded.kind).toBe(env.kind);
     expect(decoded.body).toBe(env.body);
@@ -646,7 +647,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
       expect(bytes[0]).toBe(0xCA);
       expect(bytes[1]).toBe(c.id);
       expect(bytes[2]).toBe(0x01);
-      const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+      const decoded = decode(bytes, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
       expect(decoded.from).toBe(PEER_MAP[1]);
       expect(decoded.body).toBe(c.body);
     }
@@ -693,10 +694,36 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     expect(decoded.kind).toBe(env.kind);
   });
 
+  it('decoder with resolvePeer but missing epoch → from=undefined (safe drop)', () => {
+    // Crypto-critical: if epoch is not passed, the SDK MUST NOT call
+    // resolvePeer — it would resolve against the wrong epoch's map (UKS).
+    // Instead, from=undefined + f preserved → caller drops the frame.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+    expect(decoded.from).toBeUndefined();
+    expect(decoded.f).toBe(0);
+  });
+
+  it('decoder threads epoch from DecodeOpts to resolvePeer', () => {
+    // Verify the SDK passes the epoch from DecodeOpts to resolvePeer —
+    // not just ignores it. The resolver checks the epoch matches.
+    const env = sampleEnv();
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 5 });
+    const resolvePeerEpochAware = (epoch: number, idx: number) =>
+      epoch === 42 ? 'd'.repeat(64) : undefined;
+    const decoded = decode(bytes, { epoch: 42, resolvePeer: resolvePeerEpochAware }) as Record<string, unknown>;
+    expect(decoded.from).toBe('d'.repeat(64));
+    // Wrong epoch → unresolved
+    const decoded2 = decode(bytes, { epoch: 99, resolvePeer: resolvePeerEpochAware }) as Record<string, unknown>;
+    expect(decoded2.from).toBeUndefined();
+    expect(decoded2.f).toBe(5);
+  });
+
   it('decoder with resolvePeer returning undefined (peer not in map) → from=undefined + f preserved', () => {
     const env = sampleEnv();
     const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 99 });
-    const decoded = decode(bytes, { resolvePeer: () => undefined }) as Record<string, unknown>;
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: () => undefined }) as Record<string, unknown>;
     expect(decoded.from).toBeUndefined();
     expect(decoded.f).toBe(99);
   });
@@ -720,7 +747,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    const result = decode(asWireBytes(wire), { resolvePeer }) as Record<string, unknown>;
+    const result = decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
     expect(result.kind).toBe('chat-unknown-future');
     expect(result.raw).toBe(0xFF);
     expect(result.from).toBe(PEER_MAP[0]);
@@ -786,7 +813,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
   it('preserves unknown fields through v3 round-trip', () => {
     const env = sampleEnv({ futureField: 'survive', nested: { a: 1, b: [1, 2, 3] } });
     const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
-    const decoded = decode(bytes, { resolvePeer }) as Record<string, unknown>;
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
     expect(decoded.futureField).toBe('survive');
     expect(decoded.from).toBe(env.from);
   });
@@ -796,9 +823,9 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     const v1 = encode(env, { cbor: true, zstd: true, envelope: 1 });
     const v2 = encode(env, { cbor: true, zstd: true, envelope: 2 });
     const v3 = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
-    expect(decode(v1, { resolvePeer })).toEqual(env);
-    expect(decode(v2, { resolvePeer })).toEqual(env);
-    const d3 = decode(v3, { resolvePeer }) as Record<string, unknown>;
+    expect(decode(v1, { epoch: EPOCH, resolvePeer })).toEqual(env);
+    expect(decode(v2, { epoch: EPOCH, resolvePeer })).toEqual(env);
+    const d3 = decode(v3, { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
     expect(d3.from).toBe(env.from);
     expect(d3.kind).toBe(env.kind);
     expect(d3.body).toBe(env.body);
@@ -880,7 +907,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
     expect(bytes[0]).toBe(0xCA);
     expect(bytes[2]).toBe(255);
-    const decoded = decode(bytes, { resolvePeer: (i) => i === 255 ? 'z'.repeat(64) : undefined }) as Record<string, unknown>;
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: (_e, i) => i === 255 ? 'z'.repeat(64) : undefined }) as Record<string, unknown>;
     expect(decoded.from).toBe('z'.repeat(64));
     // f is deleted on successful resolution (only preserved on failure).
     expect(decoded.f).toBeUndefined();
@@ -920,7 +947,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     // Kills the mutant `f > 0xff` → `f >= 0xff` in fromV3 (off-by-one).
     const env = sampleEnv();
     const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
-    const decoded = decode(bytes, { resolvePeer: (i) => i === 255 ? 'w'.repeat(64) : undefined }) as Record<string, unknown>;
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: (_e, i) => i === 255 ? 'w'.repeat(64) : undefined }) as Record<string, unknown>;
     expect(decoded.from).toBe('w'.repeat(64));
     // f deleted on successful resolution.
     expect(decoded.f).toBeUndefined();
@@ -930,7 +957,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     // Same boundary, but resolution fails → f must be preserved for diagnostics.
     const env = sampleEnv();
     const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 255 });
-    const decoded = decode(bytes, { resolvePeer: () => undefined }) as Record<string, unknown>;
+    const decoded = decode(bytes, { epoch: EPOCH, resolvePeer: () => undefined }) as Record<string, unknown>;
     expect(decoded.from).toBeUndefined();
     expect(decoded.f).toBe(255);
   });
@@ -956,7 +983,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    const result = decode(asWireBytes(wire), { resolvePeer }) as Record<string, unknown>;
+    const result = decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
     expect(result.ts).toBe(ROOM_EPOCH); // 0 + ROOM_EPOCH
     expect(result.from).toBe(PEER_MAP[0]);
   });
@@ -994,7 +1021,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/f must be uint8/);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/f must be uint8/);
   });
 
   it('fromV3 rejects forged frame with f=-1 (negative)', async () => {
@@ -1017,7 +1044,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/f must be uint8/);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/f must be uint8/);
   });
 
   it('fromV3 rejects forged frame with non-Uint8Array id', async () => {
@@ -1042,7 +1069,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/id must be 16-byte Uint8Array/);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/id must be 16-byte Uint8Array/);
   });
 
   it('fromV3 accepts forged frame with tsDelta=0xffffffff (max uint32 boundary)', async () => {
@@ -1066,7 +1093,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    const result = decode(asWireBytes(wire), { resolvePeer }) as Record<string, unknown>;
+    const result = decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer }) as Record<string, unknown>;
     expect(result.ts).toBe(ROOM_EPOCH + 0xffff_ffff);
   });
 
@@ -1091,7 +1118,7 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[1] = 0x00;
     wire[2] = 0x00;
     wire.set(zst, 3);
-    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/ts out of uint32 window/);
+    expect(() => decode(asWireBytes(wire), { epoch: EPOCH, resolvePeer })).toThrow(/ts out of uint32 window/);
   });
 });
 

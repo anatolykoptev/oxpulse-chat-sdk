@@ -268,9 +268,14 @@ export function toV3(
  * Transform v3-shape → v1-shape (consumer-facing).
  *
  * `resolvePeer` maps the uint8 peer-index back to the 64-char hex pubkey
- * string via the ratchet's peer_index_map. If resolvePeer is not provided or
- * returns undefined (peer not in map — e.g. race during roster transition),
- * `from` is set to undefined and `f` is preserved so the caller can log + drop.
+ * string via the ratchet's epoch-specific peer_index_map. The `epoch`
+ * parameter is threaded from DecodeOpts.epoch — it MUST be the
+ * AEAD-authenticated epoch from the SFrame header, not the current epoch,
+ * to prevent cross-epoch sender misattribution (UKS). See RFC 9420 §4.1.1.
+ *
+ * If resolvePeer is not provided, epoch is missing, or resolvePeer returns
+ * undefined (peer not in map, epoch wiped), `from` is set to undefined and
+ * `f` is preserved so the caller can log + drop.
  *
  * Forward-compat: unknown `k` byte → `kind: "chat-unknown-future"` + `raw: k`
  * (same sentinel as fromV2).
@@ -280,7 +285,8 @@ export function toV3(
  */
 export function fromV3(
 	v3: Record<string, unknown>,
-	resolvePeer?: (peerIndex: number) => string | undefined,
+	epoch?: number,
+	resolvePeer?: (epoch: number, peerIndex: number) => string | undefined,
 ): Record<string, unknown> {
 	const k = v3.k;
 	const idRaw = v3.id;
@@ -303,12 +309,15 @@ export function fromV3(
 	out.id = bytesToUuid(idRaw);
 	out.ts = tsDelta + ROOM_EPOCH;
 
-	// Resolve peer-index → pubkey. If resolver is missing or returns undefined
-	// (peer not in map), leave `from` undefined + preserve `f` for caller
-	// diagnostics. The caller MUST handle `from === undefined` by dropping the
-	// frame (same as chat-unknown-future).
-	if (resolvePeer !== undefined) {
-		const pubkey = resolvePeer(f);
+	// Resolve peer-index → pubkey. The epoch is threaded from DecodeOpts —
+	// it MUST be the AEAD-authenticated epoch from the SFrame header to prevent
+	// cross-epoch sender misattribution. If resolver is missing, epoch is
+	// missing, or resolver returns undefined (peer not in map, epoch wiped),
+	// leave `from` undefined + preserve `f` for caller diagnostics. The caller
+	// MUST handle `from === undefined` by dropping the frame (same as
+	// chat-unknown-future).
+	if (resolvePeer !== undefined && epoch !== undefined) {
+		const pubkey = resolvePeer(epoch, f);
 		if (pubkey !== undefined) {
 			out.from = pubkey;
 		} else {

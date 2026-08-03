@@ -109,15 +109,29 @@ export interface EncodeOpts {
 
 /** Phase 2.F.B: decode options. `resolvePeer` maps the uint8 peer-index (the
  *  `f` field in envelope-v3) back to the 64-char hex pubkey string via the
- *  ratchet's peer_index_map. If a v3 frame is decoded without a resolver, or
- *  the resolver returns undefined (peer not in map), `from` is set to undefined
- *  and `f` is preserved on the output for caller diagnostics — the caller MUST
- *  drop such frames (same as chat-unknown-future).
+ *  ratchet's epoch-specific peer_index_map.
+ *
+ *  **Epoch binding (crypto-critical):** `resolvePeer` receives the `epoch`
+ *  from `DecodeOpts.epoch` — the SDK threads it to the resolver. The caller
+ *  MUST pass the AEAD-authenticated epoch from the SFrame header (NOT the
+ *  current epoch) to prevent cross-epoch sender misattribution (UKS). If
+ *  `epoch` is missing, v3 frames get `from=undefined` (safe drop). See
+ *  RFC 9420 §4.1.1: each epoch has a distinct ratchet tree, and the sender's
+ *  leaf index is bound to that epoch's tree.
+ *
+ *  If a v3 frame is decoded without a resolver, or the resolver returns
+ *  undefined (peer not in map, epoch wiped), `from` is set to undefined
+ *  and `f` is preserved on the output for caller diagnostics — the caller
+ *  MUST drop such frames (same as chat-unknown-future).
  *
  *  Backward-compatible: decode(bytes) with no opts works for all pre-v3 magic
  *  bytes (JSON / CBOR / 0xC6 / 0xC7 / 0xC8 / 0xC9). */
 export interface DecodeOpts {
-  resolvePeer?: (peerIndex: number) => string | undefined;
+  /** AEAD-authenticated epoch from the SFrame header. Required for v3
+   *  peer-index resolution — passed to `resolvePeer(epoch, peerIndex)`.
+   *  Pre-v3 frames ignore this. */
+  epoch?: number;
+  resolvePeer?: (epoch: number, peerIndex: number) => string | undefined;
 }
 
 const enc = new TextEncoder();
@@ -485,7 +499,7 @@ export function decode(bytes: WireBytes, opts?: DecodeOpts): unknown {
         { limit: ZSTD_MAX_DECOMPRESSED_BYTES, size: cborBytes.length },
       );
     }
-    return fromV3(cborDecode(cborBytes) as Record<string, unknown>, opts?.resolvePeer);
+    return fromV3(cborDecode(cborBytes) as Record<string, unknown>, opts?.epoch, opts?.resolvePeer);
   }
   if (first === ZSTD_MAGIC_PREFIX) {
     if (!zstdReady) {
