@@ -38,7 +38,7 @@ import {
   type WireCap,
 } from '../codec.ts';
 import { ALL_DICTS } from '../dicts.ts';
-import { ROOM_EPOCH, KIND_TO_BYTE } from '../envelope-v2.ts';
+import { ROOM_EPOCH, KIND_TO_BYTE, canEncodeAsV3, toV3, fromV3 } from '../envelope-v2.ts';
 
 beforeAll(async () => {
   await ensureWireCodecReady();
@@ -1092,6 +1092,113 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     wire[2] = 0x00;
     wire.set(zst, 3);
     expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/ts out of uint32 window/);
+  });
+});
+
+// ─── Direct toV3/fromV3 unit tests (kill defensive-check mutants) ───────────
+// These call toV3/fromV3 directly with invalid inputs, bypassing the
+// canEncodeAsV3 gate. The encode() path never reaches these checks because
+// canEncodeAsV3 filters first — but the checks exist as a public-API
+// safety net, so mutants that disable them must die.
+
+describe('Phase 2.F.B — toV3/fromV3 direct unit tests', () => {
+  const validEnv = () => ({
+    v: 1,
+    id: '01234567-89ab-cdef-0123-456789abcdef',
+    ts: ROOM_EPOCH + 60_000,
+    from: 'a'.repeat(64),
+    kind: 'chat-msg',
+    body: 'hi',
+  });
+
+  describe('toV3 defensive checks', () => {
+    it('throws on peerIndex=-1 (direct call, bypasses canEncodeAsV3)', () => {
+      expect(() => toV3(validEnv(), -1)).toThrow(/peerIndex must be uint8/);
+    });
+
+    it('throws on peerIndex=256 (direct call)', () => {
+      expect(() => toV3(validEnv(), 256)).toThrow(/peerIndex must be uint8/);
+    });
+
+    it('throws on peerIndex=1.5 (non-integer, direct call)', () => {
+      expect(() => toV3(validEnv(), 1.5)).toThrow(/peerIndex must be uint8/);
+    });
+
+    it('throws on unknown kind (direct call, bypasses canEncodeAsV3)', () => {
+      const env = { ...validEnv(), kind: 'future-kind' };
+      expect(() => toV3(env, 0)).toThrow(/not a known wire kind/);
+    });
+
+    it('accepts peerIndex=0 and peerIndex=255 (boundary)', () => {
+      expect(() => toV3(validEnv(), 0)).not.toThrow();
+      expect(() => toV3(validEnv(), 255)).not.toThrow();
+    });
+  });
+
+  describe('fromV3 defensive checks', () => {
+    it('throws on non-Uint8Array id (direct call)', () => {
+      const v3 = { v: 3, id: 'bad', ts: 60_000, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/id must be 16-byte Uint8Array/);
+    });
+
+    it('throws on Uint8Array id with wrong length (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(15), ts: 60_000, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/id must be 16-byte Uint8Array/);
+    });
+
+    it('throws on ts=-1 (negative, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: -1, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/ts out of uint32 window/);
+    });
+
+    it('throws on ts=0x100000000 (over max uint32, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 0x1_0000_0000, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/ts out of uint32 window/);
+    });
+
+    it('accepts ts=0 and ts=0xffffffff (boundary, direct call)', () => {
+      const v3a = { v: 3, id: new Uint8Array(16), ts: 0, f: 0, k: 0x01, body: 'x' };
+      const v3b = { v: 3, id: new Uint8Array(16), ts: 0xffff_ffff, f: 0, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3a, () => 'x'.repeat(64))).not.toThrow();
+      expect(() => fromV3(v3b, () => 'x'.repeat(64))).not.toThrow();
+    });
+
+    it('throws on f=-1 (negative, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: -1, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on f=256 (over max uint8, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 256, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on f="x" (non-number, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 'x', k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on f=1.5 (non-integer, direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 1.5, k: 0x01, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/f must be uint8/);
+    });
+
+    it('throws on missing k (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 0, body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/missing or non-numeric kind byte/);
+    });
+
+    it('throws on non-numeric k (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 0, k: 'x', body: 'x' };
+      expect(() => fromV3(v3)).toThrow(/missing or non-numeric kind byte/);
+    });
+
+    it('returns chat-unknown-future for unknown k byte (direct call)', () => {
+      const v3 = { v: 3, id: new Uint8Array(16), ts: 60_000, f: 0, k: 0xFF, body: 'x' };
+      const result = fromV3(v3, () => 'x'.repeat(64));
+      expect(result.kind).toBe('chat-unknown-future');
+      expect(result.raw).toBe(0xFF);
+    });
   });
 });
 
