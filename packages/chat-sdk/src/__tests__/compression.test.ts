@@ -15,10 +15,17 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const DICTS_DIR = join(__dirname, '..', '..', '..', 'wire-codec', 'dicts');
+// Resolve through node_modules so the path works in Stryker's sandbox
+// where __dirname points inside .stryker-tmp/. Resolving the main entry
+// of @oxpulse/wire-codec and going up one dir reaches the package root
+// (which contains dicts/). node_modules is copied to the sandbox by Stryker.
+const require = createRequire(import.meta.url);
+const wireCodecEntry = require.resolve('@oxpulse/wire-codec');
+const DICTS_DIR = join(dirname(wireCodecEntry), '..', 'dicts');
 
 // ── Mock fetch BEFORE any imports that may trigger dict loading ───────────────
 // Intercepts /dicts/*.zstd → serves from local FS.

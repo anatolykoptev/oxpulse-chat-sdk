@@ -1,0 +1,67 @@
+name: mutation
+# Stryker mutation testing — nightly baseline (continue-on-error).
+# Matrix: each package runs in its own job (parallel), serial mutants within
+# each (concurrency: 1 in stryker.config.json). After baseline, raise
+# thresholds.break and remove continue-on-error.
+# Nightly only — mutation testing is too heavy for per-PR (chat-sdk: 2462
+# mutants ~17 min, chat-widget scoped to security-critical files). preflight
+# remains the per-PR gate; mutation scores are collected overnight.
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC nightly
+  workflow_dispatch: {}   # manual trigger for baseline collection
+
+concurrency:
+  group: mutation-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - chat-sdk
+          - chat-widget
+          - crypto-primitives
+          - intro-protocol
+          - url-contract
+          - voice-core
+          - wire-codec
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # NO `version:` — pnpm/action-setup@v6 auto-detects from packageManager
+      # in package.json. Specifying both causes ERR_PNPM_BAD_PM_VERSION.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Run Stryker (${{ matrix.package }})
+        working-directory: packages/${{ matrix.package }}
+        run: pnpm stryker || echo "::warning::Stryker failed for ${{ matrix.package }} (non-blocking baseline)"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: stryker-report-${{ matrix.package }}
+          path: packages/${{ matrix.package }}/reports/mutation/
+          retention-days: 14

@@ -48,10 +48,13 @@
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit"
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
+    "stryker": "stryker run"
   },
-  "dependencies": {},
   "devDependencies": {
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/typescript-checker": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
     "@types/node": "^22",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
