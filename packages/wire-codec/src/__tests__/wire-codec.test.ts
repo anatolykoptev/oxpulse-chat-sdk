@@ -960,6 +960,139 @@ describe('Phase 2.F.B — envelope-v3 (0xCA magic, peer-index compaction)', () =
     expect(result.ts).toBe(ROOM_EPOCH); // 0 + ROOM_EPOCH
     expect(result.from).toBe(PEER_MAP[0]);
   });
+
+  // ─── Forged-frame boundary tests (kill remaining stryker survivors) ──────
+
+  it('encoder falls back to v2 when from is empty string', () => {
+    // Kills the mutant that removes the `o.from.length === 0` check in
+    // canEncodeAsV3. With the mutant, empty from → v3 frame with f but no
+    // from to replace. Without the mutant, empty from → v2 fallback.
+    const env = sampleEnv({ from: '' });
+    const bytes = encode(env, { cbor: true, zstd: true, envelope: 3, peerIndex: 0 });
+    expect(bytes[0]).toBe(0xC8);
+  });
+
+  it('fromV3 rejects forged frame with f=256 (out of uint8 range)', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the f check in
+    // fromV3. With the mutant, any f value is accepted. Without, f=256
+    // throws. CBOR can encode integers > 255, so this is a realistic forge.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 60_000,
+      f: 256, // out of uint8 range
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/f must be uint8/);
+  });
+
+  it('fromV3 rejects forged frame with f=-1 (negative)', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the f < 0 check.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 60_000,
+      f: -1,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/f must be uint8/);
+  });
+
+  it('fromV3 rejects forged frame with non-Uint8Array id', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the id check.
+    // With the mutant, any id type is accepted → bytesToUuid crashes or
+    // produces garbage. Without, it throws cleanly.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: 'not-a-uint8array', // wrong type
+      ts: 60_000,
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/id must be 16-byte Uint8Array/);
+  });
+
+  it('fromV3 accepts forged frame with tsDelta=0xffffffff (max uint32 boundary)', async () => {
+    // Kills the `tsDelta > 0xffff_ffff` → `tsDelta >= 0xffff_ffff` mutant
+    // (off-by-one that would reject the max valid value).
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 0xffff_ffff, // max uint32 delta
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    const result = decode(asWireBytes(wire), { resolvePeer }) as Record<string, unknown>;
+    expect(result.ts).toBe(ROOM_EPOCH + 0xffff_ffff);
+  });
+
+  it('fromV3 rejects forged frame with tsDelta=0x100000000 (just over max uint32)', async () => {
+    // Kills the `ConditionalExpression → false` mutant on the tsDelta > 0xffffffff
+    // check. With the mutant, any ts is accepted.
+    const { Encoder } = await import('cbor-x');
+    const { compress } = await import('@bokuweb/zstd-wasm');
+    const cborEnc = new Encoder({ mapsAsObjects: true, useRecords: false });
+    const frame = {
+      v: 3,
+      id: new Uint8Array(16),
+      ts: 0x1_0000_0000, // just over max uint32
+      f: 0,
+      k: 0x01,
+      body: 'x',
+    };
+    const cbor = cborEnc.encode(frame);
+    const zst = compress(cbor, 3);
+    const wire = new Uint8Array(3 + zst.length);
+    wire[0] = 0xCA;
+    wire[1] = 0x00;
+    wire[2] = 0x00;
+    wire.set(zst, 3);
+    expect(() => decode(asWireBytes(wire), { resolvePeer })).toThrow(/ts out of uint32 window/);
+  });
 });
 
 // FOLLOWUPS A9 — canonicalizeEnvelope produces byte-identical CBOR for two
