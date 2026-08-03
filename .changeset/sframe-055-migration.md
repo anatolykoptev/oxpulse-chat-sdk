@@ -16,6 +16,9 @@ Migrate to sframe-ratchet 0.5.5 — remove custom DurableReplayGuard, delegate t
   and the library runs the check→decrypt→accept sequence internally.
 - **Updated** `sframe-unseal-abort.test.ts` to pass `durableReplayNamespace` (required
   by the library's default-on-when-namespaced behavior).
+- **Added** `sframe-durable-integration.test.ts` — integration tests verifying the
+  library-owned guard in the SDK's context (cross-reload replay, anti-poison, default
+  namespace, opt-out, in-session replay).
 
 ## Why
 
@@ -27,18 +30,19 @@ IDB stores, divergent bug surfaces. The migration collapses to one owner.
 
 ## Breaking changes
 
-None for callers using `SDKChatClient` with `e2ee.durableReplayNamespace` or `e2ee.ctrKeyspace`
-— the client already forwarded `durableReplayNamespace: e2ee.durableReplayNamespace ?? opts.appId`.
+None. The SDK defaults `durableReplayNamespace` to `'default'` when neither
+`durableReplayNamespace` nor `ctrKeyspace` is provided, preserving the pre-0.5.5
+behavior where the SDK's own DurableReplayGuard defaulted to `'default'`.
 
-Callers using `createSFrameProvider` directly without a `durableReplayNamespace` (or
-`ctrKeyspace`) will now get a one-time `console.warn` from the library and durable
-replay will be DISABLED (the library requires a namespace to isolate IDB stores).
-Pass `durableReplayNamespace: 'your-app-id'` to enable cross-reload protection.
+Callers using `SDKChatClient` with `e2ee.durableReplayNamespace` or `e2ee.ctrKeyspace`
+are unaffected — the client already forwarded `durableReplayNamespace: e2ee.durableReplayNamespace ?? opts.appId`.
 
 ## Test plan
 
-- [x] 344 unit tests pass, 0 fail
+- [x] Unit tests pass, 0 fail
 - [x] TypeScript: 0 errors
 - [x] `sframe-unseal-abort.test.ts` — abort-honoring + replay-reject still pass with
       library-owned guard
+- [x] `sframe-durable-integration.test.ts` — cross-reload replay, anti-poison, default
+      namespace, opt-out, in-session replay all pass with library-owned guard
 - [x] Contract tests: 4 skipped (need live server — unchanged)

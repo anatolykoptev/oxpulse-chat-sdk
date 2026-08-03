@@ -80,8 +80,9 @@ export interface SFrameProviderOptions {
   durableReplay?: boolean;
   /**
    * Namespace for the durable replay IDB store (isolate independent key-spaces).
-   * Required when `durableReplay` is not `false`. Defaults to `ctrKeyspace` when
-   * available, otherwise the caller (SDKChatClient) supplies `appId`.
+   * Defaults to `ctrKeyspace` when available, otherwise `'default'` (preserves
+   * the pre-0.5.5 behavior where the SDK's own guard defaulted to `'default'`).
+   * The SDK's `SDKChatClient` overrides this with `appId` for per-tenant isolation.
    */
   durableReplayNamespace?: string;
   /**
@@ -102,11 +103,12 @@ export interface SFrameProviderOptions {
  * SDKChatClient instances that share the same key space.
  */
 export function createSFrameProvider(opts: SFrameProviderOptions): CryptoProvider {
-  // Resolve the durable-replay namespace: explicit override → ctrKeyspace → none.
+  // Resolve the durable-replay namespace: explicit override → ctrKeyspace → 'default'.
   // sframe-ratchet 0.5.5+ enables durable replay by default when a namespace is
-  // provided (issue #41). The library constructs and owns the DurableReplayGuard
-  // internally — the SDK no longer ships its own.
-  const namespace = opts.durableReplayNamespace ?? opts.ctrKeyspace;
+  // provided (issue #41). Defaulting to 'default' preserves the pre-0.5.5 behavior
+  // where the SDK's own DurableReplayGuard defaulted to 'default'. The library
+  // constructs and owns the DurableReplayGuard internally — the SDK no longer ships its own.
+  const namespace = opts.durableReplayNamespace ?? opts.ctrKeyspace ?? 'default';
   const chatOpts: ChatProviderOptions = {
     getKey: opts.getKey,
     ...(opts.ctrStrategy !== undefined ? { ctrStrategy: opts.ctrStrategy } : {}),
