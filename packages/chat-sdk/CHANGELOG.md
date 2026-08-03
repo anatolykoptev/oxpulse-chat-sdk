@@ -1,5 +1,133 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.1.0
+
+### Minor Changes
+
+- 70fe423: Fix SDKCatalogClient wire contract to match the finalized server DTOs (#195),
+  rebuild the synthetic-green catalog tests against real server shapes (#198),
+  and make `ProductMeta.price` a JSON number (#207, SDK half).
+
+  - #195: request bodies are now snake_case (`{ product_ref, product_meta }` for
+    create, `{ product_meta }` for update) — the server rejects camelCase keys.
+    Responses are mapped snake→camel via a `dtoToCatalogProduct` mapper that
+    reuses the rooms-boundary `normalizeProductMeta` (client.ts) instead of blind
+    `as unknown as CatalogProduct` casts that left `productRef` / `createdAt` /
+    `archivedAt` undefined.
+  - `listProducts` now accepts `{ limit?, cursor?, signal? }` and returns
+    `{ products, hasMore, nextCursor }` mapped from the `{ products, has_more,
+next_cursor }` envelope (cursor-based pagination). A malformed-cursor 400
+    maps to `validation_error`.
+  - #207: `ProductMeta.price` is now `number` (non-negative JSON number), not a
+    host-pre-formatted display string. Callers own locale-aware formatting at
+    render time.
+  - #198: `catalog.test.ts` rewritten to real snake_case mock payloads with
+    numeric `price`, asserting the request body is snake_case and the response
+    mapping populates camelCase fields.
+
+  **Breaking (@oxpulse/chat-widget):** `ProductMeta.price` is now `number`, not a
+  host-pre-formatted string. This also changes the shared render-boundary
+  `normalizeProductMeta`, which now rejects a string `price` — so a product-card
+  message from an older client that sends a string price is dropped on receive.
+  See the wire-compat note tracked separately.
+
+  Note: `price: string → number` and the `listProducts` return-shape change are
+  breaking for consumers of the catalog API; they land within the same unreleased
+  minor as the original `SDKCatalogClient` export (#193), which never shipped a
+  correct form.
+
+  Closes #195. Closes #198. Closes #207.
+
+- 70fe423: Add SDKCatalogClient — typed wrapper for seller product catalog CRUD.
+
+  New export: `SDKCatalogClient`, `SDKCatalogError`, `CatalogProduct` type.
+  Methods: `createProduct`, `listProducts`, `getProduct`, `updateProduct`,
+  `deleteProduct` (soft-delete/archive). Separate class (mirrors SDKPushClient
+  pattern) — SDKChatClient is already ~2900 lines.
+
+  Server API: POST/GET/PATCH/DELETE /api/sdk/catalog/products[/:ref].
+  Auth: SDK JWT with scope catalog:read:_ / catalog:write:_.
+
+  Closes #193.
+
+- b974a80: Migrate to sframe-ratchet 0.5.5 — remove custom DurableReplayGuard, delegate to library.
+
+  ## What changed
+
+  - **Bumped** `sframe-ratchet` from `0.5.0` to `0.5.5`.
+  - **Deleted** the SDK's custom 365-line `DurableReplayGuard` (`sframe-replay.ts`) and its
+    test suite (`sframe-replay.test.ts`). The guard is now built and owned by
+    `createChatProvider` inside sframe-ratchet 0.5.5+ — the SDK delegates entirely.
+  - **Simplified** `createSFrameProvider` (`sframe.ts`): the manual `parseHeader` →
+    `durable.check` → `inner.unseal` → `durable.accept` dance is gone. The wrapper now
+    forwards `namespace` / `durableReplay` / `durableReplayWindow` to `createChatProvider`
+    and the library runs the check→decrypt→accept sequence internally.
+  - **Updated** `sframe-unseal-abort.test.ts` to pass `durableReplayNamespace` (required
+    by the library's default-on-when-namespaced behavior).
+  - **Added** `sframe-durable-integration.test.ts` — integration tests verifying the
+    library-owned guard in the SDK's context (cross-reload replay, anti-poison, default
+    namespace, opt-out, in-session replay).
+
+  ## Why
+
+  sframe-ratchet 0.5.5 ships the same `DurableReplayGuard` design (IDB + Web Locks,
+  read-merge-write, FIFO cache cap, feature-detected degradation) as a first-class
+  library feature — issue #41 flipped the default to ON when a namespace is provided.
+  Maintaining a 365-line duplicate in the SDK was pure cost: double CTR tracking, double
+  IDB stores, divergent bug surfaces. The migration collapses to one owner.
+
+  ## Breaking changes
+
+  None. The SDK defaults `durableReplayNamespace` to `'default'` when neither
+  `durableReplayNamespace` nor `ctrKeyspace` is provided, preserving the pre-0.5.5
+  behavior where the SDK's own DurableReplayGuard defaulted to `'default'`.
+
+  Callers using `SDKChatClient` with `e2ee.durableReplayNamespace` or `e2ee.ctrKeyspace`
+  are unaffected — the client already forwarded `durableReplayNamespace: e2ee.durableReplayNamespace ?? opts.appId`.
+
+  ## Test plan
+
+  - [x] Unit tests pass, 0 fail
+  - [x] TypeScript: 0 errors
+  - [x] `sframe-unseal-abort.test.ts` — abort-honoring + replay-reject still pass with
+        library-owned guard
+  - [x] `sframe-durable-integration.test.ts` — cross-reload replay, anti-poison, default
+        namespace, opt-out, in-session replay all pass with library-owned guard
+  - [x] Contract tests: 4 skipped (need live server — unchanged)
+
+### Patch Changes
+
+- 70fe423: Seller-catalog SDK — Batch D (final cleanup): shared picker-dismiss helper
+  (#203) + LOW-severity hardening batch (#206).
+
+  - #203 (reuse): extract `useFloatingDismiss(pickerEl, anchorEl, { onHide,
+getRestoreFocusEl, signal })` into `utils/floating-dismiss.ts`. EmojiPicker
+    and ProductPicker shared ~60 byte-identical lines of outside-pointerdown
+    dismiss + Escape/Tab focus-trap (same `'input, button:not([disabled])'`
+    selector + shift-tab wrap) + abort-signal wiring, alongside the
+    already-shared `computeFloatingPosition`. Both pickers now call the single
+    helper. Behavior is identical — every existing emoji-picker AND
+    product-picker test (dismiss / focus-trap / escape / outside-click / abort)
+    stays green.
+  - #206a: `catalog.ts` error switch adds an explicit `422 → validation_error`
+    case (a 422 validation error previously fell to `default → server_4xx`,
+    mislabeling it); and `resp.json()` on a 2xx body is guarded so an empty
+    2xx body returns `null` instead of throwing a raw `SyntaxError` that
+    escapes the `SDKCatalogError` wrapper.
+  - #206b: `SDKCatalogClient` constructor warns (defense-in-depth,
+    non-breaking) when an absolute `baseUrl`'s scheme is not `https:` — the
+    JWT rides as `Authorization: Bearer <jwt>` and an `http://` absolute
+    baseUrl leaks it in cleartext (passive MITM). Empty / relative / localhost
+    / 127.0.0.1 baseUrls are allowed (dev + same-origin).
+  - #206c: `product-picker.ts` sets `aria-selected="false"` on each rendered
+    `role="option"` item and flips the keyboard-focused item to `"true"`
+    (listbox APG expectation).
+
+  Skipped (out of this batch, tracked separately in #206): authoring
+  DESIGN.md; the repo-wide `assertRawJwt` bearer-prefix dedup (11th copy —
+  systemic); the `httpStatusToCode` generalization (deferred until a 3rd
+  `SDK*Client` mapper appears).
+
 ## 3.0.6
 
 ### Patch Changes

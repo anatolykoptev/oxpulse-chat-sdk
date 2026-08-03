@@ -1,5 +1,147 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.23.0
+
+### Minor Changes
+
+- 70fe423: Fix SDKCatalogClient wire contract to match the finalized server DTOs (#195),
+  rebuild the synthetic-green catalog tests against real server shapes (#198),
+  and make `ProductMeta.price` a JSON number (#207, SDK half).
+
+  - #195: request bodies are now snake_case (`{ product_ref, product_meta }` for
+    create, `{ product_meta }` for update) — the server rejects camelCase keys.
+    Responses are mapped snake→camel via a `dtoToCatalogProduct` mapper that
+    reuses the rooms-boundary `normalizeProductMeta` (client.ts) instead of blind
+    `as unknown as CatalogProduct` casts that left `productRef` / `createdAt` /
+    `archivedAt` undefined.
+  - `listProducts` now accepts `{ limit?, cursor?, signal? }` and returns
+    `{ products, hasMore, nextCursor }` mapped from the `{ products, has_more,
+next_cursor }` envelope (cursor-based pagination). A malformed-cursor 400
+    maps to `validation_error`.
+  - #207: `ProductMeta.price` is now `number` (non-negative JSON number), not a
+    host-pre-formatted display string. Callers own locale-aware formatting at
+    render time.
+  - #198: `catalog.test.ts` rewritten to real snake_case mock payloads with
+    numeric `price`, asserting the request body is snake_case and the response
+    mapping populates camelCase fields.
+
+  **Breaking (@oxpulse/chat-widget):** `ProductMeta.price` is now `number`, not a
+  host-pre-formatted string. This also changes the shared render-boundary
+  `normalizeProductMeta`, which now rejects a string `price` — so a product-card
+  message from an older client that sends a string price is dropped on receive.
+  See the wire-compat note tracked separately.
+
+  Note: `price: string → number` and the `listProducts` return-shape change are
+  breaking for consumers of the catalog API; they land within the same unreleased
+  minor as the original `SDKCatalogClient` export (#193), which never shipped a
+  correct form.
+
+  Closes #195. Closes #198. Closes #207.
+
+- 70fe423: ProductPicker UX polish + numeric-price display (Batch C).
+
+  - #207: the picker item price span and the W9 product-card message now format
+    the numeric `price` via `Intl.NumberFormat(locale, { style: 'currency',
+currency })` (new `formatPrice` helper in utils/i18n.ts) instead of the raw
+    `${price} ${currency}` string coercion ("19.99 USD"). Graceful fallback to
+    the raw number when `currency` is not a valid ISO-4217 code.
+  - #199: `ProductPicker.#loadProducts` no longer short-circuits on
+    `#allProducts.length > 0` — the Composer reuses one picker instance across
+    opens, so the cached first page froze the list for the widget lifetime
+    (stale after add/edit/delete). Products are refetched on every `show()`;
+    only the in-flight `#loading` guard remains.
+  - #200: `aria-live="polite"` is now set once on the stable list container in
+    `#buildPicker` (not per-branch on fresh child nodes), so loading / error /
+    empty / result-count transitions all announce to assistive tech (WCAG 2.2
+    SC 4.1.3).
+  - #205: missing `productMeta.title` falls back to a localized
+    `productPickerUntitled` key (en/ru) instead of rendering the literal string
+    "undefined"; the price span is omitted entirely when price/currency are
+    absent. The search filter guards against a missing title.
+  - #204: ArrowDown/ArrowUp keydown handler on the search input (where focus
+    lands on open) forwards to the first / last item button — arrow-key nav is
+    no longer dead until an item is focused.
+  - #201: verified already fixed — `aria-label='Product list'` is routed
+    through `t('productPickerList', lang)` (landed in a prior commit).
+
+  Closes #199. Closes #200. Closes #202. Closes #204. Closes #205. Closes #207.
+
+- 70fe423: Add ProductPicker — searchable dropdown for the seller product catalog.
+
+  New export: `ProductPicker` class (mirrors EmojiPicker pattern).
+
+  - Fetches products via `SDKCatalogClient.listProducts()`
+  - Search filter by title/productRef
+  - Arrow key navigation, Escape to close, outside-click dismissal
+  - Loading / empty / error states
+  - A11y: role="dialog", aria-modal, focus trap, aria-label
+
+  Composer wiring:
+
+  - New `catalogClient` option on `ComposerOptions` — when present, shows a
+    product picker button in the toolbar
+  - onSelect → `composer.setProductCard(ref, meta)` → existing product-card
+    chip → attached to next outgoing message
+
+  Widget wiring (#196 — was dead code end-to-end):
+
+  - New opt-in `seller-catalog` attribute / `sellerCatalog` config option
+    (boolean, default OFF — backward compatible). When ON, the widget
+    constructs an `SDKCatalogClient` from the SAME `jwt` + `base-url` it
+    already uses for its main SDK client and passes it as `catalogClient` to
+    the `Composer`, so the product-picker toolbar button renders. Without the
+    flag, no catalog client is constructed and behaviour is unchanged.
+
+  ProductPicker + button styles (#197 — previously zero CSS):
+
+  - `.oxp-product-picker` block in theme.ts mirroring `.oxp-emoji-picker`
+    (container surface/border/radius/shadow, search input, flex list items
+    with `justify-content: space-between` + `text-overflow: ellipsis` so the
+    title and price don't collide, `:hover`/`:focus-visible` rings, styled
+    loading/error/empty states).
+  - `.oxp-composer-product-btn` mirroring `.oxp-composer-emoji-btn`.
+
+  Closes #194. Closes #196. Closes #197.
+
+### Patch Changes
+
+- 70fe423: Seller-catalog SDK — Batch D (final cleanup): shared picker-dismiss helper
+  (#203) + LOW-severity hardening batch (#206).
+
+  - #203 (reuse): extract `useFloatingDismiss(pickerEl, anchorEl, { onHide,
+getRestoreFocusEl, signal })` into `utils/floating-dismiss.ts`. EmojiPicker
+    and ProductPicker shared ~60 byte-identical lines of outside-pointerdown
+    dismiss + Escape/Tab focus-trap (same `'input, button:not([disabled])'`
+    selector + shift-tab wrap) + abort-signal wiring, alongside the
+    already-shared `computeFloatingPosition`. Both pickers now call the single
+    helper. Behavior is identical — every existing emoji-picker AND
+    product-picker test (dismiss / focus-trap / escape / outside-click / abort)
+    stays green.
+  - #206a: `catalog.ts` error switch adds an explicit `422 → validation_error`
+    case (a 422 validation error previously fell to `default → server_4xx`,
+    mislabeling it); and `resp.json()` on a 2xx body is guarded so an empty
+    2xx body returns `null` instead of throwing a raw `SyntaxError` that
+    escapes the `SDKCatalogError` wrapper.
+  - #206b: `SDKCatalogClient` constructor warns (defense-in-depth,
+    non-breaking) when an absolute `baseUrl`'s scheme is not `https:` — the
+    JWT rides as `Authorization: Bearer <jwt>` and an `http://` absolute
+    baseUrl leaks it in cleartext (passive MITM). Empty / relative / localhost
+    / 127.0.0.1 baseUrls are allowed (dev + same-origin).
+  - #206c: `product-picker.ts` sets `aria-selected="false"` on each rendered
+    `role="option"` item and flips the keyboard-focused item to `"true"`
+    (listbox APG expectation).
+
+  Skipped (out of this batch, tracked separately in #206): authoring
+  DESIGN.md; the repo-wide `assertRawJwt` bearer-prefix dedup (11th copy —
+  systemic); the `httpStatusToCode` generalization (deferred until a 3rd
+  `SDK*Client` mapper appears).
+
+- Updated dependencies [70fe423]
+- Updated dependencies [70fe423]
+- Updated dependencies [70fe423]
+- Updated dependencies [b974a80]
+  - @oxpulse/chat-sdk@3.1.0
+
 ## 0.22.1
 
 ### Patch Changes
