@@ -50,12 +50,12 @@ import {
   getDictBytes,
   loadDict,
   type DictName,
-} from "./dicts";
-import { canEncodeAsV2, toV2, fromV2 } from "./envelope-v2";
-import { canEncodeAsV3, toV3, fromV3 } from "./envelope-v2";
+} from "./dicts.js";
+import { canEncodeAsV2, toV2, fromV2 } from "./envelope-v2.js";
+import { canEncodeAsV3, toV3, fromV3 } from "./envelope-v2.js";
 import { WireCodecError } from "./errors.js";
-import { asWireBytes, asHttpWireBytes } from "./brands";
-import type { WireBytes, HttpWireBytes } from "./brands";
+import { asWireBytes, asHttpWireBytes } from "./brands.js";
+import type { WireBytes, HttpWireBytes } from "./brands.js";
 
 export type { DictName };
 
