@@ -52,7 +52,7 @@ import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors
 import { createSFrameProvider } from './sframe.js';
 import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
-import { enqueue, dequeue, pending, updateEntry } from './outbox.js';
+import { enqueue, dequeue, pending, updateEntry, type PendingMessage } from './outbox.js';
 import { sendFile as sendFileHelper, type SendFileArgs } from './attachments.js';
 import {
   arrayBufferToBase64,
@@ -2506,10 +2506,22 @@ export class SDKChatClient {
   async flushOutbox(roomId: string): Promise<void> {
     for (const m of await pending(roomId)) {
       // Pending-attachment entries are in-memory orphans after a page reload
-      // (the uploadPromise is not persisted). Scrub them — the uploads are
-      // gone and the sealed bytes were never produced.
-      if (m.pendingAttachments) {
-        await dequeue(roomId, m.msgId);
+      // (the uploadPromise is not persisted, the blob is gone). Mark them as
+      // permanently failed — do NOT silently dequeue. The entry stays in the
+      // outbox so the widget can surface it as a failed message bubble with
+      // the caption preserved (dismiss-only, no retry — the blob is
+      // unrecoverable).
+      if (m.pendingAttachments && !m.sendFailed) {
+        await updateEntry(roomId, m.msgId, {
+          sendFailed: {
+            reason: 'Upload interrupted — attachment must be re-picked',
+            failedAt: Date.now(),
+          },
+        });
+        continue;
+      }
+      // Already-marked failed entries are skipped (not retried).
+      if (m.sendFailed) {
         continue;
       }
       try {
@@ -2532,6 +2544,26 @@ export class SDKChatClient {
         }
       }
     }
+  }
+
+  /**
+   * Return outbox entries that are permanently failed (either marked by
+   * `flushOutbox` via `sendFailed`, or still carrying `pendingAttachments`
+   * which are orphaned after a reload). The widget reads these on mount to
+   * render failed message bubbles with the caption preserved.
+   */
+  async getFailedOutboxEntries(roomId: string): Promise<PendingMessage[]> {
+    return (await pending(roomId)).filter(
+      (m) => m.sendFailed || m.pendingAttachments,
+    );
+  }
+
+  /**
+   * Dismiss (dequeue) a permanently failed outbox entry. Called by the
+   * widget when the user dismisses a failed message bubble.
+   */
+  async dismissFailedOutboxEntry(roomId: string, msgId: string): Promise<void> {
+    await dequeue(roomId, msgId);
   }
 
   /**
@@ -2740,23 +2772,25 @@ export class SDKChatClient {
 
       pendingCbs.forEach((cb) => cb());
 
-      // Enqueue the placeholder immediately — the message is now tracked in
-      // the outbox and ordered behind any earlier entry. The serial send
-      // chain ensures later messages wait behind this one.
-      await enqueue(roomId, {
-        msgId,
-        roomId,
-        senderUid: args.senderUid,
-        sealedB64: '',
-        threadRootMsgId: args.threadRootMsgId,
-        productRef: args.productRef,
-        productMeta: args.productMeta,
-        attempts: 0,
-        enqueuedAt: Date.now(),
-        pendingAttachments: { body: args.body },
-      });
-
       return this.#serializeSend(roomId, async () => {
+        // Enqueue the placeholder inside the serial chain — the message is now
+        // tracked in the outbox and ordered behind any earlier entry. Enqueuing
+        // inside the chain (rather than before it) is critical: an await before
+        // #serializeSend would yield control and let a later send enter the chain
+        // first, violating ordering.
+        await enqueue(roomId, {
+          msgId,
+          roomId,
+          senderUid: args.senderUid,
+          sealedB64: '',
+          threadRootMsgId: args.threadRootMsgId,
+          productRef: args.productRef,
+          productMeta: args.productMeta,
+          attempts: 0,
+          enqueuedAt: Date.now(),
+          pendingAttachments: { body: args.body },
+        });
+
         // Wait for uploads to complete — this is the slow part (seconds to
         // minutes for a video on a weak network). The serial chain holds here,
         // so any later message's send waits behind us (ordering preserved).

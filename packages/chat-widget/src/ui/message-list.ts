@@ -47,6 +47,20 @@ export interface MessageRow {
    * failed-decrypt placeholder instead of the (empty) normal body.
    */
   unsealError?: 'replay' | 'auth' | 'unknown';
+  /**
+   * Set when this message failed to send (upload interrupted on reload, or
+   * upload failed while the page was open). When set, the bubble renders a
+   * failure state with the caption text preserved, plus a retry button
+   * (when retry is meaningful — `retryable: true`) and a dismiss button.
+   */
+  sendFailed?: {
+    /** Human-readable reason for the failure. */
+    reason: string;
+    /** Whether retry is meaningful (blob still in memory). When false,
+     *  only a dismiss button is shown (the upload was interrupted by a
+     *  reload and the blob is unrecoverable). */
+    retryable: boolean;
+  };
   createdAt: string;
   deletedAt?: string;
   editedAt?: string;
@@ -224,6 +238,18 @@ export interface MessageListOptions {
    * untrusted server.
    */
   onDecryptError?: (msgId: string, seq: number, reason: 'replay' | 'auth' | 'unknown') => void;
+  /**
+   * Fires when the user clicks the retry button on a send-failed message
+   * bubble. Only called when `sendFailed.retryable` is true (the blob is
+   * still in memory). The host (element.ts) re-initiates the send.
+   */
+  onRetrySendFailed?: (msgId: string) => void;
+  /**
+   * Fires when the user clicks the dismiss button on a send-failed message
+   * bubble. The host (element.ts) dequeues the outbox entry and removes
+   * the row from the list.
+   */
+  onDismissFailedMessage?: (msgId: string) => void;
 }
 
 // ── MessageList ───────────────────────────────────────────────────────────────
@@ -888,6 +914,12 @@ export class MessageList {
    *  lifetime (a re-render via #updateBubble does not re-fire). Cleared in
    *  destroy(). */
   #firedDecryptErrors: Set<string> = new Set();
+  /** Send-failed: callback to the host when the user clicks retry on a
+   *  failed message bubble. */
+  #onRetrySendFailed?: (msgId: string) => void;
+  /** Send-failed: callback to the host when the user clicks dismiss on a
+   *  failed message bubble. */
+  #onDismissFailedMessage?: (msgId: string) => void;
   /** issue #67: blob: object URLs created by hydrateMediaSrc() (authenticated
    *  attachment fetch), keyed by msgId — revoked in #evictOldMessages() (same
    *  lifecycle as #teardownReactionTrigger/#pulseTimers for an evicted row) so
@@ -917,6 +949,8 @@ export class MessageList {
     this.#onWriteFailure = opts.onWriteFailure;
     this.#onAttachmentError = opts.onAttachmentError;
     this.#onDecryptError = opts.onDecryptError;
+    this.#onRetrySendFailed = opts.onRetrySendFailed;
+    this.#onDismissFailedMessage = opts.onDismissFailedMessage;
     this.#reactionsEnabled = opts.reactionsEnabled ?? true;
     this.#pinnedMessagesEnabled = opts.pinnedMessagesEnabled ?? true;
     // C1: use an internal AbortController so destroy() aborts mid-flight awaits.
@@ -1056,6 +1090,38 @@ export class MessageList {
    */
   handleMessage(row: MessageRow): void {
     this.#handleNewMessage(row);
+  }
+
+  /**
+   * Mark an existing message bubble as send-failed. Called by element.ts
+   * when an oxpulse-chat:send-failed event fires for a message whose
+   * optimistic echo is already in the list. Updates the stored row and
+   * re-renders the bubble in place.
+   */
+  markSendFailed(msgId: string, reason: string, retryable: boolean): void {
+    const row = this.#rows.get(msgId);
+    if (!row || !this.#listEl) return;
+    row.sendFailed = { reason, retryable };
+    const idx = this.#order.indexOf(msgId);
+    if (idx === -1) return;
+    const bubbles = this.#listEl.querySelectorAll('[role="article"]');
+    const el = bubbles[idx] as HTMLElement | undefined;
+    if (el) this.#updateBubble(el, row, idx);
+  }
+
+  /**
+   * Remove a row from the list (DOM + internal state). Called by element.ts
+   * when the user dismisses a send-failed message bubble.
+   */
+  removeRow(msgId: string): void {
+    if (!this.#listEl) return;
+    const idx = this.#order.indexOf(msgId);
+    if (idx === -1) return;
+    this.#order.splice(idx, 1);
+    this.#rows.delete(msgId);
+    const bubbles = this.#listEl.querySelectorAll('[role="article"]');
+    const rowEl = bubbles[idx]?.parentElement as HTMLElement | undefined;
+    if (rowEl) rowEl.remove();
   }
 
   /**
@@ -2336,6 +2402,46 @@ export class MessageList {
       const text = decodeText(row);
       bodyEl.innerHTML = renderMarkdown(text);
     }
+
+    // Send-failed overlay: the caption text is already rendered above (the
+    // user's typed text is preserved). Append a failure notice + retry/dismiss
+    // buttons below the body so the user understands the message did not send.
+    // Takes priority over product card / attachment rendering (a failed message
+    // shows neither — the attachment metadata is gone or unreliable).
+    if (row.sendFailed) {
+      el.setAttribute('data-send-failed', 'true');
+      const failEl = document.createElement('div');
+      failEl.className = 'oxp-send-failed';
+      const reasonEl = document.createElement('span');
+      reasonEl.className = 'oxp-send-failed-reason';
+      reasonEl.textContent = row.sendFailed.retryable
+        ? t('sendFailedUploadFailed', this.#lang)
+        : t('sendFailedUploadInterrupted', this.#lang);
+      failEl.appendChild(reasonEl);
+      if (row.sendFailed.retryable) {
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'oxp-send-failed-retry';
+        retryBtn.textContent = t('retry', this.#lang);
+        retryBtn.setAttribute('aria-label', t('retrySendingMessageAria', this.#lang));
+        retryBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          this.#onRetrySendFailed?.(row.msgId);
+        });
+        failEl.appendChild(retryBtn);
+      }
+      const dismissBtn = document.createElement('button');
+      dismissBtn.type = 'button';
+      dismissBtn.className = 'oxp-send-failed-dismiss';
+      dismissBtn.textContent = t('dismissFailedMessage', this.#lang);
+      dismissBtn.setAttribute('aria-label', t('dismissFailedMessageAria', this.#lang));
+      dismissBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.#onDismissFailedMessage?.(row.msgId);
+      });
+      failEl.appendChild(dismissBtn);
+      el.appendChild(failEl);
+    }
     // W7: If this message is a reply, render a compact quote of the root above the body.
     if (row.threadRootMsgId) {
       this.#renderReplyQuote(el, row);
@@ -2349,7 +2455,7 @@ export class MessageList {
     // W9: Render product card when a productRef + productMeta are present.
     // review-fix LOW: gate on !deletedAt && !unsealError so product card never
     // replaces or leaks alongside tombstone / failed-decrypt placeholders.
-    if (!row.deletedAt && !row.unsealError && row.productRef && row.productMeta) {
+    if (!row.deletedAt && !row.unsealError && !row.sendFailed && row.productRef && row.productMeta) {
       const meta = normalizeProductMeta(row.productMeta);
       if (meta) el.appendChild(renderProduct(meta, this.#lang));
     }
@@ -2361,7 +2467,7 @@ export class MessageList {
     // render attachment links next to the placeholder text. (issue #67:
     // row.attachments is now populated by element.ts's decodeRowAttachments()
     // for any row whose plaintext decodes as an attachment envelope.)
-    if (!row.deletedAt && !row.unsealError && row.attachments && row.attachments.length > 0) {
+    if (!row.deletedAt && !row.unsealError && !row.sendFailed && row.attachments && row.attachments.length > 0) {
       const attachmentsEl = document.createElement('div');
       attachmentsEl.className = 'oxp-bubble-attachments';
       if (allImageAttachments(row.attachments) && row.attachments.length > 1) {

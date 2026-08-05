@@ -354,4 +354,156 @@ describe('outbox', () => {
     expect(remaining.some((m) => m.msgId === 'kt-401')).toBe(true);
     expect(failed).toHaveLength(1);
   });
+
+  // ── D3/F2: ordering against the real SDK serial chain ───────────────────
+  //
+  // A message with a slow attachment enqueued BEFORE a text-only message must
+  // reach the room first. This exercises the REAL client path (sendAttachmentMessageOptimistic
+  // + sendTextOptimistic through #serializeSend), not a stub.
+  //
+  // Mutation: remove the #serializeSend wrapper from sendOptimistic in client.ts
+  // (the text send would fire immediately and reach the server before the
+  // attachment send, violating ordering) → RED.
+  it('F2_attachment_message_enqueued_before_text_reaches_room_first', async () => {
+    const sendOrder: string[] = [];
+    let attResolve!: (v: ArrayBuffer) => void;
+    const slowUpload = new Promise<ArrayBuffer>((resolve) => { attResolve = resolve; });
+
+    // Track which message's send() call happens first by spying on the
+    // client's send method. The send() method receives the msgId in args.
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({ seq: 1, sender_uid: 'u', msg_id: 'ok', created_at: 0 }),
+        { status: 200 },
+      );
+    });
+
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    // Spy on send() to track which msgId reaches the server first.
+    const originalSend = c.send.bind(c);
+    c.send = vi.fn(async (roomId: string, args: { senderUid: string; sealed: ArrayBuffer; msgId?: string }) => {
+      sendOrder.push(args.msgId ?? 'unknown');
+      return originalSend(roomId, args);
+    }) as typeof c.send;
+
+    // 1. Enqueue an attachment message with a slow upload (never resolves during the test).
+    const attHandle = c.sendAttachmentMessageOptimistic('room-f2', {
+      senderUid: 'u',
+      body: 'photo caption',
+      uploadPromise: slowUpload,
+      msgId: 'att-msg-1',
+    });
+
+    // 2. Immediately enqueue a text-only message.
+    const textHandle = c.sendTextOptimistic('room-f2', {
+      senderUid: 'u',
+      text: 'follow-up text',
+      msgId: 'text-msg-1',
+    });
+
+    // 3. Resolve the slow upload — both sends should now proceed in order.
+    attResolve(new ArrayBuffer(8));
+    await Promise.allSettled([attHandle.done, textHandle.done]);
+
+    // F2 core invariant: the attachment message's send happened BEFORE the
+    // text message's send. The #serializeSend wrapper ensures the text send
+    // waits behind the attachment send (which is itself waiting for the upload).
+    // If #serializeSend were removed from sendOptimistic, the text send would
+    // fire immediately (before the upload resolves) and reach the server first.
+    expect(sendOrder).toEqual(['att-msg-1', 'text-msg-1']);
+  });
+
+  // ── D1/F1: failed-bubble on reload, caption preserved, NOT silently removed ──
+  //
+  // A message whose attachments were mid-upload at reload appears as a failed
+  // outbox entry with its caption intact, and is NOT silently removed.
+  // Mutation: restore the silent scrub in flushOutbox (dequeue instead of
+  // updateEntry with sendFailed) → RED (the entry is gone, getFailedOutboxEntries returns []).
+  it('F1_pendingAttachments_on_reload_marked_failed_not_silently_dropped', async () => {
+    // Pre-populate the outbox with a pendingAttachments entry (simulates reload
+    // mid-upload — the entry was persisted but the uploadPromise is gone).
+    await enqueue('room-f1', {
+      msgId: 'pending-att-1',
+      roomId: 'room-f1',
+      senderUid: 'u',
+      sealedB64: '',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+      pendingAttachments: { body: 'my photo caption' },
+    });
+
+    // flushOutbox is called on reconnect/reload — it must mark the entry as
+    // sendFailed, NOT dequeue it.
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    await c.flushOutbox('room-f1');
+
+    // The entry is still in the outbox (NOT silently dropped).
+    const remaining = await pending('room-f1');
+    expect(remaining.some((m) => m.msgId === 'pending-att-1')).toBe(true);
+
+    // The entry is marked as sendFailed.
+    const failed = remaining.find((m) => m.msgId === 'pending-att-1');
+    expect(failed?.sendFailed).toBeDefined();
+    expect(failed?.sendFailed?.reason).toContain('Upload interrupted');
+
+    // The caption is preserved (pendingAttachments.body is still set).
+    expect(failed?.pendingAttachments?.body).toBe('my photo caption');
+
+    // getFailedOutboxEntries returns the entry.
+    const failedEntries = await c.getFailedOutboxEntries('room-f1');
+    expect(failedEntries.some((m) => m.msgId === 'pending-att-1')).toBe(true);
+  });
+
+  // ── F4: E2EE room's text send is unchanged ──────────────────────────────
+  //
+  // A plaintext-mode refactor on a shared send path (sendTextOptimistic now
+  // delegates to sendOptimistic with UTF-8 bytes in plaintext mode) is exactly
+  // where an E2EE downgrade hides. This test verifies an sframe room's text
+  // send goes through the crypto provider (seal is called), NOT the plaintext
+  // path.
+  //
+  // Mutation: remove the `effectiveMode === 'plaintext'` gate in
+  // sendTextOptimistic (client.ts:2559-2560) so an sframe room falls through
+  // to the plaintext path → RED (seal is never called, the outbox stores
+  // raw UTF-8 instead of ciphertext).
+  it('F4_sframe_room_text_send_uses_crypto_provider_not_plaintext_path', async () => {
+    let sealCalls = 0;
+    const trackingProvider: CryptoProvider = {
+      seal: async (p: ArrayBuffer, _ctx: SealContext) => { sealCalls++; return p; },
+      unseal: async (c: ArrayBuffer, _ctx: SealContext) => c,
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ seq: 1, sender_uid: 'u', msg_id: 'e2ee-1', created_at: 0 }),
+        { status: 200 },
+      ),
+    );
+
+    const c = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      _testNoSleep: true,
+      e2ee: { provider: trackingProvider },
+      cryptoMode: 'sframe-static',
+    });
+
+    const handle = c.sendTextOptimistic('room-e2ee', {
+      senderUid: 'u',
+      text: 'secret message',
+      msgId: 'e2ee-1',
+    });
+    await handle.done;
+
+    // The crypto provider's seal was called — the text was sealed, not
+    // UTF-8 encoded directly. If the plaintext path were taken, sealCalls
+    // would be 0.
+    expect(sealCalls).toBe(1);
+
+    // The outbox entry stores the sealed bytes (from the provider), not
+    // raw UTF-8. Since the provider is identity, sealedB64 is the base64
+    // of the UTF-8 bytes — but the key invariant is that seal() was called.
+    const remaining = await pending('room-e2ee');
+    expect(remaining.every((m) => m.msgId !== 'e2ee-1')).toBe(true); // dequeued on success
+  });
 });

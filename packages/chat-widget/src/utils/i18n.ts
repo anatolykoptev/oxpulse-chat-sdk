@@ -34,6 +34,10 @@ export type LocaleKey =
   | 'heartButtonTitle'
   | 'retryLoadingMessagesAria'
   | 'retry'
+  | 'sendFailedUploadInterrupted'
+  | 'sendFailedUploadFailed'
+  | 'dismissFailedMessage'
+  | 'dismissFailedMessageAria'
   // Reactions
   | 'reactionsGroupAria'
   | 'chooseReactionAria'
@@ -177,6 +181,10 @@ const en: LocaleTable = {
   heartButtonTitle: 'React ❤ · hold for more',
   retryLoadingMessagesAria: 'Retry loading messages',
   retry: 'Retry',
+  sendFailedUploadInterrupted: 'Upload was interrupted — attachment must be re-picked',
+  sendFailedUploadFailed: 'Upload failed — tap retry to try again',
+  dismissFailedMessage: 'Dismiss',
+  dismissFailedMessageAria: 'Dismiss failed message',
 
   reactionsGroupAria: 'Reactions',
   chooseReactionAria: 'Choose reaction',
@@ -311,6 +319,10 @@ const ru: LocaleTable = {
   heartButtonTitle: 'Реакция ❤ · удержите для выбора',
   retryLoadingMessagesAria: 'Повторить загрузку сообщений',
   retry: 'Повторить',
+  sendFailedUploadInterrupted: 'Загрузка прервана — выберите вложение заново',
+  sendFailedUploadFailed: 'Ошибка загрузки — нажмите «Повторить»',
+  dismissFailedMessage: 'Скрыть',
+  dismissFailedMessageAria: 'Скрыть сообщение с ошибкой',
 
   reactionsGroupAria: 'Реакции',
   chooseReactionAria: 'Выбрать реакцию',

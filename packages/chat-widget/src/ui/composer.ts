@@ -195,6 +195,18 @@ export class Composer {
   }
 
   /**
+   * D2: Restore text into the textarea after mount — used by the send-failed
+   * retry flow to put the caption back so the user can re-pick the attachment
+   * and re-send. Triggers #updateState so the send button reflects the new text.
+   */
+  restoreText(text: string): void {
+    if (this.#destroyed || !this.#textarea) return;
+    this.#textarea.value = text;
+    this.#lastText = text;
+    this.#updateState();
+  }
+
+  /**
    * W9: Attach a product card to the next outgoing text message.
    * The product ref and metadata are forwarded to sendText/sendTextOptimistic
    * and are cleared once the message is sent.

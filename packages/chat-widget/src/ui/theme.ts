@@ -990,6 +990,42 @@ export const THEME_CSS = `
   padding: 2px calc(var(--oxp-spacing-unit) * 0.625);
 }
 
+/* D1/D2: send-failed message state — the bubble stays with caption text
+ * preserved, and a failure notice + retry/dismiss buttons are appended.
+ * Uses the same danger-tint convention as .oxp-unseal-error. */
+.oxp-send-failed {
+  margin-top: calc(var(--oxp-spacing-unit) * 0.5);
+  display: flex;
+  align-items: center;
+  gap: calc(var(--oxp-spacing-unit) * 0.5);
+  flex-wrap: wrap;
+}
+.oxp-send-failed-reason {
+  color: var(--oxp-fg-secondary);
+  font-size: 0.85em;
+  font-style: italic;
+  background: color-mix(in srgb, var(--oxp-danger) 12%, transparent);
+  border-radius: calc(var(--oxp-radius) * 0.35);
+  padding: 2px calc(var(--oxp-spacing-unit) * 0.625);
+}
+.oxp-send-failed-retry,
+.oxp-send-failed-dismiss {
+  font-size: 0.85em;
+  border: 1px solid var(--oxp-border);
+  border-radius: calc(var(--oxp-radius) * 0.35);
+  padding: 2px calc(var(--oxp-spacing-unit) * 0.5);
+  background: var(--oxp-bg);
+  color: var(--oxp-fg);
+  cursor: pointer;
+}
+.oxp-send-failed-retry:hover,
+.oxp-send-failed-dismiss:hover {
+  background: var(--oxp-tint, #f1f5f9);
+}
+.oxp-bubble[data-send-failed='true'] {
+  border: 1px solid color-mix(in srgb, var(--oxp-danger) 30%, transparent);
+}
+
 /* ── Markdown styles ── */
 /* 2A: use --oxp-code-bg (semantic token) instead of --oxp-border (structural token).
  * B3 (BLOCKER): add --oxp-code-border for guaranteed code region boundary.

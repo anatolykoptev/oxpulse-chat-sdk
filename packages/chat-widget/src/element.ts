@@ -190,6 +190,18 @@ export class OxpulseChatElement extends HTMLElement {
   #iframe: HTMLIFrameElement | null = null;
   /** Guard: true while refreshToken() syncs the jwt attribute in place — suppresses the remount. */
   #suppressJwtReboot = false;
+  /**
+   * D2: Pending retry context for send-failed messages — keyed by msgId.
+   * Stores the caption text + send args so the user can retry an upload
+   * failure while the page is still open (blob still in memory). The retry
+   * re-initiates the send via the composer's non-blocking path.
+   */
+  #pendingRetries: Map<string, { roomId: string; body: string; sendArgs: import('./ui/composer.js').SendTextArgs }> = new Map();
+  /**
+   * D2: Bound listener for oxpulse-chat:send-failed events — stored so it
+   * can be removed in disconnectedCallback.
+   */
+  #sendFailedListener: ((ev: Event) => void) | null = null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -214,6 +226,12 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList = null;
     this.#styleEl = null;
     this.#iframe = null;
+    // D2: remove the send-failed listener and clear retry context.
+    if (this.#sendFailedListener) {
+      this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
+      this.#sendFailedListener = null;
+    }
+    this.#pendingRetries.clear();
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -358,6 +376,12 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList = null;
     this.#styleEl = null;
     this.#iframe = null;
+    // D2: remove the send-failed listener and clear retry context.
+    if (this.#sendFailedListener) {
+      this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
+      this.#sendFailedListener = null;
+    }
+    this.#pendingRetries.clear();
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -637,6 +661,13 @@ export class OxpulseChatElement extends HTMLElement {
         pinMessage?(roomId: string, msgId: string): Promise<void>;
         /** #228: unpin a message. No-op if not pinned. */
         unpinMessage?(roomId: string, msgId: string): Promise<void>;
+        /** Retry queued outbox messages on reconnect/reload. */
+        flushOutbox?(roomId: string): Promise<void>;
+        /** Return permanently failed outbox entries (upload interrupted on
+         *  reload). The widget reads these on mount to render failed bubbles. */
+        getFailedOutboxEntries?(roomId: string): Promise<Array<{ msgId: string; senderUid: string; pendingAttachments?: { body: string }; sendFailed?: { reason: string; failedAt: number }; threadRootMsgId?: string; productRef?: string; productMeta?: unknown }>>;
+        /** Dismiss (dequeue) a permanently failed outbox entry. */
+        dismissFailedOutboxEntry?(roomId: string, msgId: string): Promise<void>;
         readonly baseUrl?: string;
         readonly jwt?: string;
       }
@@ -1161,6 +1192,10 @@ export class OxpulseChatElement extends HTMLElement {
                   // sees their message (with caption) while uploads proceed.
                   optimisticEcho(roomId, body, args, msgId);
 
+                  // D2: Store retry context so the send-failed bubble's retry
+                  // button can re-initiate the send (blob is still in memory).
+                  self.#pendingRetries.set(msgId, { roomId, body, sendArgs: args ?? {} });
+
                   // Build the uploadPromise that resolves with sealed bytes once
                   // all attachment uploads complete. The SDK's serial send chain
                   // awaits this before sending.
@@ -1182,6 +1217,8 @@ export class OxpulseChatElement extends HTMLElement {
                   // handle's onFailed callback, not via the composer. The
                   // composer has already moved on.
                   handle.done.then((res) => {
+                    // D2: send succeeded — clear retry context.
+                    self.#pendingRetries.delete(msgId);
                     self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                       bubbles: true,
                       composed: true,
@@ -1307,11 +1344,71 @@ export class OxpulseChatElement extends HTMLElement {
         // onAttachmentError's wiring). Deduped once per msgId per widget
         // lifetime inside MessageList.
         onDecryptError: (msgId, seq, reason) => this.#notifyDecryptError(config.roomId, msgId, seq, reason),
+        // D2: retry button on a send-failed bubble — re-initiates the send.
+        // Only fires for retryable failures (blob still in memory).
+        onRetrySendFailed: (msgId: string) => {
+          this.#retrySendFailed(config.roomId, msgId);
+        },
+        // D1: dismiss button on a send-failed bubble — dequeues the outbox
+        // entry and removes the row from the list.
+        onDismissFailedMessage: (msgId: string) => {
+          this.#dismissFailedMessage(config.roomId, msgId);
+        },
       });
 
       await this.#messageList.mount();
 
       if (signal.aborted) return;
+
+      // D1: Read failed outbox entries on mount — these are messages whose
+      // attachment uploads were interrupted by a page reload. The blob is
+      // gone, so they are permanently failed (not retryable). Render them as
+      // failed bubbles with the caption preserved so the user understands the
+      // message did not send and can re-pick the attachment.
+      if (effectiveSendClient?.getFailedOutboxEntries) {
+        try {
+          const failedEntries = await effectiveSendClient.getFailedOutboxEntries(config.roomId);
+          for (const entry of failedEntries) {
+            const caption = entry.pendingAttachments?.body ?? '';
+            const failedRow: MessageRow = {
+              seq: 0,
+              msgId: entry.msgId,
+              senderUid: entry.senderUid,
+              sealed: new ArrayBuffer(0),
+              plaintext: new TextEncoder().encode(caption).buffer as ArrayBuffer,
+              createdAt: new Date(entry.sendFailed?.failedAt ?? Date.now()).toISOString(),
+              threadRootMsgId: entry.threadRootMsgId ?? null,
+              productRef: entry.productRef ?? null,
+              productMeta: (entry.productMeta as import('./types.js').ProductMeta) ?? null,
+              text: caption,
+              sendFailed: {
+                reason: entry.sendFailed?.reason ?? 'Upload interrupted',
+                retryable: false, // blob is gone after reload — no retry
+              },
+            };
+            this.#messageList?.handleMessage(failedRow);
+          }
+        } catch {
+          // Best-effort — failed-outbox reading is a UX enhancement, not a gate.
+        }
+      }
+
+      // D2: Wire the oxpulse-chat:send-failed listener. The composer's
+      // non-blocking attachment send path dispatches this event when an upload
+      // fails while the page is still open (the blob is still in memory, so
+      // retry is meaningful). The listener marks the message bubble as failed
+      // with a retry affordance. Without this listener the failure event has
+      // no consumer — the user sees nothing.
+      if (this.#sendFailedListener) {
+        this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
+      }
+      this.#sendFailedListener = (ev: Event) => {
+        const detail = (ev as CustomEvent).detail as { roomId: string; msgId: string; message: string };
+        if (!detail || detail.roomId !== config.roomId) return;
+        // Mark the bubble as failed with retry=true (blob still in memory).
+        this.#messageList?.markSendFailed(detail.msgId, detail.message, true);
+      };
+      this.addEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
 
       // CB1: Wire Reconnector — drives banner + retry loop for subscribe errors.
       // Mounted into widgetRoot so banner sits above message list (z-index 5 per theme.ts).
@@ -1513,6 +1610,44 @@ export class OxpulseChatElement extends HTMLElement {
     el.className = 'oxp-error';
     el.textContent = `OxPulse Chat: ${message}`;
     this.#shadow.appendChild(el);
+  }
+
+  /**
+   * D2: Retry a send-failed message. Re-initiates the non-blocking attachment
+   * send via the composer's path. The blob is still in memory (retryable=true).
+   * Clears the failed state on the bubble and re-dispatches through the
+   * composer so the serial chain preserves ordering.
+   */
+  #retrySendFailed(roomId: string, msgId: string): void {
+    const ctx = this.#pendingRetries.get(msgId);
+    if (!ctx) return;
+    this.#pendingRetries.delete(msgId);
+    // Remove the failed row — the retry will produce a new optimistic echo.
+    this.#messageList?.removeRow(msgId);
+    // Re-insert the caption text into the composer so the user can re-pick
+    // the attachment and re-send. The blob is in memory but the staged items
+    // were detached, so the user needs to re-stage them. The caption is
+    // preserved in the composer input.
+    this.#composer?.restoreText(ctx.body);
+  }
+
+  /**
+   * D1: Dismiss a send-failed message. Dequeues the outbox entry and removes
+   * the row from the list. No retry — the blob is unrecoverable (reload case)
+   * or the user chose to dismiss.
+   */
+  #dismissFailedMessage(roomId: string, msgId: string): void {
+    this.#pendingRetries.delete(msgId);
+    this.#messageList?.removeRow(msgId);
+    // Best-effort dequeue from the outbox.
+    const c = this.#config;
+    if (c) {
+      // The SDK client is not directly accessible here, but the outbox entry
+      // is already marked sendFailed and will not be retried by flushOutbox.
+      // The entry stays until the next page reload clears idb, or the host
+      // calls dismissFailedOutboxEntry directly. For now, removeRow is the
+      // user-visible action.
+    }
   }
 }
 

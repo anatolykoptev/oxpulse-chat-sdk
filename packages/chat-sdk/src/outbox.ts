@@ -32,10 +32,21 @@ export interface PendingMessage {
    *  the serial send processor defers the send until the uploads resolve
    *  and `updateEntry` replaces the placeholder with real sealed bytes.
    *  On page reload these entries are orphaned (uploads are in-memory only)
-   *  and are scrubbed by `flushOutbox`. */
+   *  and are marked permanently failed by `flushOutbox` (see `sendFailed`). */
   pendingAttachments?: {
     /** The caption / body text for the attachment message. */
     body: string;
+  };
+  /** Set by `flushOutbox` when a `pendingAttachments` entry is orphaned by a
+   *  page reload — the upload blob is gone and the send can never complete.
+   *  The entry is NOT dequeued: it stays in the outbox so the widget can
+   *  surface it as a permanently failed message bubble (caption preserved,
+   *  dismiss-only — no retry because the blob is unrecoverable). */
+  sendFailed?: {
+    /** Human-readable reason for the failure. */
+    reason: string;
+    /** Timestamp of the failure (Date.now()). */
+    failedAt: number;
   };
 }
 
