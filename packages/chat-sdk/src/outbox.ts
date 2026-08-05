@@ -106,3 +106,52 @@ export async function updateEntry(
     // idb unavailable — nothing to update.
   }
 }
+
+/**
+ * R3/F2: Per-room cap on permanently failed outbox entries. A queue of
+ * sendFailed / pendingAttachments entries that only grows is a slow leak with
+ * a UI attached — the user meets it as a chat that gets slower and dirtier
+ * every week. This cap bounds it.
+ *
+ * Policy: per-room cap with OLDEST-FIRST eviction (by `sendFailed.failedAt`
+ * ?? `enqueuedAt`). Chosen over an age-based sweep because a cap is
+ * deterministic and bounded even during a burst of failures in one session
+ * (all recent, none age-swept), and matches the user's mental model: keep the
+ * most recent failures visible, drop ancient ones they gave up on. Enforced
+ * at the write site (flushOutbox after marking) so the stored set is always
+ * within cap.
+ */
+export const MAX_FAILED_OUTBOX_ENTRIES = 50;
+
+/**
+ * Prune permanently failed entries (sendFailed || pendingAttachments) for
+ * roomId down to `cap`, evicting the oldest first. Atomic — single idb
+ * transaction. No-op when at or below cap. Called by `flushOutbox` after it
+ * marks new failures so the failed set never exceeds the cap.
+ */
+export async function pruneFailedEntries(
+  roomId: string,
+  cap: number = MAX_FAILED_OUTBOX_ENTRIES,
+): Promise<void> {
+  const key = `outbox:${roomId}`;
+  try {
+    await update<PendingMessage[]>(key, (cur) => {
+      const all = cur ?? [];
+      const failed = all.filter((m) => m.sendFailed || m.pendingAttachments);
+      if (failed.length <= cap) return all;
+      // Oldest-first eviction: sort by failedAt ?? enqueuedAt ascending, drop
+      // the (failed.length - cap) oldest. Non-failed entries are always kept.
+      const sorted = [...failed].sort(
+        (a, b) =>
+          (a.sendFailed?.failedAt ?? a.enqueuedAt) -
+          (b.sendFailed?.failedAt ?? b.enqueuedAt),
+      );
+      const evictIds = new Set(
+        sorted.slice(0, failed.length - cap).map((m) => m.msgId),
+      );
+      return all.filter((m) => !evictIds.has(m.msgId));
+    });
+  } catch {
+    // idb unavailable — nothing to prune.
+  }
+}

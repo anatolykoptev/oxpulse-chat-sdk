@@ -202,6 +202,13 @@ export class OxpulseChatElement extends HTMLElement {
    * can be removed in disconnectedCallback.
    */
   #sendFailedListener: ((ev: Event) => void) | null = null;
+  /**
+   * R3/F1: Bound dismissFailedOutboxEntry from the effective send client.
+   * Stored so #dismissFailedMessage can durably dequeue a failed outbox
+   * entry (the user's dismiss must outlive a reload). Null when the client
+   * lacks the method (anon-read mode) or after teardown.
+   */
+  #dismissFailedOutboxEntry: ((roomId: string, msgId: string) => Promise<void>) | null = null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -232,6 +239,7 @@ export class OxpulseChatElement extends HTMLElement {
       this.#sendFailedListener = null;
     }
     this.#pendingRetries.clear();
+    this.#dismissFailedOutboxEntry = null;
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -382,6 +390,7 @@ export class OxpulseChatElement extends HTMLElement {
       this.#sendFailedListener = null;
     }
     this.#pendingRetries.clear();
+    this.#dismissFailedOutboxEntry = null;
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
@@ -810,6 +819,13 @@ export class OxpulseChatElement extends HTMLElement {
       //                               UNLESS allowWrite + writeClient: use write client instead
       // In all cases: writeClient (if present) takes precedence for sends (named-write capability).
       const effectiveSendClient: RawClient | null = writeClient ?? (!isAnonMode ? sdkClient : null);
+
+      // R3/F1: stash the dismissFailedOutboxEntry seam so #dismissFailedMessage
+      // can durably dequeue a failed outbox entry (the user's dismiss must
+      // outlive a reload). Bound to preserve `this`-less dispatch.
+      this.#dismissFailedOutboxEntry = effectiveSendClient?.dismissFailedOutboxEntry
+        ? effectiveSendClient.dismissFailedOutboxEntry.bind(effectiveSendClient)
+        : null;
 
       // Adapt the real SDK client to the widget's duck-typed MessageListClient interface.
       // The widget components use stable narrow interfaces defined in their own files;
@@ -1613,41 +1629,39 @@ export class OxpulseChatElement extends HTMLElement {
   }
 
   /**
-   * D2: Retry a send-failed message. Re-initiates the non-blocking attachment
-   * send via the composer's path. The blob is still in memory (retryable=true).
-   * Clears the failed state on the bubble and re-dispatches through the
-   * composer so the serial chain preserves ordering.
+   * D2/R3: Retry a send-failed message. Restores the caption text into the
+   * composer so the user can re-pick the attachment and re-send. The blob is
+   * still in memory (retryable=true).
+   *
+   * R3/F3: The failed bubble is NOT removed here — the failure stays visible
+   * until a re-send is actually dispatched (a new optimistic echo replaces it)
+   * or the user dismisses it. Removing the row eagerly destroyed the evidence
+   * of the lost message before the user had re-staged the attachment.
    */
   #retrySendFailed(roomId: string, msgId: string): void {
     const ctx = this.#pendingRetries.get(msgId);
     if (!ctx) return;
     this.#pendingRetries.delete(msgId);
-    // Remove the failed row — the retry will produce a new optimistic echo.
-    this.#messageList?.removeRow(msgId);
     // Re-insert the caption text into the composer so the user can re-pick
     // the attachment and re-send. The blob is in memory but the staged items
     // were detached, so the user needs to re-stage them. The caption is
-    // preserved in the composer input.
+    // preserved in the composer input. The failed bubble stays visible.
     this.#composer?.restoreText(ctx.body);
   }
 
   /**
-   * D1: Dismiss a send-failed message. Dequeues the outbox entry and removes
-   * the row from the list. No retry — the blob is unrecoverable (reload case)
-   * or the user chose to dismiss.
+   * D1/R3: Dismiss a send-failed message. Durably dequeues the outbox entry
+   * (so the dismiss survives a reload) and removes the row from the list.
+   * No retry — the blob is unrecoverable (reload case) or the user chose to
+   * dismiss.
    */
   #dismissFailedMessage(roomId: string, msgId: string): void {
     this.#pendingRetries.delete(msgId);
     this.#messageList?.removeRow(msgId);
-    // Best-effort dequeue from the outbox.
-    const c = this.#config;
-    if (c) {
-      // The SDK client is not directly accessible here, but the outbox entry
-      // is already marked sendFailed and will not be retried by flushOutbox.
-      // The entry stays until the next page reload clears idb, or the host
-      // calls dismissFailedOutboxEntry directly. For now, removeRow is the
-      // user-visible action.
-    }
+    // R3/F1: Durably dequeue from the outbox so the failed bubble does NOT
+    // reappear on the next mount. Fire-and-forget — best-effort (idb may be
+    // unavailable, in which case the entry is already gone from memory).
+    void this.#dismissFailedOutboxEntry?.(roomId, msgId).catch(() => {});
   }
 }
 

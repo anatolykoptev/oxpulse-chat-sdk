@@ -506,4 +506,49 @@ describe('outbox', () => {
     const remaining = await pending('room-e2ee');
     expect(remaining.every((m) => m.msgId !== 'e2ee-1')).toBe(true); // dequeued on success
   });
+
+  // ── R3/F2: failed entries grow without bound — per-room cap with oldest-first eviction ──
+  //
+  // A queue of sendFailed entries that only grows is a slow leak with a UI
+  // attached. flushOutbox now prunes failed entries (sendFailed ||
+  // pendingAttachments) to a per-room cap, evicting the OLDEST first (by
+  // failedAt ?? enqueuedAt) so the user keeps their most recent failures
+  // visible and ancient ones they gave up on are dropped.
+  //
+  // Mutation: remove the pruneFailedEntries call from flushOutbox → RED
+  // (all cap+1 entries survive, the oldest is NOT evicted).
+  it('F2_flushOutbox_evicts_oldest_failed_entries_beyond_per_room_cap', async () => {
+    const { MAX_FAILED_OUTBOX_ENTRIES } = await import('../outbox.js');
+    const cap = MAX_FAILED_OUTBOX_ENTRIES;
+    // Pre-populate cap+1 already-failed entries with distinct failedAt
+    // timestamps so eviction order is deterministic (oldest = smallest failedAt).
+    const base = 1_000_000;
+    for (let i = 0; i <= cap; i++) {
+      await enqueue('room-f2-evict', {
+        msgId: `fail-${i}`,
+        roomId: 'room-f2-evict',
+        senderUid: 'u',
+        sealedB64: '',
+        attempts: 0,
+        enqueuedAt: base + i,
+        sendFailed: { reason: 'Upload interrupted', failedAt: base + i },
+      });
+    }
+
+    // flushOutbox skips already-failed entries (no retry) but MUST prune the
+    // set down to the cap, evicting the oldest.
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    await c.flushOutbox('room-f2-evict');
+
+    const remaining = await pending('room-f2-evict');
+    const failedRemaining = remaining.filter((m) => m.sendFailed);
+
+    // Exactly cap entries survive (the +1 oldest was evicted).
+    expect(failedRemaining).toHaveLength(cap);
+
+    // The OLDEST (fail-0, failedAt=base+0) was evicted; the newest (fail-cap)
+    // survives.
+    expect(failedRemaining.some((m) => m.msgId === 'fail-0')).toBe(false);
+    expect(failedRemaining.some((m) => m.msgId === `fail-${cap}`)).toBe(true);
+  });
 });

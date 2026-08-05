@@ -52,7 +52,7 @@ import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors
 import { createSFrameProvider } from './sframe.js';
 import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
-import { enqueue, dequeue, pending, updateEntry, type PendingMessage } from './outbox.js';
+import { enqueue, dequeue, pending, updateEntry, pruneFailedEntries, type PendingMessage } from './outbox.js';
 import { sendFile as sendFileHelper, type SendFileArgs } from './attachments.js';
 import {
   arrayBufferToBase64,
@@ -2544,6 +2544,10 @@ export class SDKChatClient {
         }
       }
     }
+    // R3/F2: prune failed entries (sendFailed || pendingAttachments) to the
+    // per-room cap, evicting the oldest first. Without this, failed entries
+    // grow without bound — a slow leak with a UI attached.
+    await pruneFailedEntries(roomId);
   }
 
   /**

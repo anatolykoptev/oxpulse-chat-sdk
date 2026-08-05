@@ -1967,71 +1967,15 @@ describe('Composer', () => {
     composer.destroy();
   });
 
-  // F2: ordering preserved — a text message sent after an attachment message
-  // does not overtake it. The composer calls sendAttachmentMessageOptimistic
-  // first, then sendTextOptimistic. Both go through the SDK outbox's per-room
-  // serial chain, so the text send waits behind the attachment send.
-  // Mutation: remove the #serializeSend wrapper from sendOptimistic — the
-  // text send would fire immediately and potentially reach the server before
-  // the attachment send, violating ordering.
-  it('F2_text_message_sent_after_attachment_message_waits_for_ordering', async () => {
-    // Use controllable stubs: the attachment upload never resolves during the
-    // test, so the attachment send is "stuck" waiting. The text send should
-    // be queued behind it (not fire immediately).
-    const attStubs = makeControllableUploadStubs();
-    const sendOrder: string[] = [];
-
-    // Track the order in which sendTextOptimistic and sendAttachmentMessageOptimistic
-    // actually START their send (not just when the composer calls them).
-    const sendTextOptimistic = vi.fn(() => {
-      sendOrder.push('text');
-      return Promise.resolve({ msgId: 'text-1' });
-    });
-
-    const sendAttachmentMessageOptimistic = vi.fn((_roomId: string, _body: string, attachmentsPromise: Promise<unknown>) => {
-      sendOrder.push('attachment');
-      attachmentsPromise.catch(() => {});
-      return { msgId: 'att-1' };
-    });
-
-    const client = {
-      ...makeStubClient({}),
-      ...attStubs,
-      sendTextOptimistic,
-      sendAttachmentMessageOptimistic,
-    };
-    const composer = new Composer({ client, roomId: 'r1', container });
-    composer.mount();
-
-    // 1. Stage an attachment and send — upload never resolves.
-    await stageOnePastedImage(container);
-    setInputValue(getInput(container), 'photo caption');
-    getSendBtn(container).click();
-    await drain(10);
-
-    // 2. Immediately send a text message (the attachment upload is still in flight).
-    setInputValue(getInput(container), 'follow-up text');
-    getSendBtn(container).click();
-    await drain(10);
-
-    // Both methods were called by the composer.
-    expect(sendAttachmentMessageOptimistic).toHaveBeenCalledOnce();
-    expect(sendTextOptimistic).toHaveBeenCalledOnce();
-
-    // The attachment send was initiated BEFORE the text send — ordering preserved
-    // at the composer level. The SDK's serial chain further ensures the text
-    // send's HTTP request waits behind the attachment send's HTTP request.
-    expect(sendOrder).toEqual(['attachment', 'text']);
-
-    // Clean up.
-    attStubs.resolveUpload({
-      attachmentId: 'att-1',
-      attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },
-    });
-    await drain(10);
-
-    composer.destroy();
-  });
+  // F-MED-2: the widget-side F2 ordering test was deleted. It asserted
+  // sendOrder on vi.fn stubs with no serial chain — it proved the composer
+  // calls sendAttachmentMessageOptimistic before sendTextOptimistic, but NOT
+  // that ordering is preserved. The SDK-side F2 (outbox.test.ts:
+  // F2_attachment_message_enqueued_before_text_reaches_room_first) is the real
+  // gate: it spies on SDKChatClient.send through the real #serializeSend serial
+  // chain and verifies the attachment message reaches the room first. That
+  // test is verified and mutation-falsified; this stub was a test that read
+  // like a gate and was not one.
 
   // F3: upload failure does not block the composer — the composer is usable
   // while the upload fails in the background. The error is surfaced via the
