@@ -61,6 +61,10 @@ export interface StagedAttachment {
   width?: number;
   height?: number;
   abortController: AbortController;
+  /** Resolves when this item's upload completes (status='done'). Rejects
+   *  with the upload error if status='error'. Set by #enqueue() — present
+   *  on every item returned by getStaged() / detachAndAwaitUploads(). */
+  donePromise?: Promise<void>;
 }
 
 type Awaiter = {
@@ -251,6 +255,45 @@ export class AttachmentPicker {
     });
   }
 
+  /**
+   * Detach the currently-staged items from the tray and return a promise that
+   * resolves when all their uploads complete. The tray UI is cleared immediately
+   * (items removed from #items + re-rendered) but the uploads continue in the
+   * background — each item's donePromise is independent of the #items array.
+   *
+   * Used by the non-blocking attachment send path: the composer calls this to
+   * "hand off" the staged items, clears the textarea, and returns control to
+   * the user while the uploads + send proceed in the background.
+   *
+   * Rejects if any upload fails (the rejection carries the failed file's name).
+   */
+  detachAndAwaitUploads(): Promise<StagedAttachment[]> {
+    const snapshot = this.#items.slice();
+    // Clear the tray — the items are now "detached". Their uploads continue
+    // because #upload()'s async operation holds a direct reference to each
+    // item object, not to the #items array.
+    this.#items = [];
+    this.#flushAwaiters();
+    this.#renderQueue();
+
+    if (snapshot.length === 0) {
+      return Promise.resolve([]);
+    }
+
+    // Every item has a donePromise set by #enqueue(). It resolves when the
+    // upload settles (success OR error) — check item.status to distinguish.
+    // If any upload failed, reject with the error.
+    return Promise.all(
+      snapshot.map((item) => item.donePromise ?? Promise.resolve()),
+    ).then(() => {
+      const failed = snapshot.find((i) => i.status === 'error');
+      if (failed) {
+        throw new Error(failed.error ?? `Upload failed: ${failed.file.name}`);
+      }
+      return snapshot;
+    });
+  }
+
   /** Validate files and stage them for upload (append to existing staged list). */
   handleFiles(files: FileList | File[]): void {
     const arr = Array.from(files);
@@ -292,7 +335,14 @@ export class AttachmentPicker {
     };
     this.#items.push(item);
     this.#renderQueue();
-    void this.#upload(item);
+    // #upload() catches errors internally (sets status='error') and always
+    // resolves. donePromise resolves when the upload settles (success OR error) —
+    // the caller checks item.status to distinguish. This avoids unhandled
+    // rejection when donePromise is set but never consumed (e.g. the user
+    // removes the item before it uploads, or the test doesn't call
+    // detachAndAwaitUploads).
+    const uploadSettled = this.#upload(item);
+    item.donePromise = uploadSettled.then(() => {});
   }
 
   async #upload(item: StagedAttachment): Promise<void> {

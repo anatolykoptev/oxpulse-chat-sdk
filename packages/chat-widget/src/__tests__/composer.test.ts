@@ -455,6 +455,11 @@ describe('Composer', () => {
   // ── M1: e2ee=false must not trigger optimistic path ───────────────────────
 
   it('does_not_use_optimistic_when_e2ee_is_false', async () => {
+    // Non-blocking send path: sendTextOptimistic is used whenever available
+    // (regardless of e2ee) so the send goes through the SDK outbox's per-room
+    // serial chain — preserving ordering relative to pending-attachment sends.
+    // The old M1 behavior (e2ee=false → sendText) is superseded by the
+    // non-blocking send feature.
     const client = {
       list: (_roomId: string, _args: { limit: number }) => Promise.resolve({ items: [], hasNext: false }),
       subscribe: () => () => {},
@@ -471,8 +476,10 @@ describe('Composer', () => {
     getSendBtn(container).click();
     await drain(10);
 
-    expect(client.sendTextOptimistic).not.toHaveBeenCalled();
-    expect(client.sendText).toHaveBeenCalledOnce();
+    // sendTextOptimistic IS called now — the non-blocking path uses it
+    // for ordering preservation even in plaintext mode.
+    expect(client.sendTextOptimistic).toHaveBeenCalledOnce();
+    expect(client.sendText).not.toHaveBeenCalled();
 
     composer.destroy();
   });
@@ -1865,6 +1872,212 @@ describe('Composer', () => {
     for (const track of tracks) {
       expect(track.stop).toHaveBeenCalledOnce();
     }
+  });
+
+  // ── Non-blocking attachment send (F1/F2/F3) ──────────────────────────────
+  //
+  // Feature: sending a message with attachments no longer blocks the composer.
+  // The message is enqueued to the SDK outbox immediately, uploads proceed in
+  // the background, and the composer regains control instantly — the textarea
+  // stays enabled, the user can type and send new messages while the upload
+  // finishes. Ordering is preserved by the outbox's per-room serial chain.
+  // Upload failures are surfaced on the message bubble, not the composer.
+
+  /** Helper: make attachment stubs with a controllable upload resolve.
+   *  The sendAttachmentMessageOptimistic stub consumes the attachmentsPromise
+   *  (catches rejection) to avoid unhandled rejections in tests. */
+  function makeControllableUploadStubs(): {
+    uploadAttachment: ReturnType<typeof vi.fn>;
+    sendAttachmentMessage: ReturnType<typeof vi.fn>;
+    sendAttachmentMessageOptimistic: ReturnType<typeof vi.fn>;
+    resolveUpload: (v: { attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number } }) => void;
+    rejectUpload: (err: Error) => void;
+  } {
+    let resolveUpload!: (v: { attachmentId: string; attachment: { id: string; mime: string; filename: string; sizeBytes: number } }) => void;
+    let rejectUpload!: (err: Error) => void;
+    const uploadPromise = new Promise((resolve, reject) => {
+      resolveUpload = resolve;
+      rejectUpload = reject;
+    });
+    return {
+      uploadAttachment: vi.fn(() => uploadPromise as Promise<any>),
+      sendAttachmentMessage: vi.fn().mockResolvedValue({ msgId: 'should-not-happen' }),
+      // The stub consumes attachmentsPromise to prevent unhandled rejections
+      // (the real element.ts wrapper passes it to the SDK which awaits it).
+      sendAttachmentMessageOptimistic: vi.fn((_roomId: string, _body: string, attachmentsPromise: Promise<unknown>) => {
+        attachmentsPromise.catch(() => {});
+        return { msgId: 'opt-att-1' };
+      }),
+      resolveUpload,
+      rejectUpload,
+    };
+  }
+
+  // F1: composer textarea stays enabled while an attachment upload is in flight.
+  // Mutation: re-add `await this.#attachmentPicker!.awaitAllUploaded()` before
+  // the non-blocking send path — the textarea would be disabled during the
+  // upload, and this test would fail.
+  it('F1_textarea_stays_enabled_while_attachment_upload_is_in_flight', async () => {
+    const stubs = makeControllableUploadStubs();
+    const client = {
+      ...makeStubClient({}),
+      ...stubs,
+    };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container);
+    setInputValue(getInput(container), 'caption');
+
+    // Click send — the upload is still in flight (resolveUpload not called).
+    getSendBtn(container).click();
+    await drain(10);
+
+    const textarea = getInput(container);
+
+    // F1 core invariant: textarea is NOT disabled — the user can keep typing.
+    expect(textarea.disabled).toBe(false);
+
+    // The send button is disabled because there's no text and no staged items
+    // (the composer was cleared) — NOT because of a #sending state. The user
+    // can type new text and the button re-enables.
+    expect(getSendBtn(container).disabled).toBe(true); // empty text → disabled (correct)
+    setInputValue(textarea, 'new text while uploading');
+    expect(getSendBtn(container).disabled).toBe(false); // text present → enabled
+
+    // The textarea was cleared (the message was "sent" optimistically).
+    expect(textarea.value).toBe('new text while uploading');
+
+    // The tray was cleared (items detached to background uploads).
+    expect(container.querySelector('.oxp-attachment-item')).toBeNull();
+
+    // sendAttachmentMessageOptimistic was called (non-blocking path).
+    expect(stubs.sendAttachmentMessageOptimistic).toHaveBeenCalledOnce();
+
+    // The old blocking path was NOT used.
+    expect(stubs.sendAttachmentMessage).not.toHaveBeenCalled();
+
+    // Clean up: resolve the upload so no dangling promises remain.
+    stubs.resolveUpload({
+      attachmentId: 'att-1',
+      attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },
+    });
+    await drain(10);
+
+    composer.destroy();
+  });
+
+  // F2: ordering preserved — a text message sent after an attachment message
+  // does not overtake it. The composer calls sendAttachmentMessageOptimistic
+  // first, then sendTextOptimistic. Both go through the SDK outbox's per-room
+  // serial chain, so the text send waits behind the attachment send.
+  // Mutation: remove the #serializeSend wrapper from sendOptimistic — the
+  // text send would fire immediately and potentially reach the server before
+  // the attachment send, violating ordering.
+  it('F2_text_message_sent_after_attachment_message_waits_for_ordering', async () => {
+    // Use controllable stubs: the attachment upload never resolves during the
+    // test, so the attachment send is "stuck" waiting. The text send should
+    // be queued behind it (not fire immediately).
+    const attStubs = makeControllableUploadStubs();
+    const sendOrder: string[] = [];
+
+    // Track the order in which sendTextOptimistic and sendAttachmentMessageOptimistic
+    // actually START their send (not just when the composer calls them).
+    const sendTextOptimistic = vi.fn(() => {
+      sendOrder.push('text');
+      return Promise.resolve({ msgId: 'text-1' });
+    });
+
+    const sendAttachmentMessageOptimistic = vi.fn((_roomId: string, _body: string, attachmentsPromise: Promise<unknown>) => {
+      sendOrder.push('attachment');
+      attachmentsPromise.catch(() => {});
+      return { msgId: 'att-1' };
+    });
+
+    const client = {
+      ...makeStubClient({}),
+      ...attStubs,
+      sendTextOptimistic,
+      sendAttachmentMessageOptimistic,
+    };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    // 1. Stage an attachment and send — upload never resolves.
+    await stageOnePastedImage(container);
+    setInputValue(getInput(container), 'photo caption');
+    getSendBtn(container).click();
+    await drain(10);
+
+    // 2. Immediately send a text message (the attachment upload is still in flight).
+    setInputValue(getInput(container), 'follow-up text');
+    getSendBtn(container).click();
+    await drain(10);
+
+    // Both methods were called by the composer.
+    expect(sendAttachmentMessageOptimistic).toHaveBeenCalledOnce();
+    expect(sendTextOptimistic).toHaveBeenCalledOnce();
+
+    // The attachment send was initiated BEFORE the text send — ordering preserved
+    // at the composer level. The SDK's serial chain further ensures the text
+    // send's HTTP request waits behind the attachment send's HTTP request.
+    expect(sendOrder).toEqual(['attachment', 'text']);
+
+    // Clean up.
+    attStubs.resolveUpload({
+      attachmentId: 'att-1',
+      attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },
+    });
+    await drain(10);
+
+    composer.destroy();
+  });
+
+  // F3: upload failure does not block the composer — the composer is usable
+  // while the upload fails in the background. The error is surfaced via the
+  // sendAttachmentMessageOptimistic handle's onFailed callback (which element.ts
+  // dispatches as oxpulse-chat:send-failed), not via the composer's error chip.
+  // Mutation: route the upload error back to the composer's error chip — the
+  // composer would show an error and the user would see it, violating F3.
+  it('F3_upload_failure_does_not_block_composer_no_error_chip', async () => {
+    const stubs = makeControllableUploadStubs();
+    const client = {
+      ...makeStubClient({}),
+      ...stubs,
+    };
+    const composer = new Composer({ client, roomId: 'r1', container });
+    composer.mount();
+
+    await stageOnePastedImage(container);
+    setInputValue(getInput(container), 'caption');
+
+    // Click send — the upload is still in flight.
+    getSendBtn(container).click();
+    await drain(10);
+
+    // The composer is usable: no error chip, textarea enabled.
+    // Send button is disabled (no text, no staged items after clearing) —
+    // but the key invariant is the textarea is NOT disabled.
+    expect(container.querySelector('.oxp-composer-error')).toBeNull();
+    expect(getInput(container).disabled).toBe(false);
+
+    // Now fail the upload.
+    stubs.rejectUpload(new Error('upload failed'));
+    await drain(20);
+
+    // F3 core invariant: the composer does NOT show an error chip — the upload
+    // failure is handled on the message bubble (via the SDK handle's onFailed),
+    // not on the composer.
+    expect(container.querySelector('.oxp-composer-error')).toBeNull();
+
+    // The composer is still usable.
+    expect(getInput(container).disabled).toBe(false);
+
+    // The user can type a new message and send it.
+    setInputValue(getInput(container), 'new message after failure');
+    expect(getSendBtn(container).disabled).toBe(false);
+
+    composer.destroy();
   });
 });
 

@@ -592,6 +592,9 @@ export class OxpulseChatElement extends HTMLElement {
         sendText(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: import('./types.js').ProductMeta }): Promise<{ seq?: number; msgId: string }>;
         // Issue #115: optional — enables optimistic echo for E2EE consumers.
         sendTextOptimistic?(roomId: string, args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: unknown }): { msgId: string; done: Promise<{ seq: number; msgId: string }>; onPending(cb: () => void): unknown; onSucceeded(cb: (r: { seq: number; msgId: string }) => void): unknown; onFailed(cb: (e: unknown) => void): unknown };
+        // Non-blocking attachment send: enqueues to outbox immediately, sends
+        // in the background once uploads complete. Returns an OptimisticHandle.
+        sendAttachmentMessageOptimistic?(roomId: string, args: { senderUid: string; body: string; uploadPromise: Promise<ArrayBuffer>; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: unknown }): { msgId: string; done: Promise<{ seq: number; msgId: string }>; onPending(cb: () => void): unknown; onSucceeded(cb: (r: { seq: number; msgId: string }) => void): unknown; onFailed(cb: (e: unknown) => void): unknown };
         getReactions?(roomId: string, msgId: string): Promise<{ counts: Record<string, number>; users: Record<string, string[]>; truncated: boolean }>;
         sendReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
         removeReaction?(roomId: string, msgId: string, emoji: string): Promise<void>;
@@ -1145,14 +1148,79 @@ export class OxpulseChatElement extends HTMLElement {
           // present); paperclip/paste/drag-drop in composer.ts feature-detect this.
           uploadAttachment: attachmentClient ? uploadAttachment : undefined,
           sendAttachmentMessage: attachmentClient ? sendAttachmentMessage : undefined,
-          // Issue #115: wire sendTextOptimistic for E2EE consumers. The SDK returns
-          // an OptimisticHandle (callback chain + .done promise), but the Composer
-          // expects Promise<{ msgId: string }>. Wrap it: resolve on success, reject
-          // on failure. The optimistic row is already inserted by the SDK's outbox
-          // path — no need for a separate optimisticEcho call here.
+          // Non-blocking attachment send: enqueues to the SDK outbox immediately,
+          // sends in the background once uploads complete. The composer regains
+          // control instantly — the user can keep typing/sending.
+          sendAttachmentMessageOptimistic:
+            attachmentClient && typeof capturedSendClient.sendAttachmentMessageOptimistic === 'function'
+              ? (roomId: string, body: string, attachmentsPromise: Promise<readonly EnvelopeAttachment[]>, args?: SendTextArgs): { msgId: string } => {
+                  // Generate msgId client-side for optimistic echo dedup.
+                  const msgId = generateUUID();
+
+                  // Optimistic echo — insert a local row immediately so the user
+                  // sees their message (with caption) while uploads proceed.
+                  optimisticEcho(roomId, body, args, msgId);
+
+                  // Build the uploadPromise that resolves with sealed bytes once
+                  // all attachment uploads complete. The SDK's serial send chain
+                  // awaits this before sending.
+                  const uploadPromise = attachmentsPromise.then((attachments) => {
+                    return encodeAttachmentEnvelope(body, attachments);
+                  });
+
+                  const handle = capturedSendClient.sendAttachmentMessageOptimistic!(roomId, {
+                    senderUid: resolvedSelfUid ?? '',
+                    body,
+                    uploadPromise,
+                    msgId,
+                    threadRootMsgId: args?.threadRootMsgId,
+                    productRef: args?.productRef,
+                    productMeta: args?.productMeta,
+                  });
+
+                  // Fire-and-forget the handle — errors are surfaced via the
+                  // handle's onFailed callback, not via the composer. The
+                  // composer has already moved on.
+                  handle.done.then((res) => {
+                    self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
+                      bubbles: true,
+                      composed: true,
+                      detail: { roomId, msgId: res.msgId },
+                    }));
+                  }).catch((err: unknown) => {
+                    const reason = classifyWriteFailureReason(err);
+                    const errMsg = err instanceof Error ? err.message : String(err);
+                    self.#notifyWriteFailure('send', reason, errMsg);
+                    if (reason === 'auth_expired') {
+                      self.#notifyTokenExpired(config!.roomId);
+                    }
+                    // Dispatch a per-message error event so the message bubble
+                    // can show the failure (not the composer — it's long gone).
+                    self.dispatchEvent(new CustomEvent('oxpulse-chat:send-failed', {
+                      bubbles: true,
+                      composed: true,
+                      detail: { roomId, msgId, message: errMsg },
+                    }));
+                  });
+
+                  return { msgId };
+                }
+              : undefined,
+          // Issue #115: wire sendTextOptimistic for both E2EE and plaintext
+          // consumers. The SDK returns an OptimisticHandle (callback chain +
+          // .done promise), but the Composer expects Promise<{ msgId: string }>.
+          // Wrap it: resolve on success, reject on failure. The optimistic row
+          // is inserted here via optimisticEcho (using handle.msgId) so the user
+          // sees their message instantly — the SDK's outbox path handles only
+          // durability + retry, not UI echo.
           sendTextOptimistic: typeof capturedSendClient.sendTextOptimistic === 'function'
             ? (roomId: string, text: string, args?: SendTextArgs): Promise<{ msgId: string }> => {
                 const handle = capturedSendClient.sendTextOptimistic!(roomId, { ...args, senderUid: resolvedSelfUid ?? '', text });
+                // Optimistic echo — insert a local row immediately so the user
+                // sees their message before the server round-trip. The SDK's
+                // outbox fires onPending after a microtask, but the echo is a
+                // UI concern so we do it here synchronously.
+                optimisticEcho(roomId, text, args, handle.msgId);
                 return handle.done.then((res) => {
                   self.dispatchEvent(new CustomEvent('oxpulse-chat:message-sent', {
                     bubbles: true,

@@ -52,7 +52,7 @@ import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors
 import { createSFrameProvider } from './sframe.js';
 import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
-import { enqueue, dequeue, pending } from './outbox.js';
+import { enqueue, dequeue, pending, updateEntry } from './outbox.js';
 import { sendFile as sendFileHelper, type SendFileArgs } from './attachments.js';
 import {
   arrayBufferToBase64,
@@ -375,6 +375,31 @@ export class SDKChatClient {
    * Callers should use sendTextOptimistic instead.
    */
   #e2eeOptimisticWarnedOnce = false;
+
+  /**
+   * Per-room serial send chain — ensures messages are sent to the server in
+   * the order they were enqueued. Each optimistic send (sendOptimistic,
+   * sendTextOptimistic, sendAttachmentMessageOptimistic) awaits the previous
+   * send for that room before starting its own send loop. This preserves
+   * ordering when a text message is sent while an earlier attachment message
+   * is still uploading: the text message's send waits behind the attachment
+   * message's send (which is itself waiting for uploads to complete).
+   */
+  #sendChains = new Map<string, Promise<void>>();
+
+  /**
+   * Serialize a send operation per room. The returned promise resolves/rejects
+   * with fn's result, but the chain itself never breaks — a failed send does
+   * not block subsequent sends.
+   */
+  #serializeSend<T>(roomId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.#sendChains.get(roomId) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(() => fn());
+    // Keep the chain alive regardless of fn's outcome — the chain stores
+    // only a void promise so a failed fn does not block subsequent sends.
+    this.#sendChains.set(roomId, next.then(() => {}, () => {}));
+    return next;
+  }
 
   /**
    * Phase 2: client-configured crypto_mode expectation (from constructor options).
@@ -2404,48 +2429,50 @@ export class SDKChatClient {
 
       pendingCbs.forEach((cb) => cb());
 
-      await enqueue(roomId, {
-        msgId,
-        roomId,
-        senderUid: args.senderUid,
-        sealedB64: arrayBufferToBase64(args.sealed),
-        threadRootMsgId: args.threadRootMsgId,
-        productRef: args.productRef,
-        productMeta: args.productMeta,
-        attempts: 0,
-        enqueuedAt: Date.now(),
-      });
+      return this.#serializeSend(roomId, async () => {
+        await enqueue(roomId, {
+          msgId,
+          roomId,
+          senderUid: args.senderUid,
+          sealedB64: arrayBufferToBase64(args.sealed),
+          threadRootMsgId: args.threadRootMsgId,
+          productRef: args.productRef,
+          productMeta: args.productMeta,
+          attempts: 0,
+          enqueuedAt: Date.now(),
+        });
 
-      for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
-        try {
-          const result = await this.send(roomId, { ...args, msgId });
-          await dequeue(roomId, msgId);
-          okCbs.forEach((cb) => cb(result));
-          return result;
-        } catch (e) {
-          const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-          // CR17-C-01: ONE outbox permanence doctrine across all three write paths — the same
-          // PERMANENT_OUTBOX_FAILURE_CODES authority flushOutbox uses. A PERMANENT failure
-          // (4xx / crypto_mode_*) can never succeed → scrub the durable entry, notify, give up.
-          // A TRANSIENT failure (network / 401 / 429 / 5xx) is retriable → keep the ciphertext
-          // queued (do NOT dequeue) and retry with backoff; after MAX_RETRIES it is left queued
-          // for flushOutbox and onFailed fires. Never drop a refreshable-401 / rate-limited /
-          // 5xx entry on the foreground path (the exact codes CR17-C-01 protects).
-          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+        for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
+          try {
+            const result = await this.send(roomId, { ...args, msgId });
             await dequeue(roomId, msgId);
-            failCbs.forEach((cb) => cb(err));
-            throw err;
-          }
-          if (attempt < SDKChatClient.MAX_RETRIES - 1) {
-            await sleep(Math.min(100 * Math.pow(2, attempt), 30_000));
+            okCbs.forEach((cb) => cb(result));
+            return result;
+          } catch (e) {
+            const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
+            // CR17-C-01: ONE outbox permanence doctrine across all three write paths — the same
+            // PERMANENT_OUTBOX_FAILURE_CODES authority flushOutbox uses. A PERMANENT failure
+            // (4xx / crypto_mode_*) can never succeed → scrub the durable entry, notify, give up.
+            // A TRANSIENT failure (network / 401 / 429 / 5xx) is retriable → keep the ciphertext
+            // queued (do NOT dequeue) and retry with backoff; after MAX_RETRIES it is left queued
+            // for flushOutbox and onFailed fires. Never drop a refreshable-401 / rate-limited /
+            // 5xx entry on the foreground path (the exact codes CR17-C-01 protects).
+            if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+              await dequeue(roomId, msgId);
+              failCbs.forEach((cb) => cb(err));
+              throw err;
+            }
+            if (attempt < SDKChatClient.MAX_RETRIES - 1) {
+              await sleep(Math.min(100 * Math.pow(2, attempt), 30_000));
+            }
           }
         }
-      }
 
-      // MAX_RETRIES exhausted — leave in outbox for flushOutbox, fire onFailed.
-      const finalErr = new SDKChatError('network', 'sendOptimistic: max retries exceeded');
-      failCbs.forEach((cb) => cb(finalErr));
-      throw finalErr;
+        // MAX_RETRIES exhausted — leave in outbox for flushOutbox, fire onFailed.
+        const finalErr = new SDKChatError('network', 'sendOptimistic: max retries exceeded');
+        failCbs.forEach((cb) => cb(finalErr));
+        throw finalErr;
+      });
     })();
 
     const handle: OptimisticHandle = {
@@ -2478,6 +2505,13 @@ export class SDKChatClient {
    */
   async flushOutbox(roomId: string): Promise<void> {
     for (const m of await pending(roomId)) {
+      // Pending-attachment entries are in-memory orphans after a page reload
+      // (the uploadPromise is not persisted). Scrub them — the uploads are
+      // gone and the sealed bytes were never produced.
+      if (m.pendingAttachments) {
+        await dequeue(roomId, m.msgId);
+        continue;
+      }
       try {
         await this.send(roomId, {
           senderUid: m.senderUid,
@@ -2517,6 +2551,25 @@ export class SDKChatClient {
     roomId: string,
     args: { senderUid: string; text: string; msgId?: string; threadRootMsgId?: string; productRef?: string; productMeta?: unknown },
   ): OptimisticHandle {
+    // Plaintext mode: no crypto provider — "sealing" is just UTF-8 encoding.
+    // The outbox stores the UTF-8 bytes directly (same as sendText in plaintext
+    // mode). This allows the non-blocking text send path to go through the
+    // outbox's per-room serial chain, preserving ordering relative to pending
+    // attachment sends.
+    const effectiveMode = this.#activeCryptoModeByRoom.get(roomId) ?? this.#cryptoMode;
+    if (effectiveMode === 'plaintext' || (this.#cryptoProvider === null && this.#cryptoMode === null)) {
+      const plainBytes = new TextEncoder().encode(args.text).buffer as ArrayBuffer;
+      // Delegate to sendOptimistic with the "sealed" (UTF-8) bytes.
+      return this.sendOptimistic(roomId, {
+        senderUid: args.senderUid,
+        sealed: plainBytes,
+        msgId: args.msgId,
+        threadRootMsgId: args.threadRootMsgId,
+        productRef: args.productRef,
+        productMeta: args.productMeta,
+      });
+    }
+
     if (this.#cryptoProvider === null) {
       // Return a handle that immediately fails — cannot seal without provider.
       const err = new SDKChatError(
@@ -2570,50 +2623,189 @@ export class SDKChatClient {
         throw err;
       }
 
+      return this.#serializeSend(roomId, async () => {
+        await enqueue(roomId, {
+          msgId,
+          roomId,
+          senderUid: args.senderUid,
+          sealedB64: arrayBufferToBase64(sealed),
+          threadRootMsgId: args.threadRootMsgId,
+          productRef: args.productRef,
+          productMeta: args.productMeta,
+          attempts: 0,
+          enqueuedAt: Date.now(),
+        });
+
+        for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
+          try {
+            const result = await this.send(roomId, {
+              senderUid: args.senderUid,
+              sealed,
+              msgId,
+              threadRootMsgId: args.threadRootMsgId,
+              productRef: args.productRef,
+              productMeta: args.productMeta,
+            });
+            await dequeue(roomId, msgId);
+            okCbs.forEach((cb) => cb(result));
+            return result;
+          } catch (e) {
+            const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
+            // CR17-C-01: same unified outbox permanence doctrine as sendOptimistic — dequeue only
+            // on a PERMANENT code; keep a transient (network / 401 / 429 / 5xx) entry queued for
+            // flushOutbox rather than dropping a retriable ciphertext message.
+            if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+              await dequeue(roomId, msgId);
+              failCbs.forEach((cb) => cb(err));
+              throw err;
+            }
+            if (attempt < SDKChatClient.MAX_RETRIES - 1) {
+              await sleep(Math.min(100 * Math.pow(2, attempt), 30_000));
+            }
+          }
+        }
+
+        const finalErr = new SDKChatError('network', 'sendTextOptimistic: max retries exceeded');
+        failCbs.forEach((cb) => cb(finalErr));
+        throw finalErr;
+      });
+    })();
+
+    const handle: OptimisticHandle = {
+      msgId,
+      done,
+      onPending: (cb) => { pendingCbs.push(cb); return handle; },
+      onSucceeded: (cb) => { okCbs.push(cb); return handle; },
+      onFailed: (cb) => { failCbs.push(cb); return handle; },
+    };
+    return handle;
+  }
+
+  /**
+   * Send an attachment message optimistically with background upload.
+   *
+   * Unlike sendOptimistic() which requires pre-sealed bytes, this method
+   * enqueues a placeholder entry to the outbox immediately (so the message
+   * is tracked + ordered), then waits for the caller-provided `uploadPromise`
+   * to resolve with the sealed bytes before sending. The composer regains
+   * control the instant this method returns the handle — the upload + send
+   * happen entirely in the background.
+   *
+   * The `uploadPromise` is an in-memory promise (not persisted to idb) — on
+   * page reload it is lost, and the orphaned outbox entry is scrubbed by
+   * flushOutbox (the uploads themselves are also in-memory and lost).
+   *
+   * Ordering: the per-room serial send chain (#serializeSend) ensures a text
+   * message enqueued after this one does not overtake it — the text message's
+   * send waits behind this message's upload + send.
+   *
+   * Flow:
+   *   1. Fires onPending (after microtask gap).
+   *   2. Enqueues a pendingAttachments placeholder to idb (sealedB64 empty).
+   *   3. In the serial send chain: awaits uploadPromise → sealed bytes.
+   *   4. updateEntry replaces the placeholder with real sealed bytes.
+   *   5. Attempts send(); on network error retries up to MAX_RETRIES.
+   *   6. On success, dequeues, fires onSucceeded.
+   *   7. On upload failure or MAX_RETRIES exhaustion, dequeues, fires onFailed.
+   *
+   * @param roomId         Target room.
+   * @param args           senderUid + body + uploadPromise that resolves with sealed bytes.
+   */
+  sendAttachmentMessageOptimistic(
+    roomId: string,
+    args: {
+      senderUid: string;
+      /** Caption / body text for the attachment message. */
+      body: string;
+      /** Resolves with the sealed ArrayBuffer once all attachment uploads
+       *  complete. Rejects on upload failure (fires onFailed). */
+      uploadPromise: Promise<ArrayBuffer>;
+      msgId?: string;
+      threadRootMsgId?: string;
+      productRef?: string;
+      productMeta?: unknown;
+    },
+  ): OptimisticHandle {
+    const msgId = args.msgId ?? generateUUID();
+    const pendingCbs: Array<() => void> = [];
+    const okCbs: Array<(result: { seq: number; msgId: string }) => void> = [];
+    const failCbs: Array<(err: SDKChatError) => void> = [];
+
+    const sleep = (ms: number): Promise<void> =>
+      this.#testNoSleep ? Promise.resolve() : new Promise((res) => setTimeout(res, ms));
+
+    const done = (async () => {
+      // Microtask gap: lets caller register callbacks before we fire.
+      await Promise.resolve();
+
+      pendingCbs.forEach((cb) => cb());
+
+      // Enqueue the placeholder immediately — the message is now tracked in
+      // the outbox and ordered behind any earlier entry. The serial send
+      // chain ensures later messages wait behind this one.
       await enqueue(roomId, {
         msgId,
         roomId,
         senderUid: args.senderUid,
-        sealedB64: arrayBufferToBase64(sealed),
+        sealedB64: '',
         threadRootMsgId: args.threadRootMsgId,
         productRef: args.productRef,
         productMeta: args.productMeta,
         attempts: 0,
         enqueuedAt: Date.now(),
+        pendingAttachments: { body: args.body },
       });
 
-      for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
+      return this.#serializeSend(roomId, async () => {
+        // Wait for uploads to complete — this is the slow part (seconds to
+        // minutes for a video on a weak network). The serial chain holds here,
+        // so any later message's send waits behind us (ordering preserved).
+        let sealed: ArrayBuffer;
         try {
-          const result = await this.send(roomId, {
-            senderUid: args.senderUid,
-            sealed,
-            msgId,
-            threadRootMsgId: args.threadRootMsgId,
-            productRef: args.productRef,
-            productMeta: args.productMeta,
-          });
-          await dequeue(roomId, msgId);
-          okCbs.forEach((cb) => cb(result));
-          return result;
+          sealed = await args.uploadPromise;
         } catch (e) {
           const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-          // CR17-C-01: same unified outbox permanence doctrine as sendOptimistic — dequeue only
-          // on a PERMANENT code; keep a transient (network / 401 / 429 / 5xx) entry queued for
-          // flushOutbox rather than dropping a retriable ciphertext message.
-          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+          await dequeue(roomId, msgId);
+          failCbs.forEach((cb) => cb(err));
+          throw err;
+        }
+
+        // Replace the placeholder with real sealed bytes.
+        await updateEntry(roomId, msgId, {
+          sealedB64: arrayBufferToBase64(sealed),
+          pendingAttachments: undefined,
+        });
+
+        for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
+          try {
+            const result = await this.send(roomId, {
+              senderUid: args.senderUid,
+              sealed,
+              msgId,
+              threadRootMsgId: args.threadRootMsgId,
+              productRef: args.productRef,
+              productMeta: args.productMeta,
+            });
             await dequeue(roomId, msgId);
-            failCbs.forEach((cb) => cb(err));
-            throw err;
-          }
-          if (attempt < SDKChatClient.MAX_RETRIES - 1) {
-            await sleep(Math.min(100 * Math.pow(2, attempt), 30_000));
+            okCbs.forEach((cb) => cb(result));
+            return result;
+          } catch (e) {
+            const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
+            if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+              await dequeue(roomId, msgId);
+              failCbs.forEach((cb) => cb(err));
+              throw err;
+            }
+            if (attempt < SDKChatClient.MAX_RETRIES - 1) {
+              await sleep(Math.min(100 * Math.pow(2, attempt), 30_000));
+            }
           }
         }
-      }
 
-      const finalErr = new SDKChatError('network', 'sendTextOptimistic: max retries exceeded');
-      failCbs.forEach((cb) => cb(finalErr));
-      throw finalErr;
+        const finalErr = new SDKChatError('network', 'sendAttachmentMessageOptimistic: max retries exceeded');
+        failCbs.forEach((cb) => cb(finalErr));
+        throw finalErr;
+      });
     })();
 
     const handle: OptimisticHandle = {
