@@ -721,6 +721,20 @@ describe('outbox', () => {
       expect(seen).toEqual(['enqueue']);
     });
 
+    it('F7_pruneFailedEntries_failure_also_signals', async () => {
+      // Review of #264 caught this missing: four of the five storage operations
+      // were instrumented and prune was not — the fixed-only-where-the-reviewer-
+      // probed half-fix that review prompts in this repo explicitly warn against.
+      const mod = await loadWithBrokenIdb();
+      const seen: string[] = [];
+      mod.onOutboxDegraded((d) => seen.push(d.op));
+
+      await mod.pruneFailedEntries('r261');
+
+      expect(seen).toEqual(['pruneFailedEntries']);
+      expect(mod.isOutboxDurable()).toBe(false);
+    });
+
     it('F4_CONTROL_working_storage_never_signals', async () => {
       // Without this the three cases above would all pass against an
       // implementation that notifies unconditionally.

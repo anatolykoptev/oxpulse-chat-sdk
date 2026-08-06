@@ -233,6 +233,11 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList = null;
     this.#styleEl = null;
     this.#iframe = null;
+    // #261: drop the outbox-durability subscription. Without this the listener
+    // outlives the element and a re-mount stacks another one — the SDK holds
+    // them in a module-level set that nothing else clears.
+    this.#outboxDegradedDispose?.();
+    this.#outboxDegradedDispose = null;
     // D2: remove the send-failed listener and clear retry context.
     if (this.#sendFailedListener) {
       this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
@@ -384,6 +389,11 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList = null;
     this.#styleEl = null;
     this.#iframe = null;
+    // #261: drop the outbox-durability subscription. Without this the listener
+    // outlives the element and a re-mount stacks another one — the SDK holds
+    // them in a module-level set that nothing else clears.
+    this.#outboxDegradedDispose?.();
+    this.#outboxDegradedDispose = null;
     // D2: remove the send-failed listener and clear retry context.
     if (this.#sendFailedListener) {
       this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);

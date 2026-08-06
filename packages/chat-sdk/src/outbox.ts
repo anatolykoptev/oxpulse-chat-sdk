@@ -21,7 +21,7 @@
 import { get, update } from 'idb-keyval';
 
 /** Which operation first hit unavailable storage. */
-export type OutboxOp = 'enqueue' | 'dequeue' | 'pending' | 'updateEntry';
+export type OutboxOp = 'enqueue' | 'dequeue' | 'pending' | 'updateEntry' | 'pruneFailedEntries';
 
 export interface OutboxDegradation {
   op: OutboxOp;
@@ -216,7 +216,8 @@ export async function pruneFailedEntries(
       );
       return all.filter((m) => !evictIds.has(m.msgId));
     });
-  } catch {
+  } catch (err) {
     // idb unavailable — nothing to prune.
+    markDegraded('pruneFailedEntries', err);
   }
 }

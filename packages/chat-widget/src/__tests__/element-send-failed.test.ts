@@ -23,7 +23,10 @@ import { OxpulseChatElement, defineElement } from '../element.js';
 // Stub to resolve an empty roster so mount completes deterministically.
 // #261: the durability signal is driven from the tests. Declared via vi.hoisted
 // because vi.mock is hoisted above the file body.
-const outboxState = vi.hoisted(() => ({ degradation: null as null | { op: string } }));
+const outboxState = vi.hoisted(() => ({
+  degradation: null as null | { op: string },
+  disposed: 0,
+}));
 
 vi.mock('@oxpulse/chat-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@oxpulse/chat-sdk')>();
@@ -34,7 +37,9 @@ vi.mock('@oxpulse/chat-sdk', async (importOriginal) => {
     // called immediately, and registration returns a disposer.
     onOutboxDegraded: (fn: (d: { op: string }) => void) => {
       if (outboxState.degradation) fn(outboxState.degradation);
-      return () => {};
+      return () => {
+        outboxState.disposed += 1;
+      };
     },
   };
 });
@@ -117,6 +122,7 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
   beforeEach(() => {
     defineElement();
     outboxState.degradation = null;
+    outboxState.disposed = 0;
     container = document.createElement('div');
     document.body.appendChild(container);
   });
@@ -327,6 +333,23 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
     const codes = onError.mock.calls.map((c) => (c[0] as { code?: string })?.code);
     expect(codes.filter((c) => c === 'OUTBOX_UNAVAILABLE')).toHaveLength(1);
     el.remove();
+  });
+
+  it('F8_removing_the_element_disposes_the_outbox_subscription', async () => {
+    // Review of #264: both teardown paths dismantled everything EXCEPT this
+    // subscription, so the listener outlived its element and a re-mount stacked
+    // another one in the SDK's module-level set, which nothing else clears.
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeFailedOutboxClient([]) });
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    expect(outboxState.disposed).toBe(0);
+    el.remove();
+    expect(outboxState.disposed).toBe(1);
   });
 
   it('F6_CONTROL_no_degradation_no_report', async () => {
