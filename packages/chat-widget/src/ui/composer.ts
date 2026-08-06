@@ -50,6 +50,16 @@ interface ComposerClient {
     attachments: readonly EnvelopeAttachment[],
     args?: SendTextArgs,
   ): Promise<{ msgId: string }>;
+  /** Non-blocking attachment send: enqueues the message to the outbox immediately
+   *  and sends it in the background once the attachmentsPromise resolves with
+   *  the uploaded attachment metadata. Returns at once with the msgId — the
+   *  composer regains control and the user can keep typing/sending. */
+  sendAttachmentMessageOptimistic?(
+    roomId: string,
+    body: string,
+    attachmentsPromise: Promise<readonly EnvelopeAttachment[]>,
+    args?: SendTextArgs,
+  ): { msgId: string };
 }
 
 export interface ComposerOptions {
@@ -182,6 +192,18 @@ export class Composer {
    */
   setInitialText(text: string): void {
     this.#initialText = text;
+  }
+
+  /**
+   * D2: Restore text into the textarea after mount — used by the send-failed
+   * retry flow to put the caption back so the user can re-pick the attachment
+   * and re-send. Triggers #updateState so the send button reflects the new text.
+   */
+  restoreText(text: string): void {
+    if (this.#destroyed || !this.#textarea) return;
+    this.#textarea.value = text;
+    this.#lastText = text;
+    this.#updateState();
   }
 
   /**
@@ -1243,16 +1265,49 @@ export class Composer {
   /** Plain-text send (optimistic when e2ee is configured). Shared by the
    *  no-attachment path and the every-staged-item-got-cancelled fallback. */
   async #sendPlainText(text: string, sendArgs: SendTextArgs): Promise<void> {
-    // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path
-    const useOptimistic =
-      typeof this.#client.sendTextOptimistic === 'function' &&
-      Boolean(this.#client.e2ee);
+    // M1: Boolean() truthy check — e2ee=false must NOT trigger optimistic path.
+    // Non-blocking send path: use sendTextOptimistic whenever available (e2ee
+    // OR plaintext mode) so the send goes through the SDK outbox's per-room
+    // serial chain — preserving ordering relative to pending-attachment sends.
+    const useOptimistic = typeof this.#client.sendTextOptimistic === 'function';
 
     if (useOptimistic) {
       await this.#client.sendTextOptimistic!(this.#roomId, text, sendArgs);
     } else {
       await this.#client.sendText(this.#roomId, text, sendArgs);
     }
+  }
+
+  /** Clear textarea, product card, reply target, and update state after a
+   *  non-blocking send. Does NOT clear the attachment tray (items were detached)
+   *  and does NOT touch #sending / textarea.disabled (never set for non-blocking). */
+  #clearComposerAfterSend(): void {
+    if (this.#destroyed || !this.#textarea) return;
+    this.#textarea.value = '';
+    this.#lastText = '';
+    this.#productRef = null;
+    this.#productMeta = null;
+    this.#renderProductCardChip();
+    this.#clearReplyTarget();
+    this.#updateState();
+  }
+
+  /** Dispatch the oxpulse-chat:error event + render the inline error chip.
+   *  retryText is the text to re-send on retry (per-message, not #lastText). */
+  #dispatchSendError(message: string, retryText?: string): void {
+    if (this.#destroyed) return;
+    const detail: { kind: string; message: string; msgId?: string } = {
+      kind: 'send_failed',
+      message,
+    };
+    this.#container.dispatchEvent(
+      new CustomEvent('oxpulse-chat:error', {
+        bubbles: true,
+        composed: true,
+        detail,
+      }),
+    );
+    this.#renderErrorChip(message, retryText);
   }
 
   async #send(textOverride?: string): Promise<void> {
@@ -1272,36 +1327,79 @@ export class Composer {
 
     // Save for retry before the send attempt
     this.#lastText = text;
-
-    this.#sending = true;
-    this.#sendBtn.disabled = true;
-    // 1E: disable textarea during send to prevent data-loss race.
-    // CM3: textarea disabled during send prevents all user input — the preserve-branch
-    // ("user typed new content while send was in-flight") is unreachable because
-    // the browser blocks keyboard input to disabled elements. The user's typed content
-    // cannot be lost by clearing a textarea they cannot type into.
-    if (this.#textarea) this.#textarea.disabled = true;
-    // Review fix (HIGH, PR #88): defense-in-depth — a real user can no longer
-    // click ✕ mid-send once this is wired (jsdom-verified: a disabled
-    // button's native .click() no-ops the activation, matching real browsers).
-    // The re-check below is the actual guard, since setSendLocked alone
-    // wouldn't cover every way #items could still empty out mid-await.
-    this.#attachmentPicker?.setSendLocked(true);
-    // 1G: update hint to "Sending message…" while in-flight
-    this.#updateState();
     // Clear any previous error chip
     this.#clearErrorChip();
 
-    try {
-      const sendArgs: SendTextArgs = {};
-      if (this.#replyTarget) {
-        sendArgs.threadRootMsgId = this.#replyTarget.msgId;
-      }
-      if (this.#productRef && this.#productMeta) {
-        sendArgs.productRef = this.#productRef;
-        sendArgs.productMeta = this.#productMeta;
-      }
+    const sendArgs: SendTextArgs = {};
+    if (this.#replyTarget) {
+      sendArgs.threadRootMsgId = this.#replyTarget.msgId;
+    }
+    if (this.#productRef && this.#productMeta) {
+      sendArgs.productRef = this.#productRef;
+      sendArgs.productMeta = this.#productMeta;
+    }
 
+    // ── Non-blocking attachment send ──────────────────────────────────────
+    // The composer regains control the instant this returns — the uploads +
+    // send proceed in the background via the SDK outbox's serial chain.
+    // The composer is NOT blocked: textarea stays enabled, send button stays
+    // enabled, the user can compose and send new messages while the upload
+    // finishes. Ordering is preserved by the outbox's per-room serial chain.
+    if (hasStaged && typeof this.#client.sendAttachmentMessageOptimistic === 'function') {
+      // Detach staged items from the tray — uploads continue in the background.
+      // The promise resolves with the staged items once all uploads complete,
+      // or rejects if any upload fails.
+      const attachmentsPromise = this.#attachmentPicker!.detachAndAwaitUploads().then((items) => {
+        return items.map((item) => ({
+          id: item.attachmentId!,
+          mime: item.mime,
+          filename: sanitizeFilename(item.file.name),
+          sizeBytes: item.sizeBytes,
+          width: item.width,
+          height: item.height,
+        }));
+      });
+
+      // Fire-and-forget — the wrapper (element.ts) handles the optimistic echo,
+      // the SDK send, and error-on-bubble. The composer does NOT await this.
+      this.#client.sendAttachmentMessageOptimistic!(this.#roomId, text, attachmentsPromise, sendArgs);
+
+      // Clear the composer immediately — the user can keep typing/sending.
+      this.#clearComposerAfterSend();
+      return;
+    }
+
+    // ── Non-blocking text send ────────────────────────────────────────────
+    // Routed through sendTextOptimistic (when available) so the send goes
+    // through the SDK outbox's per-room serial chain — a text message sent
+    // while an earlier attachment message is uploading waits behind it
+    // (ordering preserved) without blocking the composer.
+    if (!hasStaged && typeof this.#client.sendTextOptimistic === 'function') {
+      const textToSend = text;
+      this.#client
+        .sendTextOptimistic!(this.#roomId, text, sendArgs)
+        .catch((err: unknown) => {
+          if (this.#destroyed) return;
+          const message = err instanceof Error ? err.message : String(err);
+          this.#dispatchSendError(message, textToSend);
+        });
+
+      // Clear the composer immediately — the user can keep typing/sending.
+      this.#clearComposerAfterSend();
+      return;
+    }
+
+    // ── Blocking fallback path ────────────────────────────────────────────
+    // Used when the client does not support the optimistic methods (e.g. a
+    // minimal SDK client or test stub). Preserves the original blocking
+    // behaviour: disable textarea, await uploads + send, re-enable.
+    this.#sending = true;
+    this.#sendBtn.disabled = true;
+    if (this.#textarea) this.#textarea.disabled = true;
+    this.#attachmentPicker?.setSendLocked(true);
+    this.#updateState();
+
+    try {
       if (hasStaged) {
         // Await any in-flight uploads; on error awaitAllUploaded rejects and the
         // tray stays visible with the failed item(s) so the user can retry/remove.
@@ -1310,16 +1408,11 @@ export class Composer {
         // trusting the `hasStaged` snapshot taken above — every item can be
         // removed while this await is in flight, and awaitAllUploaded()
         // resolves vacuously once the list is empty ([].every(...) === true).
-        // Without this re-check, sendAttachmentMessage(text, []) would
-        // broadcast a sealed envelope with zero attachments, which peers
-        // render as raw JSON text instead of decoding as an attachment message.
         const staged = this.#attachmentPicker!.getStaged();
         if (staged.length === 0 && text.length === 0) {
           return;
         }
         if (staged.length === 0) {
-          // Every staged attachment was cancelled mid-send but the caption
-          // survives — send it as a plain text message instead of dropping it.
           await this.#sendPlainText(text, sendArgs);
         } else {
           const attachments = staged.map((item) => ({
@@ -1336,9 +1429,6 @@ export class Composer {
         await this.#sendPlainText(text, sendArgs);
       }
 
-      // 1E: Clear only if not destroyed during the send.
-      // CM3: textarea was disabled during send — user cannot type new content mid-flight,
-      // so textarea.value is still the sent text. Safe to clear unconditionally.
       if (!this.#destroyed && this.#textarea) {
         this.#textarea.disabled = false;
         this.#textarea.value = '';
@@ -1351,27 +1441,10 @@ export class Composer {
         this.#updateState();
       }
     } catch (err) {
-      // Dispatch error event on the container (bubbles up to shadow root)
       const message = err instanceof Error ? err.message : String(err);
-      const detail: { kind: string; message: string; msgId?: string } = {
-        kind: 'send_failed',
-        message,
-      };
-      this.#container.dispatchEvent(
-        new CustomEvent('oxpulse-chat:error', {
-          bubbles: true,
-          composed: true,
-          detail,
-        }),
-      );
-
-      // B2: Render inline error chip with retry button
-      if (!this.#destroyed) {
-        this.#renderErrorChip(message);
-      }
+      this.#dispatchSendError(message, text);
     } finally {
       this.#sending = false;
-      // 1E: re-enable textarea (in case catch path ran without re-enabling in try)
       if (!this.#destroyed && this.#textarea && this.#textarea.disabled) {
         this.#textarea.disabled = false;
       }
@@ -1382,7 +1455,7 @@ export class Composer {
 
   // ── Error chip ──────────────────────────────────────────────────────────────
 
-  #renderErrorChip(message: string): void {
+  #renderErrorChip(message: string, retryText?: string): void {
     this.#clearErrorChip();
     if (!this.#root) return;
 
@@ -1400,7 +1473,7 @@ export class Composer {
     retryBtn.setAttribute('aria-label', t('retrySendingMessageAria', this.#lang));
     retryBtn.addEventListener('click', () => {
       this.#clearErrorChip();
-      void this.#send(this.#lastText);
+      void this.#send(retryText ?? this.#lastText);
     });
 
     chip.appendChild(msg);
