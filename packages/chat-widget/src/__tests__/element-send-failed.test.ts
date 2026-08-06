@@ -121,6 +121,94 @@ async function mountWithClient(client: unknown): Promise<OxpulseChatElement> {
   return el;
 }
 
+/** #257: Build a client for the live send-failure journey (paste → send →
+ *  reject done). The caller spreads extra methods (e.g. a dismiss spy) via
+ *  `extra`. Returns the client plus the reject handle for failing the send. */
+function makeLiveFailureClient(extra: Record<string, unknown> = {}): {
+  client: Record<string, unknown>;
+  rejectDone: (err: Error) => void;
+} {
+  let rejectDone!: (err: Error) => void;
+  const donePromise = new Promise<{ seq: number; msgId: string }>((_, reject) => {
+    rejectDone = reject;
+  });
+  const client = {
+    list: vi.fn().mockResolvedValue({ items: [], hasNext: false }),
+    subscribe: vi.fn().mockImplementation(() => () => {}),
+    sendText: vi.fn().mockResolvedValue({ msgId: 'mock' }),
+    send: vi.fn().mockResolvedValue({ seq: 1, msgId: 'mock' }),
+    baseUrl: 'https://chat.example.com',
+    jwt: 'test-jwt',
+    assertRoomNotPoisoned: vi.fn(),
+    uploadAttachment: vi.fn().mockResolvedValue({
+      attachmentId: 'att-1',
+      attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },
+    }),
+    sendAttachmentMessageOptimistic: vi.fn((_roomId: string, args: { msgId: string }) => ({
+      msgId: args.msgId,
+      done: donePromise,
+      onPending: () => {},
+      onSucceeded: () => {},
+      onFailed: () => {},
+    })),
+    getFailedOutboxEntries: vi.fn(async () => []),
+    flushOutbox: vi.fn(async () => {}),
+    ...extra,
+  };
+  return { client, rejectDone };
+}
+
+/** #257: Drive the live send-failure journey: stub compression/fetch, mount,
+ *  paste an image, type a caption, send, and reject the handle's done promise
+ *  to produce a retryable failed bubble. Returns the element, textarea, and
+ *  the failed bubble (with its msgId). */
+async function liveSendFailureJourney(
+  client: Record<string, unknown>,
+  caption: string,
+  rejectDone: (err: Error) => void,
+): Promise<{ el: OxpulseChatElement; textarea: HTMLTextAreaElement; failedBubble: HTMLElement; msgId: string }> {
+  stubImageCompression();
+  vi.stubGlobal('navigator', { language: 'en-US', mediaDevices: { getUserMedia: vi.fn() } });
+
+  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    const urlStr = String(url);
+    if (urlStr === 'https://chat.example.com/api/sdk/attachments/presign') {
+      return { ok: true, status: 200, json: async () => ({ attachment_id: 'att-1', upload_url: '/api/sdk/attachments/att-1?t=tok' }) } as Response;
+    }
+    if (urlStr.startsWith('https://chat.example.com/api/sdk/attachments/att-1')) {
+      return { ok: true, status: 204, json: async () => null } as Response;
+    }
+    return { ok: false, status: 404, json: async () => null, text: async () => '' } as Response;
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  const el = await mountWithClient(client);
+
+  const textarea = el.shadowRoot!.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+  expect(textarea).not.toBeNull();
+  const pngFile = new File([new Uint8Array(16)], 'photo.png', { type: 'image/png' });
+  const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pngFile] }, configurable: true });
+  textarea.dispatchEvent(pasteEvent);
+  await new Promise((r) => setTimeout(r, 30));
+
+  textarea.value = caption;
+  textarea.dispatchEvent(new Event('input'));
+  const sendBtn = el.shadowRoot!.querySelector('.oxp-composer-send') as HTMLButtonElement;
+  sendBtn.click();
+  await new Promise((r) => setTimeout(r, 30));
+
+  rejectDone(new Error('upload failed'));
+  await new Promise((r) => setTimeout(r, 30));
+
+  const failedBubble = el.shadowRoot!.querySelector('[data-send-failed="true"]') as HTMLElement;
+  expect(failedBubble).not.toBeNull();
+  const msgId = failedBubble.getAttribute('data-msg-id')!;
+  expect(msgId).toBeTruthy();
+
+  return { el, textarea, failedBubble, msgId };
+}
+
 describe('OxpulseChatElement — failed-message affordances (R3)', () => {
   let container: HTMLDivElement;
 
@@ -304,6 +392,106 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
     //    or dismiss it.
     const bubbleAfterRetry = el.shadowRoot!.querySelector('[data-send-failed="true"]');
     expect(bubbleAfterRetry).not.toBeNull();
+
+    el.remove();
+  });
+
+  // ── F12: retry dequeues the original outbox entry (#257) ──────────────────
+  //
+  // Journey: user clicks retry on a send-failed bubble → the original outbox
+  // entry is dequeued before the caption is restored → the next flushOutbox
+  // (mount/reconnect) does NOT re-send the original, so one user intent =
+  // one message. Without this, the original stays queued and the re-send
+  // (new msgId) produces a duplicate.
+  // Mutation: delete the dismissFailedOutboxEntry call in #retrySendFailed
+  // → RED (the spy is never called).
+  it('F12_retry_dequeues_original_outbox_entry', async () => {
+    const dismissSpy = vi.fn(async (_roomId: string, _msgId: string) => {});
+    const { client, rejectDone } = makeLiveFailureClient({
+      dismissFailedOutboxEntry: dismissSpy,
+    });
+
+    const { el, failedBubble, msgId } = await liveSendFailureJourney(
+      client, 'retry me caption', rejectDone,
+    );
+
+    // Click retry — #retrySendFailed fires.
+    const retryBtn = failedBubble.querySelector('.oxp-send-failed-retry') as HTMLButtonElement;
+    expect(retryBtn).not.toBeNull();
+    retryBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // THE GATE: the SDK's dequeue seam was called with this room and msgId.
+    // Without this call, the original outbox entry stays queued and the next
+    // flushOutbox re-sends it alongside the user's new send.
+    expect(dismissSpy).toHaveBeenCalledWith('room1', msgId);
+
+    el.remove();
+  });
+
+  // ── F13: CONTROL — dismiss still dequeues and removes the row ─────────────
+  //
+  // Without this, F12 would pass against a widget that dequeues unconditionally
+  // on every path. Dismiss must still dequeue AND remove the row — retry
+  // dequeues but does NOT remove the row (F14). The two paths are distinct.
+  // Mutation: delete the removeRow call in #dismissFailedMessage → RED (the
+  // row survives in the DOM).
+  it('F13_CONTROL_dismiss_still_dequeues_and_removes_row', async () => {
+    const failedStore = [
+      {
+        msgId: 'fail-dismiss-ctrl',
+        senderUid: 'u1',
+        pendingAttachments: { body: 'lost photo caption' },
+        sendFailed: { reason: 'Upload interrupted', failedAt: Date.now() },
+      },
+    ];
+    const client = makeFailedOutboxClient(failedStore);
+
+    const el = await mountWithClient(client);
+    const bubble = el.shadowRoot!.querySelector('[data-msg-id="fail-dismiss-ctrl"]');
+    expect(bubble).not.toBeNull();
+
+    const dismissBtn = bubble!.querySelector('.oxp-send-failed-dismiss') as HTMLButtonElement;
+    expect(dismissBtn).not.toBeNull();
+    dismissBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Dismiss dequeued the outbox entry.
+    expect(client.dismissFailedOutboxEntry).toHaveBeenCalledWith('room1', 'fail-dismiss-ctrl');
+    // Dismiss removed the row from the DOM.
+    expect(el.shadowRoot!.querySelector('[data-msg-id="fail-dismiss-ctrl"]')).toBeNull();
+
+    el.remove();
+  });
+
+  // ── F14: CONTROL — retry restores caption and keeps bubble visible ────────
+  //
+  // The dequeue must not break the existing retry behaviour: the caption is
+  // restored to the composer and the failed bubble stays visible until a
+  // re-send is actually dispatched. A fix that quietly removes the bubble is
+  // a regression, not a fix.
+  // Mutation: add this.#messageList?.removeRow(msgId) in #retrySendFailed →
+  // RED (the bubble is gone immediately after retry).
+  it('F14_CONTROL_retry_restores_caption_and_keeps_bubble_visible', async () => {
+    const { client, rejectDone } = makeLiveFailureClient({
+      dismissFailedOutboxEntry: vi.fn(async () => {}),
+    });
+
+    const { el, textarea, failedBubble } = await liveSendFailureJourney(
+      client, 'retry me caption', rejectDone,
+    );
+
+    // Click retry.
+    const retryBtn = failedBubble.querySelector('.oxp-send-failed-retry') as HTMLButtonElement;
+    expect(retryBtn).not.toBeNull();
+    retryBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // The caption was restored to the composer.
+    expect(textarea.value).toBe('retry me caption');
+
+    // The failed bubble is STILL visible (not removed by retry).
+    expect(el.shadowRoot!.querySelector('[data-send-failed="true"]')).not.toBeNull();
 
     el.remove();
   });

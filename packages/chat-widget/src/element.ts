@@ -1722,6 +1722,13 @@ export class OxpulseChatElement extends HTMLElement {
    * composer so the user can re-pick the attachment and re-send. The blob is
    * still in memory (retryable=true).
    *
+   * #257: The original outbox entry is dequeued before the caption is restored.
+   * The user re-picks the attachment and re-sends, minting a new msgId — if
+   * the original entry stayed queued, the next flushOutbox (mount/reconnect)
+   * would send it too: one user intent, two messages. Mirrors
+   * #dismissFailedMessage's fire-and-forget dequeue (best-effort; idb may be
+   * unavailable, in which case the entry is already gone from memory).
+   *
    * R3/F3: The failed bubble is NOT removed here — the failure stays visible
    * until a re-send is actually dispatched (a new optimistic echo replaces it)
    * or the user dismisses it. Removing the row eagerly destroyed the evidence
@@ -1731,6 +1738,11 @@ export class OxpulseChatElement extends HTMLElement {
     const ctx = this.#pendingRetries.get(msgId);
     if (!ctx) return;
     this.#pendingRetries.delete(msgId);
+    // #257: Dequeue the original outbox entry so the next flushOutbox does
+    // not re-send it alongside the user's new send (new msgId). Fire-and-forget
+    // — best-effort (idb may be unavailable, in which case the entry is
+    // already gone from memory).
+    void this.#dismissFailedOutboxEntry?.(roomId, msgId).catch(() => {});
     // Re-insert the caption text into the composer so the user can re-pick
     // the attachment and re-send. The blob is in memory but the staged items
     // were detached, so the user needs to re-stage them. The caption is
