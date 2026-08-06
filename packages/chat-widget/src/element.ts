@@ -26,8 +26,12 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID } from '@oxpulse/chat-sdk';
-import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
+import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID, onOutboxDegraded } from '@oxpulse/chat-sdk';
+import type {
+  MutationEvent as SDKMutationEvent,
+  ReactionEvent as SDKReactionEvent,
+  OutboxOp,
+} from '@oxpulse/chat-sdk';
 import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
 import {
@@ -233,6 +237,11 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList = null;
     this.#styleEl = null;
     this.#iframe = null;
+    // #261: drop the outbox-durability subscription. Without this the listener
+    // outlives the element and a re-mount stacks another one — the SDK holds
+    // them in a module-level set that nothing else clears.
+    this.#outboxDegradedDispose?.();
+    this.#outboxDegradedDispose = null;
     // D2: remove the send-failed listener and clear retry context.
     if (this.#sendFailedListener) {
       this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
@@ -384,6 +393,11 @@ export class OxpulseChatElement extends HTMLElement {
     this.#messageList = null;
     this.#styleEl = null;
     this.#iframe = null;
+    // #261: drop the outbox-durability subscription. Without this the listener
+    // outlives the element and a re-mount stacks another one — the SDK holds
+    // them in a module-level set that nothing else clears.
+    this.#outboxDegradedDispose?.();
+    this.#outboxDegradedDispose = null;
     // D2: remove the send-failed listener and clear retry context.
     if (this.#sendFailedListener) {
       this.removeEventListener('oxpulse-chat:send-failed', this.#sendFailedListener);
@@ -403,6 +417,17 @@ export class OxpulseChatElement extends HTMLElement {
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────
+
+  /** #261: disposer for the outbox-durability subscription; see #bootstrap. */
+  #outboxDegradedDispose: (() => void) | null = null;
+
+  /**
+   * #261: report the durability loss at most once per element. The SDK latches
+   * the first transition but replays it to every new subscriber, so without this
+   * a re-mount reports again — the docs claimed "once per page" and were wrong.
+   * Field state survives disconnect/reconnect, which is exactly the scope wanted.
+   */
+  #outboxUnavailableReported = false;
 
   /**
    * Store config callbacks from programmatic mount().
@@ -457,6 +482,46 @@ export class OxpulseChatElement extends HTMLElement {
     );
     if (this.#config?.onWriteError) {
       this.#config.onWriteError({ op, reason });
+    }
+  }
+
+  /**
+   * #261: the outbox degrades to a no-op when IndexedDB is unavailable — Safari
+   * private browsing, storage-pressure eviction, blocked site data. Sending keeps
+   * working; what is lost is retry-after-reload. That is a legitimate degradation
+   * but it used to be invisible, so a support conversation could not tell "we lost
+   * your message" from "durability was never available in this browser".
+   *
+   * Reported through the EXISTING error channel — `oxpulse-chat:error` plus
+   * config.onError — with a new WidgetErrorCode, rather than inventing an event.
+   * Note this is NOT #notifyWriteFailure's channel: that one owns
+   * `oxpulse-chat:write-error`/onWriteError, which is a write-op failure counter.
+   * A durability loss is not a failed write, so it belongs on the general
+   * error channel; what is borrowed from it is the WidgetError shape.
+   *
+   * Fires at most once per element. The SDK latches the first transition, but
+   * replays it to every new subscriber, so a re-mount would otherwise report
+   * again — and two widgets on a page each report, by design, since each has
+   * its own onError.
+   */
+  #notifyOutboxUnavailable(op: OutboxOp): void {
+    if (this.#outboxUnavailableReported) return;
+    this.#outboxUnavailableReported = true;
+    const err = new WidgetError(
+      'OUTBOX_UNAVAILABLE',
+      `Message durability is unavailable in this browser (storage failed on ${op}). ` +
+        'Sending still works, but unsent messages will not be retried after a reload.',
+      { outboxOp: op },
+    );
+    this.dispatchEvent(
+      new CustomEvent('oxpulse-chat:error', {
+        bubbles: true,
+        composed: true,
+        detail: err,
+      }),
+    );
+    if (this.#config?.onError) {
+      this.#config.onError(err);
     }
   }
 
@@ -1384,6 +1449,17 @@ export class OxpulseChatElement extends HTMLElement {
       // getFailedOutboxEntries below already catches both sendFailed and
       // pendingAttachments entries for display.
       void effectiveSendClient?.flushOutbox?.(config.roomId).catch(() => {});
+
+      // #261: observe the loss of outbox durability. Subscribed here rather than
+      // in the constructor because the notifier needs #config, and disposed first
+      // so a re-mount does not accumulate listeners. onOutboxDegraded replays to a
+      // late subscriber, so a failure that already happened during this mount's
+      // first send is still reported.
+      this.#outboxDegradedDispose?.();
+      this.#outboxDegradedDispose = onOutboxDegraded((d) => {
+        if (signal.aborted) return;
+        this.#notifyOutboxUnavailable(d.op);
+      });
 
       // D1: Read failed outbox entries on mount — these are messages whose
       // attachment uploads were interrupted by a page reload. The blob is

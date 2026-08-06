@@ -5,12 +5,76 @@
  * Key format: 'outbox:<roomId>' — one array per room.
  *
  * All operations are best-effort: if IndexedDB is unavailable (private browsing,
- * disabled storage, jsdom without fake-indexeddb), they silently no-op. The send
- * still proceeds — the outbox is a durability mechanism, not a hard gate. A
- * message that cannot be persisted simply loses retry-on-reload protection.
+ * disabled storage, jsdom without fake-indexeddb), they no-op. The send still
+ * proceeds — the outbox is a durability mechanism, not a hard gate. A message
+ * that cannot be persisted simply loses retry-on-reload protection.
+ *
+ * #261: that no-op used to be SILENT, which made two very different states
+ * indistinguishable — "your message was persisted and will be retried" and
+ * "durability was never available in this browser". The widget ships on partner
+ * sites, so it meets Safari private browsing, storage-pressure eviction and
+ * blocked site data routinely. Proceeding without durability is fine; doing it
+ * invisibly is not. The first failure now flips a module-level flag and notifies
+ * any registered listener exactly once.
  */
 
 import { get, update } from 'idb-keyval';
+
+/** Which operation first hit unavailable storage. */
+export type OutboxOp = 'enqueue' | 'dequeue' | 'pending' | 'updateEntry' | 'pruneFailedEntries';
+
+export interface OutboxDegradation {
+  op: OutboxOp;
+  error: unknown;
+}
+
+let degradation: OutboxDegradation | null = null;
+const listeners = new Set<(d: OutboxDegradation) => void>();
+
+/**
+ * True until the first storage failure. Once false it stays false for the page's
+ * lifetime: a store that failed once cannot be assumed to have persisted anything
+ * earlier either, so re-arming would report a durability we cannot vouch for.
+ */
+export function isOutboxDurable(): boolean {
+  return degradation === null;
+}
+
+/**
+ * Register a listener for the loss of durability. Returns a disposer.
+ *
+ * A listener registered AFTER the first failure is called immediately with the
+ * recorded degradation — otherwise the signal would be lost in exactly the case
+ * that matters, where storage is unavailable from the very first send and the
+ * widget subscribes a moment later.
+ */
+export function onOutboxDegraded(fn: (d: OutboxDegradation) => void): () => void {
+  listeners.add(fn);
+  if (degradation !== null) {
+    // Same guard as markDegraded below. Without it a throwing listener takes
+    // down whatever is subscribing — for the widget that is #bootstrap, so an
+    // integrator's onError could abort the mount it was only meant to report on.
+    try {
+      fn(degradation);
+    } catch {
+      /* ignore */
+    }
+  }
+  return () => listeners.delete(fn);
+}
+
+function markDegraded(op: OutboxOp, error: unknown): void {
+  if (degradation !== null) return; // first transition only
+  degradation = { op, error };
+  for (const fn of listeners) {
+    // A throwing listener must not take down the send path it is reporting on.
+    try {
+      fn(degradation);
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 export interface PendingMessage {
   msgId: string;
@@ -64,8 +128,9 @@ export async function enqueue(roomId: string, msg: PendingMessage): Promise<void
   const key = `outbox:${roomId}`;
   try {
     await update<PendingMessage[]>(key, (cur) => [...(cur ?? []), msg]);
-  } catch {
-    // idb unavailable — send proceeds without durability.
+  } catch (err) {
+    // idb unavailable — send proceeds without durability, but not silently.
+    markDegraded('enqueue', err);
   }
 }
 
@@ -74,8 +139,9 @@ export async function dequeue(roomId: string, msgId: string): Promise<void> {
   const key = `outbox:${roomId}`;
   try {
     await update<PendingMessage[]>(key, (cur) => (cur ?? []).filter((m) => m.msgId !== msgId));
-  } catch {
+  } catch (err) {
     // idb unavailable — nothing to dequeue.
+    markDegraded('dequeue', err);
   }
 }
 
@@ -83,7 +149,8 @@ export async function dequeue(roomId: string, msgId: string): Promise<void> {
 export async function pending(roomId: string): Promise<PendingMessage[]> {
   try {
     return (await get<PendingMessage[]>(`outbox:${roomId}`)) ?? [];
-  } catch {
+  } catch (err) {
+    markDegraded('pending', err);
     return [];
   }
 }
@@ -102,8 +169,9 @@ export async function updateEntry(
     await update<PendingMessage[]>(key, (cur) =>
       (cur ?? []).map((m) => (m.msgId === msgId ? { ...m, ...patch } : m)),
     );
-  } catch {
+  } catch (err) {
     // idb unavailable — nothing to update.
+    markDegraded('updateEntry', err);
   }
 }
 
@@ -151,7 +219,8 @@ export async function pruneFailedEntries(
       );
       return all.filter((m) => !evictIds.has(m.msgId));
     });
-  } catch {
+  } catch (err) {
     // idb unavailable — nothing to prune.
+    markDegraded('pruneFailedEntries', err);
   }
 }

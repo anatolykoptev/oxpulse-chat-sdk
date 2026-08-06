@@ -21,9 +21,32 @@ import { OxpulseChatElement, defineElement } from '../element.js';
 
 // fetchRoster is called unconditionally on mount; jsdom has no roster server.
 // Stub to resolve an empty roster so mount completes deterministically.
+// #261: the durability signal is driven from the tests. Declared via vi.hoisted
+// because vi.mock is hoisted above the file body.
+const outboxState = vi.hoisted(() => ({
+  degradation: null as null | { op: string },
+  disposed: 0,
+  /** The widget's live listener, so a test can drive a degradation that happens
+   *  AFTER subscribe — F5 only ever covered the replay path. */
+  listener: null as null | ((d: { op: string }) => void),
+}));
+
 vi.mock('@oxpulse/chat-sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@oxpulse/chat-sdk')>();
-  return { ...actual, fetchRoster: vi.fn().mockResolvedValue(new Map()) };
+  return {
+    ...actual,
+    fetchRoster: vi.fn().mockResolvedValue(new Map()),
+    // Mirrors the real contract: a listener registered after the failure is
+    // called immediately, and registration returns a disposer.
+    onOutboxDegraded: (fn: (d: { op: string }) => void) => {
+      outboxState.listener = fn;
+      if (outboxState.degradation) fn(outboxState.degradation);
+      return () => {
+        outboxState.disposed += 1;
+        outboxState.listener = null;
+      };
+    },
+  };
 });
 
 function makeJwt(payload: Record<string, unknown>): string {
@@ -103,11 +126,29 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
 
   beforeEach(() => {
     defineElement();
+    outboxState.degradation = null;
+    outboxState.disposed = 0;
+    outboxState.listener = null;
     container = document.createElement('div');
     document.body.appendChild(container);
   });
 
   afterEach(() => {
+    // #261: reset on the way OUT as well as in. The mock factory closes over
+    // outboxState, so leaving it "degraded" made element.test.ts mount with an
+    // extra onError and fail two attachment cases in the full-suite run while
+    // passing alone. Symmetric reset keeps the state inside this file.
+    // (An earlier version of this comment blamed vitest's `pool: 'vmForks'`.
+    // That setting belongs to oxpulse-chat's web/ suite, not to this repo —
+    // no vitest config here sets a pool. The leak was real; the mechanism
+    // named for it was borrowed from the wrong repository.)
+    // Every field beforeEach clears, cleared here too. It said "symmetric" and
+    // was not: `disposed` and `listener` leaked out of this file, and `listener`
+    // holds a closure over an element from it. Asserting a property the code
+    // does not have is the defect this whole PR is about.
+    outboxState.degradation = null;
+    outboxState.disposed = 0;
+    outboxState.listener = null;
     container.remove();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -285,4 +326,135 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
 
     el.remove();
   });
+
+  // ── #261: the widget surfaces the loss of durability ──────────────────────
+  //
+  // Journey: an integrator embeds the widget on a partner site and the visitor
+  // is in Safari private browsing. Sending keeps working, but nothing is
+  // persisted — so a "we lost your message" support ticket cannot be told apart
+  // from "durability was never available in this browser". The widget must say
+  // so once, through the error channel that already exists.
+  it('F5_widget_reports_lost_durability_once_through_config_onError', async () => {
+    outboxState.degradation = { op: 'enqueue' };
+    const onError = vi.fn();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeFailedOutboxClient([]), onError });
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    const codes = onError.mock.calls.map((c) => (c[0] as { code?: string })?.code);
+    expect(codes.filter((c) => c === 'OUTBOX_UNAVAILABLE')).toHaveLength(1);
+    el.remove();
+  });
+
+  it('F8_removing_the_element_disposes_the_outbox_subscription', async () => {
+    // Review of #264: both teardown paths dismantled everything EXCEPT this
+    // subscription, so the listener outlived its element and a re-mount stacked
+    // another one in the SDK's module-level set, which nothing else clears.
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeFailedOutboxClient([]) });
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    expect(outboxState.disposed).toBe(0);
+    el.remove();
+    expect(outboxState.disposed).toBe(1);
+  });
+
+  it('F9_degradation_after_mount_is_reported_live_not_only_on_replay', async () => {
+    // Review of #264 finding 8: F5 drove degradation BEFORE subscribe, so it
+    // only ever exercised the replay branch. The live path — storage fails while
+    // the widget is already mounted — was the primary one and had no gate.
+    const onError = vi.fn();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeFailedOutboxClient([]), onError });
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    expect(onError.mock.calls.map((c) => (c[0] as { code?: string })?.code))
+      .not.toContain('OUTBOX_UNAVAILABLE');
+
+    // Storage dies now, with the widget already up.
+    expect(outboxState.listener, 'widget must have subscribed').not.toBeNull();
+    outboxState.listener!({ op: 'enqueue' });
+
+    const errs = onError.mock.calls
+      .map((c) => c[0] as { code?: string; outboxOp?: string })
+      .filter((e) => e?.code === 'OUTBOX_UNAVAILABLE');
+    expect(errs).toHaveLength(1);
+    // Finding 6b: the op is a field, not something to parse out of the message.
+    expect(errs[0]!.outboxOp).toBe('enqueue');
+    el.remove();
+  });
+
+  it('F10_outbox_unavailable_is_dispatched_as_a_dom_event_too', async () => {
+    // Finding 8: F5 asserted only the onError callback. An integrator listening
+    // on the element — the documented route in docs/embedding.md — was ungated,
+    // so dropping the dispatchEvent would have kept every test green.
+    const seen: Array<{ code?: string; outboxOp?: string }> = [];
+    document.addEventListener('oxpulse-chat:error', (e) => {
+      seen.push((e as CustomEvent).detail);
+    });
+    outboxState.degradation = { op: 'dequeue' };
+    const el = await mountWithClient(makeFailedOutboxClient([]));
+
+    const hits = seen.filter((d) => d?.code === 'OUTBOX_UNAVAILABLE');
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.outboxOp).toBe('dequeue');
+    el.remove();
+  });
+
+  it('F11_a_remount_does_not_report_the_same_degradation_twice', async () => {
+    // Finding 3a: the SDK latches the first transition but replays it to every
+    // new subscriber, so re-mounting re-reported and the docs' "once per page"
+    // was false. Dedup is per element instance.
+    outboxState.degradation = { op: 'pending' };
+    const onError = vi.fn();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeFailedOutboxClient([]), onError });
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    const count = () =>
+      onError.mock.calls.filter((c) => (c[0] as { code?: string })?.code === 'OUTBOX_UNAVAILABLE')
+        .length;
+    expect(count()).toBe(1);
+
+    el.remove();
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    expect(count(), 'a re-mount must not re-report the same degradation').toBe(1);
+    el.remove();
+  });
+
+  it('F6_CONTROL_no_degradation_no_report', async () => {
+    // Without this, F5 would pass against a widget that reports unconditionally.
+    outboxState.degradation = null;
+    const onError = vi.fn();
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => makeFailedOutboxClient([]), onError });
+    document.body.appendChild(el);
+    await waitForReady(el);
+
+    const codes = onError.mock.calls.map((c) => (c[0] as { code?: string })?.code);
+    expect(codes).not.toContain('OUTBOX_UNAVAILABLE');
+    el.remove();
+  });
+
 });

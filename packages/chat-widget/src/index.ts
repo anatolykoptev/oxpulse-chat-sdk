@@ -17,7 +17,7 @@ export type { MountOptions } from './types.js';
 export type { WidgetConfig, WidgetEventMap } from './types.js';
 export type { ProductMeta } from './types.js';
 export { WidgetError, OriginNotAllowedError } from './types.js';
-export type { WidgetErrorCode } from './types.js';
+export type { WidgetErrorCode, WidgetErrorDetail } from './types.js';
 export { checkOrigin, decodeJwtPayload, matchOriginPattern } from './bootstrap.js';
 export type { OriginCheckResult } from './types.js';
 export {
