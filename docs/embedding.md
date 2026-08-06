@@ -246,9 +246,13 @@ window.addEventListener('message', (ev) => {
 
 ### `OUTBOX_UNAVAILABLE` — durability, not delivery
 
-Fired at most once per page when IndexedDB is unavailable (Safari private browsing,
+Fired at most once per widget when IndexedDB is unavailable (Safari private browsing,
 storage-pressure eviction, blocked site data). **Sending still works.** What is lost is
 retry-after-reload: a message not yet delivered when the tab closes is gone.
+
+Two widgets on one page each fire it once, because each has its own `onError`. A widget
+that is removed and re-mounted does not fire again. `err.outboxOp` names the storage
+operation that failed — read that rather than parsing the message.
 
 Treat it as a degradation notice, not an error — it is worth logging, and worth telling a
 user only if your product promises delivery across a reload. It exists so a support

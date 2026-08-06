@@ -5,6 +5,8 @@
  * Keep this file pure types — no runtime code.
  */
 
+import type { OutboxOp } from '@oxpulse/chat-sdk';
+
 // ── Widget configuration ──────────────────────────────────────────────────────
 
 /** Widget initialisation config. */
@@ -269,9 +271,19 @@ export type WidgetErrorCode =
   | 'WRITE_REACTION_FAILED'
   /** #261: IndexedDB is unavailable, so sends are not persisted and will not be
    *  retried after a reload. Sending still works — this is a degradation, not a
-   *  failure, and is reported once per page. */
+   *  failure. Reported once per widget instance; two widgets on a page each
+   *  report, because each has its own onError. */
   | 'OUTBOX_UNAVAILABLE'
   | 'UNKNOWN';
+
+/**
+ * Structured detail carried alongside the message. Discriminated so a caller
+ * reads a field rather than parsing the message string — #261 shipped with the
+ * failing op only in prose, which is not an API.
+ */
+export type WidgetErrorDetail =
+  | { op: WriteFailureOp; reason: WriteFailureReason }
+  | { outboxOp: OutboxOp };
 
 export class WidgetError extends Error {
   readonly code: WidgetErrorCode;
@@ -279,17 +291,19 @@ export class WidgetError extends Error {
   readonly op?: WriteFailureOp;
   /** Present on write-failure events (issue #78) — coarse failure reason. */
   readonly reason?: WriteFailureReason;
+  /** Present on OUTBOX_UNAVAILABLE (#261) — which storage op lost durability. */
+  readonly outboxOp?: OutboxOp;
 
-  constructor(
-    code: WidgetErrorCode,
-    message: string,
-    writeFailure?: { op: WriteFailureOp; reason: WriteFailureReason },
-  ) {
+  constructor(code: WidgetErrorCode, message: string, detail?: WidgetErrorDetail) {
     super(message);
     this.name = 'WidgetError';
     this.code = code;
-    this.op = writeFailure?.op;
-    this.reason = writeFailure?.reason;
+    if (detail && 'outboxOp' in detail) {
+      this.outboxOp = detail.outboxOp;
+    } else if (detail) {
+      this.op = detail.op;
+      this.reason = detail.reason;
+    }
   }
 }
 

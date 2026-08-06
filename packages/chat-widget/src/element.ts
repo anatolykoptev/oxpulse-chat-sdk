@@ -27,7 +27,11 @@ import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
 import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID, onOutboxDegraded } from '@oxpulse/chat-sdk';
-import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
+import type {
+  MutationEvent as SDKMutationEvent,
+  ReactionEvent as SDKReactionEvent,
+  OutboxOp,
+} from '@oxpulse/chat-sdk';
 import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
 import {
@@ -414,14 +418,22 @@ export class OxpulseChatElement extends HTMLElement {
 
   // ── Internal ──────────────────────────────────────────────────────────────
 
+  /** #261: disposer for the outbox-durability subscription; see #bootstrap. */
+  #outboxDegradedDispose: (() => void) | null = null;
+
+  /**
+   * #261: report the durability loss at most once per element. The SDK latches
+   * the first transition but replays it to every new subscriber, so without this
+   * a re-mount reports again — the docs claimed "once per page" and were wrong.
+   * Field state survives disconnect/reconnect, which is exactly the scope wanted.
+   */
+  #outboxUnavailableReported = false;
+
   /**
    * Store config callbacks from programmatic mount().
    * Not exposed as attributes — only via the JS API.
    * @internal
    */
-  /** #261: disposer for the outbox-durability subscription; see #bootstrap. */
-  #outboxDegradedDispose: (() => void) | null = null;
-
   _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'onWriteError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken' | '_createCatalogClient'>): void {
     this.#config = {
       ...(this.#config ?? { appId: '', jwt: '', roomId: '' }),
@@ -480,15 +492,26 @@ export class OxpulseChatElement extends HTMLElement {
    * but it used to be invisible, so a support conversation could not tell "we lost
    * your message" from "durability was never available in this browser".
    *
-   * Reported through the EXISTING error event and WidgetError shape with a new
-   * code, following #notifyWriteFailure above rather than inventing an event.
-   * Fires at most once per page: the SDK only signals the first transition.
+   * Reported through the EXISTING error channel — `oxpulse-chat:error` plus
+   * config.onError — with a new WidgetErrorCode, rather than inventing an event.
+   * Note this is NOT #notifyWriteFailure's channel: that one owns
+   * `oxpulse-chat:write-error`/onWriteError, which is a write-op failure counter.
+   * A durability loss is not a failed write, so it belongs on the general
+   * error channel; what is borrowed from it is the WidgetError shape.
+   *
+   * Fires at most once per element. The SDK latches the first transition, but
+   * replays it to every new subscriber, so a re-mount would otherwise report
+   * again — and two widgets on a page each report, by design, since each has
+   * its own onError.
    */
-  #notifyOutboxUnavailable(op: string): void {
+  #notifyOutboxUnavailable(op: OutboxOp): void {
+    if (this.#outboxUnavailableReported) return;
+    this.#outboxUnavailableReported = true;
     const err = new WidgetError(
       'OUTBOX_UNAVAILABLE',
       `Message durability is unavailable in this browser (storage failed on ${op}). ` +
         'Sending still works, but unsent messages will not be retried after a reload.',
+      { outboxOp: op },
     );
     this.dispatchEvent(
       new CustomEvent('oxpulse-chat:error', {

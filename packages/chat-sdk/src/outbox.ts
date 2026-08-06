@@ -50,14 +50,17 @@ export function isOutboxDurable(): boolean {
  */
 export function onOutboxDegraded(fn: (d: OutboxDegradation) => void): () => void {
   listeners.add(fn);
-  if (degradation !== null) fn(degradation);
+  if (degradation !== null) {
+    // Same guard as markDegraded below. Without it a throwing listener takes
+    // down whatever is subscribing — for the widget that is #bootstrap, so an
+    // integrator's onError could abort the mount it was only meant to report on.
+    try {
+      fn(degradation);
+    } catch {
+      /* ignore */
+    }
+  }
   return () => listeners.delete(fn);
-}
-
-/** Test seam — module state is global and would leak between test files. */
-export function __resetOutboxDurability(): void {
-  degradation = null;
-  listeners.clear();
 }
 
 function markDegraded(op: OutboxOp, error: unknown): void {
