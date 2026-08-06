@@ -242,9 +242,10 @@ await client.deleteRoom(room.roomId);
 > Its first gate is `chat:admin:<roomId>`. It used to be `chat:write:<roomId>` — the same
 > scope an ordinary browser token carries — which made *sending a message* and *wiping the
 > room* the same capability, reachable from an anonymously minted token
-> ([oxpulse-chat#2858](https://github.com/anatolykoptev/oxpulse-chat/pull/2858)). If you
-> mint `chat:admin` today against an older engine you will 403; if you rely on `chat:write`
-> against a current one you will 403. Pin your expectation to the engine you deploy against.
+> ([oxpulse-chat#2858](https://github.com/anatolykoptev/oxpulse-chat/pull/2858)). The change
+> landed in server **v0.16.0**: mint `chat:admin` against anything older and you will 403,
+> rely on `chat:write` against v0.16.0 or newer and you will 403. Check the engine version
+> you actually deploy against — a released version is not necessarily the deployed one.
 >
 > A second gate follows (since server v0.15.10), satisfied by **either** of:
 >
@@ -259,7 +260,8 @@ await client.deleteRoom(room.roomId);
 > as one.** `check_scope` treats `*` as a match in every position, so a token carrying
 > `chat:*:<roomId>` — the shape you reach for when you want read, write and subscribe in
 > one string — also satisfies `chat:admin:<roomId>` and can wipe the room. Enumerate the
-> verbs you actually need; never mint a wildcard verb into a browser token.
+> verbs you actually need. Never mint a wildcard verb into a browser token, and never
+> mint `chat:admin` into one either — it is a backend-only scope.
 >
 > The erase is a hard delete with no tombstone and no recovery. A plain `chat:write`
 > holder now gets 403 where it previously succeeded — if you built a flow that let
