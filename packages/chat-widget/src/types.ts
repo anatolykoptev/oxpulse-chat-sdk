@@ -267,6 +267,10 @@ export type WidgetErrorCode =
   | 'WRITE_MINT_FAILED'
   | 'WRITE_SEND_FAILED'
   | 'WRITE_REACTION_FAILED'
+  /** #261: IndexedDB is unavailable, so sends are not persisted and will not be
+   *  retried after a reload. Sending still works — this is a degradation, not a
+   *  failure, and is reported once per page. */
+  | 'OUTBOX_UNAVAILABLE'
   | 'UNKNOWN';
 
 export class WidgetError extends Error {

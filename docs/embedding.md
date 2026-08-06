@@ -242,7 +242,18 @@ window.addEventListener('message', (ev) => {
 });
 ```
 
-`WidgetErrorCode` values: `'ORIGIN_NOT_ALLOWED'`, `'JWT_MALFORMED'`, `'JWT_EXPIRED'`, `'TOKEN_REFRESH_FAILED'`, `'NETWORK_ERROR'`, `'UNKNOWN'`.
+`WidgetErrorCode` values: `'ORIGIN_NOT_ALLOWED'`, `'JWT_MALFORMED'`, `'JWT_EXPIRED'`, `'TOKEN_REFRESH_FAILED'`, `'NETWORK_ERROR'`, `'OUTBOX_UNAVAILABLE'`, `'UNKNOWN'`.
+
+### `OUTBOX_UNAVAILABLE` — durability, not delivery
+
+Fired at most once per page when IndexedDB is unavailable (Safari private browsing,
+storage-pressure eviction, blocked site data). **Sending still works.** What is lost is
+retry-after-reload: a message not yet delivered when the tab closes is gone.
+
+Treat it as a degradation notice, not an error — it is worth logging, and worth telling a
+user only if your product promises delivery across a reload. It exists so a support
+conversation can tell “we lost your message” apart from “durability was never available
+in this browser”.
 
 ---
 

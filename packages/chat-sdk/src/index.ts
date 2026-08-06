@@ -34,7 +34,8 @@ export { createSFrameProvider } from './sframe.js';
 // Re-export ReplayError from sframe-ratchet/chat so consumers can inspect unsealError: 'replay'.
 export { ReplayError } from 'sframe-ratchet/chat';
 export type { SFrameProviderOptions } from './sframe.js';
-export type { PendingMessage } from './outbox.js';
+export type { PendingMessage, OutboxDegradation, OutboxOp } from './outbox.js';
+export { isOutboxDurable, onOutboxDegraded } from './outbox.js';
 export { SDKChatError, SDKChatBatchError } from './errors.js';
 export { generateUUID, backoffWithJitter, backoffMs } from './utils.js';
 

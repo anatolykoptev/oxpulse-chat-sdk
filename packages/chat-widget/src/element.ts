@@ -26,7 +26,7 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID } from '@oxpulse/chat-sdk';
+import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID, onOutboxDegraded } from '@oxpulse/chat-sdk';
 import type { MutationEvent as SDKMutationEvent, ReactionEvent as SDKReactionEvent } from '@oxpulse/chat-sdk';
 import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
@@ -409,6 +409,9 @@ export class OxpulseChatElement extends HTMLElement {
    * Not exposed as attributes — only via the JS API.
    * @internal
    */
+  /** #261: disposer for the outbox-durability subscription; see #bootstrap. */
+  #outboxDegradedDispose: (() => void) | null = null;
+
   _setCallbacks(config: Pick<WidgetConfig, 'onTokenExpired' | 'onError' | 'onWriteError' | 'allowLegacyToken' | '_createClient' | '_mintAnonReadToken' | '_mintNamedWriteToken' | '_createCatalogClient'>): void {
     this.#config = {
       ...(this.#config ?? { appId: '', jwt: '', roomId: '' }),
@@ -457,6 +460,35 @@ export class OxpulseChatElement extends HTMLElement {
     );
     if (this.#config?.onWriteError) {
       this.#config.onWriteError({ op, reason });
+    }
+  }
+
+  /**
+   * #261: the outbox degrades to a no-op when IndexedDB is unavailable — Safari
+   * private browsing, storage-pressure eviction, blocked site data. Sending keeps
+   * working; what is lost is retry-after-reload. That is a legitimate degradation
+   * but it used to be invisible, so a support conversation could not tell "we lost
+   * your message" from "durability was never available in this browser".
+   *
+   * Reported through the EXISTING error event and WidgetError shape with a new
+   * code, following #notifyWriteFailure above rather than inventing an event.
+   * Fires at most once per page: the SDK only signals the first transition.
+   */
+  #notifyOutboxUnavailable(op: string): void {
+    const err = new WidgetError(
+      'OUTBOX_UNAVAILABLE',
+      `Message durability is unavailable in this browser (storage failed on ${op}). ` +
+        'Sending still works, but unsent messages will not be retried after a reload.',
+    );
+    this.dispatchEvent(
+      new CustomEvent('oxpulse-chat:error', {
+        bubbles: true,
+        composed: true,
+        detail: err,
+      }),
+    );
+    if (this.#config?.onError) {
+      this.#config.onError(err);
     }
   }
 
@@ -1384,6 +1416,17 @@ export class OxpulseChatElement extends HTMLElement {
       // getFailedOutboxEntries below already catches both sendFailed and
       // pendingAttachments entries for display.
       void effectiveSendClient?.flushOutbox?.(config.roomId).catch(() => {});
+
+      // #261: observe the loss of outbox durability. Subscribed here rather than
+      // in the constructor because the notifier needs #config, and disposed first
+      // so a re-mount does not accumulate listeners. onOutboxDegraded replays to a
+      // late subscriber, so a failure that already happened during this mount's
+      // first send is still reported.
+      this.#outboxDegradedDispose?.();
+      this.#outboxDegradedDispose = onOutboxDegraded((d) => {
+        if (signal.aborted) return;
+        this.#notifyOutboxUnavailable(d.op);
+      });
 
       // D1: Read failed outbox entries on mount — these are messages whose
       // attachment uploads were interrupted by a page reload. The blob is

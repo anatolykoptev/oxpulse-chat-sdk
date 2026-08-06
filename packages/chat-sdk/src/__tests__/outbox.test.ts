@@ -652,4 +652,89 @@ describe('outbox', () => {
     // Cleanup.
     attResolve(new ArrayBuffer(8));
   });
+
+  // ── #261: the loss of durability must be observable ───────────────────────
+  //
+  // Each case re-imports ../outbox.js after vi.doMock so it gets FRESH module
+  // state — the degradation flag is module-scoped and would otherwise leak
+  // between cases and make the first one poison the rest.
+  describe('#261 durability signal', () => {
+    async function loadWithBrokenIdb() {
+      vi.resetModules();
+      vi.doMock('idb-keyval', () => ({
+        get: () => Promise.reject(new Error('idb unavailable')),
+        update: () => Promise.reject(new Error('idb unavailable')),
+        set: () => Promise.reject(new Error('idb unavailable')),
+        clear: () => Promise.resolve(),
+      }));
+      return import('../outbox.js');
+    }
+
+    async function loadWithWorkingIdb() {
+      vi.resetModules();
+      vi.doUnmock('idb-keyval');
+      return import('../outbox.js');
+    }
+
+    const MSG = (msgId: string): PendingMessage => ({
+      msgId,
+      roomId: 'r261',
+      senderUid: 'u',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: 1,
+    });
+
+    it('F1_enqueue_failure_notifies_a_registered_listener_once', async () => {
+      const mod = await loadWithBrokenIdb();
+      const seen: string[] = [];
+      mod.onOutboxDegraded((d) => seen.push(d.op));
+
+      expect(mod.isOutboxDurable()).toBe(true);
+      await mod.enqueue('r261', MSG('m1'));
+
+      expect(seen).toEqual(['enqueue']);
+      expect(mod.isOutboxDurable()).toBe(false);
+    });
+
+    it('F2_a_listener_registered_AFTER_the_failure_still_learns', async () => {
+      const mod = await loadWithBrokenIdb();
+      // The failure happens first, with nobody listening — this is the real
+      // ordering when storage is unavailable from the very first send.
+      await mod.enqueue('r261', MSG('m1'));
+
+      const seen: string[] = [];
+      mod.onOutboxDegraded((d) => seen.push(d.op));
+      expect(seen).toEqual(['enqueue']);
+    });
+
+    it('F3_repeated_failures_notify_exactly_once', async () => {
+      const mod = await loadWithBrokenIdb();
+      const seen: string[] = [];
+      mod.onOutboxDegraded((d) => seen.push(d.op));
+
+      await mod.enqueue('r261', MSG('m1'));
+      await mod.enqueue('r261', MSG('m2'));
+      await mod.dequeue('r261', 'm1');
+      await mod.pending('r261');
+
+      expect(seen).toEqual(['enqueue']);
+    });
+
+    it('F4_CONTROL_working_storage_never_signals', async () => {
+      // Without this the three cases above would all pass against an
+      // implementation that notifies unconditionally.
+      const mod = await loadWithWorkingIdb();
+      const seen: string[] = [];
+      mod.onOutboxDegraded((d) => seen.push(d.op));
+
+      await mod.enqueue('r261', MSG('m1'));
+      expect(await mod.pending('r261')).toHaveLength(1);
+      await mod.dequeue('r261', 'm1');
+
+      expect(seen).toEqual([]);
+      expect(mod.isOutboxDurable()).toBe(true);
+    });
+  });
+
 });
