@@ -182,7 +182,7 @@ for (const msg of result.items) {
 > | `listRooms` | results are scoped to the caller's own memberships |
 >
 > `deleteRoom()` is deliberately **absent** from this table: despite the name it is a
-> *messages* route and needs `chat:write:<roomId>`, not `rooms:write:*`. A token minted
+> *messages* route and needs `chat:admin:<roomId>`, not `rooms:write:*`. A token minted
 > from the rules above will 403 on it. See the caveat under the snippets.
 >
 > Two consequences worth planning around:
@@ -227,9 +227,10 @@ const full = await client.getRoom(room.roomId);
 // Rename / reconfigure a room — active owner only
 await client.updateRoom(room.roomId, { title: 'Support thread #42 (closed)' });
 
-// Erase the room's message history — needs chat:write:<roomId> FIRST, then
-// owner/moderator or a concrete chat:moderate scope. A rooms:write:* token
-// fails at the first gate. See the caveat below.
+// Erase the room's message history — needs chat:admin:<roomId> FIRST, then
+// owner/moderator or a concrete chat:moderate scope. Neither a rooms:write:*
+// token nor an ordinary chat:write browser token passes the first gate.
+// See the caveat below.
 await client.deleteRoom(room.roomId);
 ```
 
@@ -238,9 +239,15 @@ await client.deleteRoom(room.roomId);
 > and `getRoom()` keeps returning it. There is no endpoint that deletes a room — if you need
 > one, track [#248](https://github.com/anatolykoptev/oxpulse-chat-sdk/issues/248).
 >
-> Its first gate is `chat:write:<roomId>` — a *per-room* scope, the same one a browser
-> token carries, not the app-wide `rooms:write:*` above. Since server v0.15.10 a second
-> gate follows, and it is satisfied by **either** of:
+> Its first gate is `chat:admin:<roomId>`. It used to be `chat:write:<roomId>` — the same
+> scope an ordinary browser token carries — which made *sending a message* and *wiping the
+> room* the same capability, reachable from an anonymously minted token
+> ([oxpulse-chat#2858](https://github.com/anatolykoptev/oxpulse-chat/pull/2858)). The change
+> landed in server **v0.16.0**: mint `chat:admin` against anything older and you will 403,
+> rely on `chat:write` against v0.16.0 or newer and you will 403. Check the engine version
+> you actually deploy against — a released version is not necessarily the deployed one.
+>
+> A second gate follows (since server v0.15.10), satisfied by **either** of:
 >
 > - an `owner` or `moderator` row for that room, or
 > - a concrete `chat:moderate:<roomId>` scope in the token — no member row needed.
@@ -248,6 +255,13 @@ await client.deleteRoom(room.roomId);
 > The second path matters more than it looks: the mint copies whatever scopes your
 > backend asks for, with no allowlist, so `chat:moderate:<roomId>` is something you can
 > put in a browser token today. Treat it as the room-wipe capability it is.
+>
+> **The same is true of `chat:admin:<roomId>`, and of a wildcard you might not think of
+> as one.** `check_scope` treats `*` as a match in every position, so a token carrying
+> `chat:*:<roomId>` — the shape you reach for when you want read, write and subscribe in
+> one string — also satisfies `chat:admin:<roomId>` and can wipe the room. Enumerate the
+> verbs you actually need. Never mint a wildcard verb into a browser token, and never
+> mint `chat:admin` into one either — it is a backend-only scope.
 >
 > The erase is a hard delete with no tombstone and no recovery. A plain `chat:write`
 > holder now gets 403 where it previously succeeded — if you built a flow that let
