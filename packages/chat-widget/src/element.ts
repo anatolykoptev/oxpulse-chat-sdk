@@ -26,11 +26,12 @@ import type { MessageListClient, MessageRow, MutationEvent as WidgetMutationEven
 import { Composer, type SendTextArgs } from './ui/composer.js';
 import { isAuthError, classifyWriteFailureReason } from './utils/auth.js';
 import { Reconnector, type SubscribeFn } from './ui/reconnect.js';
-import { SDKChatClient, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID, onOutboxDegraded } from '@oxpulse/chat-sdk';
+import { SDKChatClient, SDKChatError, SDKCatalogClient, mintAnonReadToken, AnonReadMintError, mintNamedWriteToken, NamedWriteMintError, fetchRoster, generateUUID, onOutboxDegraded } from '@oxpulse/chat-sdk';
 import type {
   MutationEvent as SDKMutationEvent,
   ReactionEvent as SDKReactionEvent,
   OutboxOp,
+  CryptoMode,
 } from '@oxpulse/chat-sdk';
 import { presignAttachment } from '@oxpulse/chat-sdk/attachments';
 import { t, resolveLocale } from './utils/i18n.js';
@@ -719,6 +720,17 @@ export class OxpulseChatElement extends HTMLElement {
          * SDKChatError('crypto_mode_poisoned') for a poisoned room.
          */
         assertRoomNotPoisoned?(roomId: string): void;
+        /**
+         * #259: read of the server-discovered crypto_mode for one room. REQUIRED
+         * together with assertRoomNotPoisoned/send/baseUrl/jwt to enable upload
+         * (see the attachmentClient narrowing below): the direct-upload path must
+         * require a POSITIVE plaintext mode, not merely the absence of poison —
+         * between mount and the first list()/subscribe() response the room is
+         * neither poisoned nor known, and not-poisoned alone would let a
+         * plaintext attachment envelope leave for a room the server considers
+         * E2EE. Returns the discovered mode, or null when not yet discovered.
+         */
+        getRoomCryptoMode?(roomId: string): CryptoMode | null;
         /** #120: broadcast typing indicator. Fire-and-forget. */
         sendTyping?(roomId: string, ttlSecs?: number): Promise<void>;
         /** #121: send presence heartbeat. */
@@ -1083,12 +1095,14 @@ export class OxpulseChatElement extends HTMLElement {
           baseUrl: string;
           jwt: string;
           assertRoomNotPoisoned: NonNullable<RawClient['assertRoomNotPoisoned']>;
+          getRoomCryptoMode: NonNullable<RawClient['getRoomCryptoMode']>;
         };
         const attachmentClient: UploadCapableClient | null =
           capturedSendClient.send &&
           capturedSendClient.baseUrl !== undefined &&
           capturedSendClient.jwt !== undefined &&
-          typeof capturedSendClient.assertRoomNotPoisoned === 'function'
+          typeof capturedSendClient.assertRoomNotPoisoned === 'function' &&
+          typeof capturedSendClient.getRoomCryptoMode === 'function'
             ? (capturedSendClient as UploadCapableClient)
             : null;
 
@@ -1113,6 +1127,32 @@ export class OxpulseChatElement extends HTMLElement {
             // Reads the SDK's authoritative #poisonedRooms via the public delegate; a
             // poisoned room throws SDKChatError('crypto_mode_poisoned') here.
             attachmentClient!.assertRoomNotPoisoned(roomId);
+            // #259: require a POSITIVE plaintext mode, not merely the absence of
+            // poison. assertRoomNotPoisoned (above) asserts "this room was not
+            // PROVEN wrong" — it cannot tell a room whose crypto_mode is genuinely
+            // known from one whose list()/subscribe() response has not yet arrived
+            // (#activeCryptoModeByRoom has no entry until that response carries
+            // crypto_mode). In that undiscovered window not-poisoned reads as
+            // sufficient, so a plaintext attachment envelope would upload and send
+            // into a room the server considers E2EE — silently, with no error on
+            // either side. Gating here (BEFORE presign, alongside the poison check)
+            // means no outbox entry is ever created in this state, so the
+            // transient crypto_mode_undiscovered error never reaches
+            // PERMANENT_OUTBOX_FAILURE_CODES classification — the mode becomes known
+            // within ~1s of mount and the next attempt succeeds. Distinguishable
+            // from poisoning: crypto_mode_poisoned is never retriable (the room was
+            // tampered); crypto_mode_undiscovered is retriable the moment discovery
+            // lands. The attachment-picker catch path surfaces this as a per-card
+            // error with a retry button (the softer composer state), not a hard
+            // error bubble — appropriate for a window that closes on its own.
+            const discoveredMode = attachmentClient!.getRoomCryptoMode(roomId);
+            if (discoveredMode !== 'plaintext') {
+              throw new SDKChatError(
+                'crypto_mode_undiscovered',
+                `room ${roomId} crypto_mode not yet discovered; ` +
+                  'wait for list()/subscribe() to report before uploading a plaintext attachment',
+              );
+            }
             const mimeType = args.mimeType ?? blob.type;
             const digest = await crypto.subtle.digest('SHA-256', await readBlobAsArrayBuffer(blob));
             const sha256 = bytesToHex(digest);
