@@ -82,6 +82,7 @@ function makeFailedOutboxClient(failedStore: Array<{ msgId: string; senderUid: s
       const idx = failedStore.findIndex((e) => e.msgId === msgId);
       if (idx >= 0) failedStore.splice(idx, 1);
     }),
+    flushOutbox: vi.fn(async () => {}),
   };
 }
 
@@ -262,6 +263,25 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
     //    or dismiss it.
     const bubbleAfterRetry = el.shadowRoot!.querySelector('[data-send-failed="true"]');
     expect(bubbleAfterRetry).not.toBeNull();
+
+    el.remove();
+  });
+
+  // ── H3/F2: flushOutbox is called on mount ───────────────────────────────
+  //
+  // flushOutbox retries queued outbox messages (transient failures from a
+  // prior session) and marks orphaned pendingAttachments as sendFailed. Without
+  // a driver it is dead code — nothing calls it. The widget must call it on
+  // mount so queued messages are retried when the user returns.
+  //
+  // Mutation: delete the flushOutbox call in #bootstrap → RED (the spy is
+  // never called).
+  it('F2_flushOutbox_called_on_mount', async () => {
+    const client = makeFailedOutboxClient([]);
+    const el = await mountWithClient(client);
+
+    // flushOutbox was called with the room ID on mount.
+    expect(client.flushOutbox).toHaveBeenCalledWith('room1');
 
     el.remove();
   });

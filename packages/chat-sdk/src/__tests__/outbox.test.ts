@@ -551,4 +551,105 @@ describe('outbox', () => {
     expect(failedRemaining.some((m) => m.msgId === 'fail-0')).toBe(false);
     expect(failedRemaining.some((m) => m.msgId === `fail-${cap}`)).toBe(true);
   });
+
+  // ── H1/F1: a text message queued behind a slow upload IS in the outbox ──
+  //
+  // A text message sent while an attachment upload holds the serial chain must
+  // be persisted to the outbox BEFORE the upload resolves. Without this, a tab
+  // close during the upload loses the text message — it was visible in the UI
+  // via the optimistic echo but never durably stored.
+  //
+  // Mutation: move the enqueue call in sendOptimistic back inside the
+  // #serializeSend callback → RED (the text message is not in the outbox
+  // while the upload holds the chain).
+  it('F1_text_queued_behind_slow_upload_is_in_outbox_before_upload_resolves', async () => {
+    let attResolve!: (v: ArrayBuffer) => void;
+    const slowUpload = new Promise<ArrayBuffer>((resolve) => { attResolve = resolve; });
+
+    globalThis.fetch = vi.fn(async () => new Response(
+      JSON.stringify({ seq: 1, sender_uid: 'u', msg_id: 'ok', created_at: 0 }),
+      { status: 200 },
+    ));
+
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+
+    // 1. Start an attachment send with a slow upload (never resolves during the
+    //    assertion). This enters the serial chain and blocks on the upload.
+    c.sendAttachmentMessageOptimistic('room-h1', {
+      senderUid: 'u',
+      body: 'photo caption',
+      uploadPromise: slowUpload,
+      msgId: 'att-h1',
+    });
+
+    // 2. Immediately send a text message — it is queued behind the attachment's
+    //    serial chain slot (the upload hasn't resolved).
+    c.sendOptimistic('room-h1', {
+      senderUid: 'u',
+      sealed: new TextEncoder().encode('text behind upload').buffer as ArrayBuffer,
+      msgId: 'text-h1',
+    });
+
+    // 3. Let the microtask gap + enqueue settle, but do NOT resolve the upload.
+    //    The text message's outbox entry must already exist — if the tab closed
+    //    now, the text message would be recoverable from the outbox.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const queued = await pending('room-h1');
+    // The text message IS in the outbox even though the upload hasn't resolved.
+    expect(queued.some((m) => m.msgId === 'text-h1')).toBe(true);
+
+    // Cleanup: resolve the upload so background promises settle.
+    attResolve(new ArrayBuffer(8));
+  });
+
+  // ── H1/F1b: same invariant for the sendTextOptimistic E2EE path ──────────
+  //
+  // The E2EE path seals the text before enqueuing. The enqueue must still
+  // happen before entering the serial chain, so a text message sent behind a
+  // slow upload is persisted before the upload resolves.
+  //
+  // Mutation: move the enqueue call in sendTextOptimistic back inside the
+  // #serializeSend callback → RED.
+  it('F1b_e2ee_text_queued_behind_slow_upload_is_in_outbox_before_upload_resolves', async () => {
+    let attResolve!: (v: ArrayBuffer) => void;
+    const slowUpload = new Promise<ArrayBuffer>((resolve) => { attResolve = resolve; });
+
+    globalThis.fetch = vi.fn(async () => new Response(
+      JSON.stringify({ seq: 1, sender_uid: 'u', msg_id: 'ok', created_at: 0 }),
+      { status: 200 },
+    ));
+
+    const c = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      _testNoSleep: true,
+      e2ee: { provider: trivialProvider },
+      cryptoMode: 'sframe-static',
+    });
+
+    // 1. Start an attachment send with a slow upload.
+    c.sendAttachmentMessageOptimistic('room-h1b', {
+      senderUid: 'u',
+      body: 'photo caption',
+      uploadPromise: slowUpload,
+      msgId: 'att-h1b',
+    });
+
+    // 2. Immediately send a text message via the E2EE path.
+    c.sendTextOptimistic('room-h1b', {
+      senderUid: 'u',
+      text: 'e2ee text behind upload',
+      msgId: 'text-h1b',
+    });
+
+    // 3. Let the seal + enqueue settle, but do NOT resolve the upload.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const queued = await pending('room-h1b');
+    expect(queued.some((m) => m.msgId === 'text-h1b')).toBe(true);
+
+    // Cleanup.
+    attResolve(new ArrayBuffer(8));
+  });
 });

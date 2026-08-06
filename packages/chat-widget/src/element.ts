@@ -1376,6 +1376,15 @@ export class OxpulseChatElement extends HTMLElement {
 
       if (signal.aborted) return;
 
+      // H3: Drive flushOutbox on mount — retries queued messages left from a
+      // prior session (transient failures that were never dequeued) and marks
+      // orphaned pendingAttachments entries as sendFailed. Without this call
+      // flushOutbox is dead code (declared + implemented but never invoked).
+      // Fire-and-forget: the mount must not block on network retries, and
+      // getFailedOutboxEntries below already catches both sendFailed and
+      // pendingAttachments entries for display.
+      void effectiveSendClient?.flushOutbox?.(config.roomId).catch(() => {});
+
       // D1: Read failed outbox entries on mount — these are messages whose
       // attachment uploads were interrupted by a page reload. The blob is
       // gone, so they are permanently failed (not retryable). Render them as
@@ -1443,6 +1452,10 @@ export class OxpulseChatElement extends HTMLElement {
       // calls this fn to re-establish the stream. We route new messages and reactions
       // to the existing MessageList via its public handleMessage()/handleReaction() methods.
       const subscribeFn: SubscribeFn = (roomId, onError) => {
+        // H3: Drive flushOutbox on reconnect — the connection is back, so
+        // transient-failure entries from a prior session get another send
+        // attempt. Fire-and-forget: the reconnect must not block on retries.
+        void effectiveSendClient?.flushOutbox?.(roomId).catch(() => {});
         return sdkClient.subscribe(roomId, {
           onMessage: (row) => { this.#messageList?.handleMessage(decodeRowAttachments(row, resolvedBaseUrl)); },
           onError,

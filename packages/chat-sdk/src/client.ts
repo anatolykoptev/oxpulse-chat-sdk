@@ -2429,19 +2429,26 @@ export class SDKChatClient {
 
       pendingCbs.forEach((cb) => cb());
 
-      return this.#serializeSend(roomId, async () => {
-        await enqueue(roomId, {
-          msgId,
-          roomId,
-          senderUid: args.senderUid,
-          sealedB64: arrayBufferToBase64(args.sealed),
-          threadRootMsgId: args.threadRootMsgId,
-          productRef: args.productRef,
-          productMeta: args.productMeta,
-          attempts: 0,
-          enqueuedAt: Date.now(),
-        });
+      // H1: Enqueue BEFORE entering the serial chain — the outbox entry exists
+      // from the moment the user hits send, so a tab close during a prior slow
+      // send (e.g. an attachment upload holding the chain) does not lose this
+      // message. The send itself still happens in chain order: #serializeSend
+      // is called immediately after the enqueue, with no intervening await that
+      // could let a later send enter the chain first. The entry is dequeued on
+      // success or permanent failure inside the chain below.
+      await enqueue(roomId, {
+        msgId,
+        roomId,
+        senderUid: args.senderUid,
+        sealedB64: arrayBufferToBase64(args.sealed),
+        threadRootMsgId: args.threadRootMsgId,
+        productRef: args.productRef,
+        productMeta: args.productMeta,
+        attempts: 0,
+        enqueuedAt: Date.now(),
+      });
 
+      return this.#serializeSend(roomId, async () => {
         for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
           try {
             const result = await this.send(roomId, { ...args, msgId });
@@ -2659,19 +2666,24 @@ export class SDKChatClient {
         throw err;
       }
 
-      return this.#serializeSend(roomId, async () => {
-        await enqueue(roomId, {
-          msgId,
-          roomId,
-          senderUid: args.senderUid,
-          sealedB64: arrayBufferToBase64(sealed),
-          threadRootMsgId: args.threadRootMsgId,
-          productRef: args.productRef,
-          productMeta: args.productMeta,
-          attempts: 0,
-          enqueuedAt: Date.now(),
-        });
+      // H1: Enqueue BEFORE entering the serial chain (same rationale as
+      // sendOptimistic) — the sealed ciphertext is persisted the instant the
+      // seal completes, so a tab close during a prior slow send does not lose
+      // this message. #serializeSend is called immediately after, preserving
+      // send order.
+      await enqueue(roomId, {
+        msgId,
+        roomId,
+        senderUid: args.senderUid,
+        sealedB64: arrayBufferToBase64(sealed),
+        threadRootMsgId: args.threadRootMsgId,
+        productRef: args.productRef,
+        productMeta: args.productMeta,
+        attempts: 0,
+        enqueuedAt: Date.now(),
+      });
 
+      return this.#serializeSend(roomId, async () => {
         for (let attempt = 0; attempt < SDKChatClient.MAX_RETRIES; attempt++) {
           try {
             const result = await this.send(roomId, {
