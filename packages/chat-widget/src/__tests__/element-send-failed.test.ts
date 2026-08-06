@@ -142,7 +142,13 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
     // That setting belongs to oxpulse-chat's web/ suite, not to this repo —
     // no vitest config here sets a pool. The leak was real; the mechanism
     // named for it was borrowed from the wrong repository.)
+    // Every field beforeEach clears, cleared here too. It said "symmetric" and
+    // was not: `disposed` and `listener` leaked out of this file, and `listener`
+    // holds a closure over an element from it. Asserting a property the code
+    // does not have is the defect this whole PR is about.
     outboxState.degradation = null;
+    outboxState.disposed = 0;
+    outboxState.listener = null;
     container.remove();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
