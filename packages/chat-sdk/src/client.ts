@@ -2553,11 +2553,23 @@ export class SDKChatClient {
     // #263: in-flight guard — a second concurrent call for the same room
     // returns immediately. The running call is already sending every pending
     // entry; a duplicate flush would re-send the same entries (wasted requests,
-    // server-deduplicated on msgId). "Return immediately" (not "wait") because
-    // the widget calls fire-and-forget: a dropped flush loses no work — the
-    // running flush sends everything, and transient failures stay queued for
-    // the next reconnect/mount. The guard releases in `finally` on every exit
-    // path including a throw, so a send rejection cannot latch the outbox.
+    // server-deduplicated on msgId).
+    //
+    // "Return immediately" (not "wait") because the widget calls this
+    // fire-and-forget. The cost of that choice, stated precisely: an entry
+    // enqueued AFTER the running flush read its pending list is NOT picked up
+    // by that flush, and the dropped call would have been the one to take it —
+    // so it waits for the next reconnect or mount. Nothing is lost, delivery is
+    // deferred. "Wait" would close that window at the price of queueing flushes
+    // behind each other.
+    //
+    // The guard releases in `finally`, on every exit path. Today no exit path
+    // can throw: every outbox helper swallows its own error and degrades
+    // instead (#261), which is what keeps this from latching. The `finally` is
+    // therefore defence-in-depth for a future where one of them propagates —
+    // and outbox.test.ts F5_263 pins that no-reject invariant, because a latched
+    // guard is invisible (the widget's caller swallows the rejection) and kills
+    // the room's outbox for the page's lifetime.
     if (this.#flushInFlight.has(roomId)) return;
     this.#flushInFlight.add(roomId);
     try {

@@ -14,11 +14,18 @@ reconnects was N×M requests.
 SDK: a per-room in-flight guard (`#flushInFlight` Set) makes a second
 concurrent `flushOutbox(roomId)` return immediately while the first is still
 running. "Return immediately" (not "wait") because the widget calls
-fire-and-forget: a dropped flush loses no work — the running flush sends
-everything, and transient failures stay queued for the next reconnect/mount.
-The guard releases in a `finally` on every exit path including a throw, so a
-send rejection cannot latch the outbox into a permanently dead state. The
-guard is SEPARATE from `#serializeSend` — feeding a background bulk retry into
+fire-and-forget. The cost of that choice, stated precisely: an entry enqueued
+AFTER the running flush read its pending list is not picked up by that flush,
+and the dropped call would have been the one to take it — so it waits for the
+next reconnect or mount. Nothing is lost; delivery is deferred.
+
+The guard releases in a `finally`, on every exit path. Today no exit path can
+throw: a send rejection is caught inside the loop, and every outbox helper
+swallows its own error and degrades instead. The `finally` is defence-in-depth
+for a future where one of them propagates, since a latched guard would be
+invisible (the widget's caller swallows the rejection) and would kill that
+room's outbox for the page's lifetime. A test pins the no-reject invariant it
+rests on. The guard is SEPARATE from `#serializeSend` — feeding a background bulk retry into
 the foreground serial chain would park the user's next message behind the
 whole outbox queue (#258's head-of-line problem by another door).
 

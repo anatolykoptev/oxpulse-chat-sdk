@@ -862,6 +862,48 @@ describe('outbox', () => {
       expect(mod.isOutboxDurable()).toBe(false);
     });
 
+    // F5 (#263) — flushOutbox must RESOLVE when storage is dead in every
+    // direction. This is the invariant the #263 in-flight guard rests on.
+    //
+    // The guard releases in a `finally`, but no test can currently distinguish
+    // that from a release at the end of the `try`: moving it out leaves all of
+    // this file GREEN, because flushOutbox cannot throw — every helper above
+    // swallows its own error rather than propagating. So the `finally` is
+    // defence-in-depth, not a tested guarantee, and what actually keeps the
+    // outbox alive is this no-reject property.
+    //
+    // If a future refactor makes a helper propagate instead of degrade, the
+    // failure is invisible: the widget calls flushOutbox fire-and-forget with
+    // `.catch(() => {})`, so the rejection is swallowed, and the guard latches
+    // that room's outbox dead for the page's lifetime with no error, no counter
+    // and no log. This test goes RED first.
+    //
+    // Mutation: src/outbox.ts `pending`'s `return [];` -> `throw err;`
+    //   -> RED (flushOutbox rejects instead of resolving).
+    it('F5_263_flushOutbox_against_a_broken_store_resolves_rather_than_rejecting', async () => {
+      vi.resetModules();
+      vi.doMock('idb-keyval', () => ({
+        get: () => Promise.reject(new Error('idb unavailable')),
+        update: () => Promise.reject(new Error('idb unavailable')),
+        set: () => Promise.reject(new Error('idb unavailable')),
+        clear: () => Promise.resolve(),
+      }));
+      // Fresh client, so it binds to the broken-storage module graph.
+      const { SDKChatClient: BrokenStoreClient } = await import('../client.js');
+      const c = new BrokenStoreClient({ baseUrl: BASE_URL, jwt: JWT });
+
+      await expect(c.flushOutbox('r263-broken')).resolves.toBeUndefined();
+
+      // NOTE on what this does NOT prove: with `pending` degraded to [] a
+      // latched guard would resolve too, so a second call cannot observe the
+      // release. The release itself is unobservable until some helper can
+      // propagate — which is exactly why the invariant above is the thing
+      // worth pinning.
+
+      vi.doUnmock('idb-keyval');
+      vi.resetModules();
+    });
+
     it('F4_CONTROL_working_storage_never_signals', async () => {
       // Without this the three cases above would all pass against an
       // implementation that notifies unconditionally.
