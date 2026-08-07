@@ -1,5 +1,5 @@
 ---
-"@oxpulse/chat-sdk": patch
+"@oxpulse/chat-sdk": minor
 "@oxpulse/chat-widget": patch
 ---
 
