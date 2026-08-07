@@ -140,6 +140,11 @@ function makeLiveFailureClient(extra: Record<string, unknown> = {}): {
     baseUrl: 'https://chat.example.com',
     jwt: 'test-jwt',
     assertRoomNotPoisoned: vi.fn(),
+    // #259: uploadAttachment now requires the room's crypto mode to be POSITIVELY
+    // discovered as plaintext, not merely un-poisoned. Without this the gate refuses
+    // the upload, no attachment stages, and every journey through this factory ends
+    // with no failed bubble to assert on.
+    getRoomCryptoMode: vi.fn(() => 'plaintext' as const),
     uploadAttachment: vi.fn().mockResolvedValue({
       attachmentId: 'att-1',
       attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },
