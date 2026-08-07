@@ -204,7 +204,9 @@ export class OxpulseChatElement extends HTMLElement {
    * #263: debounce timer for the reconnect-triggered flushOutbox. Repeated
    * reconnects on a flaky network collapse into one flush instead of one per
    * reconnect (N×M request amplification). Cleared + restarted on each
-   * reconnect; cleared on teardown.
+   * reconnect, and cleared on all three rebuild paths: `disconnectedCallback`,
+   * `destroy`, and `#bootstrap` (remount). The remount one is the easy miss —
+   * see the comment there for what a surviving timer does.
    */
   #flushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** Live sandboxed iframe (iframe mode only) — target for in-place token refresh. */
@@ -609,6 +611,16 @@ export class OxpulseChatElement extends HTMLElement {
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
+    }
+    // #263 review: the remount path must clear the debounce timer too. A
+    // pending flush left running here fires against the OLD client and OLD
+    // roomId, and its callback then nulls #flushDebounceTimer -- clobbering the
+    // handle the new bootstrap has just stored, so the new timer can no longer
+    // be cancelled. Both halves are silent: the stale flush is swallowed by the
+    // callback's own `.catch(() => {})`.
+    if (this.#flushDebounceTimer !== null) {
+      clearTimeout(this.#flushDebounceTimer);
+      this.#flushDebounceTimer = null;
     }
     this.#composer?.destroy();
     this.#composer = null;

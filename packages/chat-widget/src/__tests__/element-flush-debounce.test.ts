@@ -123,4 +123,58 @@ describe('OxpulseChatElement — #263 reconnect flush debounce', () => {
     vi.useRealTimers();
     el.destroy();
   });
+
+  // F6 — the remount path must clear the pending debounce timer.
+  //
+  // `#bootstrap` cleared `#anonRenewTimer` and not `#flushDebounceTimer`, so a
+  // debounced flush armed before a remount survived it and fired against the
+  // OLD client and OLD roomId. Its callback then set `#flushDebounceTimer =
+  // null`, clobbering the handle the NEW bootstrap had just stored, leaving the
+  // new timer uncancellable. Both halves are silent in production: the stale
+  // flush's rejection is swallowed by the callback's own `.catch(() => {})`.
+  //
+  // Mutation: element.ts `#bootstrap` — delete the
+  // `if (this.#flushDebounceTimer !== null) { ... }` block added beside the
+  // `#anonRenewTimer` clear → RED (the old client gets a flush it must not get).
+  it('F6_remount_clears_the_pending_debounce_timer', async () => {
+    const first = makeDebounceClient();
+    const second = makeDebounceClient();
+    let created = 0;
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({
+      _createClient: () => {
+        created += 1;
+        return created === 1 ? first.client : second.client;
+      },
+    });
+    container.appendChild(el);
+    await waitForReady(el);
+
+    const staleBaseline = first.flushOutbox.mock.calls.length;
+    expect(staleBaseline).toBeGreaterThanOrEqual(1);
+
+    vi.useFakeTimers();
+
+    // Arm the debounce against the FIRST client.
+    el.triggerSubscribeError({ status: 503 });
+    await vi.advanceTimersByTimeAsync(0);
+    // Not yet fired — the timer is pending, which is the whole premise.
+    expect(first.flushOutbox.mock.calls.length).toBe(staleBaseline);
+
+    // Remount before the window elapses.
+    el.setAttribute('room-id', 'room2');
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Past the window: the stale timer must NOT have fired against the old client.
+    await vi.advanceTimersByTimeAsync(600);
+    expect(first.flushOutbox.mock.calls.length).toBe(staleBaseline);
+
+    vi.useRealTimers();
+    el.destroy();
+  });
 });

@@ -34,6 +34,9 @@ reconnects on a flaky network into one flush. The debounce lives in the widget
 (not the SDK) because the reconnect is a widget concept (Reconnector), and
 `flushOutbox` is a public SDK method with immediate semantics — a debounce
 there would change its contract for every caller. The mount trigger is not
-debounced (fires once).
+debounced: it fires once per mount cycle, and a live element can mount more
+than once (attribute change, token refresh, anon-token re-mint). It needs no
+debounce because each cycle aborts the previous one, and the SDK's in-flight
+guard covers a flush still running from the cycle before.
 
 Closes #263.
