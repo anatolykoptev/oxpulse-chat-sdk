@@ -20,6 +20,7 @@ import { OxpulseChatElement, defineElement, mount, decodeRowAttachments } from '
 import type { MessageListClient, MessageRow } from '../ui/message-list.js';
 import { encodeAttachmentEnvelope, decodeAttachmentEnvelope } from '../utils/attachment-envelope.js';
 import { SDKChatError } from '@oxpulse/chat-sdk';
+import type { WidgetError } from '../types.js';
 
 // Issue #37 ("gate first paint on roster resolution") made the element's
 // MessageList await a roster-vs-300ms race in #fetchAndRender before first
@@ -1314,6 +1315,10 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
       // SEC-CR-001: upload capability now REQUIRES the poisoned-room gate; a healthy
       // client's gate is a no-op (throws only for a poisoned room).
       assertRoomNotPoisoned: vi.fn(),
+      // #259: upload capability also REQUIRES a positive-plaintext-mode read; a
+      // healthy discovered room reports 'plaintext' so uploads proceed. Tests that
+      // need the undiscovered window override this to return null.
+      getRoomCryptoMode: vi.fn(() => 'plaintext' as const),
     };
   }
 
@@ -1480,6 +1485,183 @@ describe('OxpulseChatElement — attachments (issue #67)', () => {
     // And the gate was actually consulted for the target room (proves the code path ran,
     // not that upload was skipped for some unrelated reason).
     expect(client.assertRoomNotPoisoned).toHaveBeenCalledWith('room1');
+  });
+
+  // ── #259: the attachment path must require a POSITIVE plaintext mode ──────
+  //
+  // assertRoomNotPoisoned asserts "this room was not PROVEN wrong" — it cannot
+  // tell a room whose crypto_mode is genuinely known from one whose
+  // list()/subscribe() response has not yet arrived. Between mount and that
+  // response the room is neither poisoned nor known, and the attachment path
+  // treated not-poisoned as sufficient — so a plaintext attachment envelope
+  // could upload and send into a room the server considers E2EE, silently.
+  // The fix: require getRoomCryptoMode(roomId) === 'plaintext' (positively
+  // discovered) BEFORE presign, alongside the existing poison check.
+
+  /** Shared fetch mock for the #259 attachment gate tests — tracks presign/PUT. */
+  function makeAttachmentFetchMock() {
+    const presignCalls: RequestInit[] = [];
+    const putCalls: RequestInit[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === 'https://chat.example.com/api/sdk/attachments/presign') {
+        presignCalls.push(init ?? {});
+        return { ok: true, status: 200, json: async () => ({ attachment_id: 'att-x', upload_url: '/api/sdk/attachments/att-x?t=tok' }) } as Response;
+      }
+      if (urlStr.startsWith('https://chat.example.com/api/sdk/attachments/att-')) {
+        putCalls.push(init ?? {});
+        return { ok: true, status: 204, json: async () => null } as Response;
+      }
+      return { ok: false, status: 404, json: async () => null, text: async () => '' } as Response;
+    });
+    return { fetchMock, presignCalls, putCalls };
+  }
+
+  /** Drives the real paste → uploadAttachment path and returns when it settles. */
+  async function pasteImageFile(el: OxpulseChatElement): Promise<void> {
+    const textarea = el.shadowRoot!.querySelector('.oxp-composer-input') as HTMLTextAreaElement;
+    expect(textarea).not.toBeNull();
+    const pngFile = new File([new Uint8Array(16)], 'photo.png', { type: 'image/png' });
+    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, 'clipboardData', { value: { files: [pngFile] } });
+    textarea.dispatchEvent(pasteEvent);
+    await new Promise((r) => setTimeout(r, 30));
+  }
+
+  // F1 — THE GATE: upload is refused when the room's mode is undiscovered (no
+  // entry in the discovered map), and presignAttachment was never called.
+  // Mutation: replace the positive check (element.ts getRoomCryptoMode gate)
+  // with the pre-existing assertRoomNotPoisoned call alone → this test goes RED
+  // and nothing else may.
+  it('#259 F1: an undiscovered room (no crypto_mode yet) refuses uploadAttachment BEFORE any presign/PUT — not-poisoned is not sufficient', async () => {
+    const client = makeCapableClient();
+    // Healthy (not poisoned) but UNDISCOVERED: getRoomCryptoMode returns null,
+    // matching the window between mount and the first list()/subscribe()
+    // response that carries crypto_mode.
+    client.getRoomCryptoMode = vi.fn(() => null);
+    // assertRoomNotPoisoned is a no-op (the room was not proven wrong) — this is
+    // exactly the state the old gate mis-read as sufficient.
+    client.assertRoomNotPoisoned = vi.fn();
+
+    const { fetchMock, presignCalls, putCalls } = makeAttachmentFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    await pasteImageFile(el);
+
+    // Fail-closed: the positive-plaintext gate throws before presign — NO bytes
+    // ever leave for a room whose crypto_mode is undiscovered.
+    expect(presignCalls).toHaveLength(0);
+    expect(putCalls).toHaveLength(0);
+    expect(client.send).not.toHaveBeenCalled();
+    // The positive-mode read was actually consulted for the target room (proves
+    // the gate ran, not that upload was skipped for some unrelated reason).
+    expect(client.getRoomCryptoMode).toHaveBeenCalledWith('room1');
+  });
+
+  // F2 — THE POSITIVE CONTROL: upload proceeds normally when the mode IS
+  // discovered as 'plaintext'. Without this, F1 passes against a widget that
+  // refuses every upload.
+  it('#259 F2: a room discovered as plaintext uploads normally (positive control — the gate does not refuse every upload)', async () => {
+    const client = makeCapableClient();
+    // makeCapableClient defaults getRoomCryptoMode → 'plaintext' (discovered).
+    client.assertRoomNotPoisoned = vi.fn();
+
+    const { fetchMock, presignCalls, putCalls } = makeAttachmentFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    el.setAttribute('app-id', 'app1');
+    el.setAttribute('jwt', LOCALHOST_JWT);
+    el.setAttribute('room-id', 'room1');
+    el._setCallbacks({ _createClient: () => client });
+    container.appendChild(el);
+    await new Promise((r) => setTimeout(r, 30));
+
+    await pasteImageFile(el);
+
+    // Discovered-plaintext: presign + PUT both fire — the upload is NOT refused.
+    expect(presignCalls).toHaveLength(1);
+    expect(putCalls).toHaveLength(1);
+    expect(client.getRoomCryptoMode).toHaveBeenCalledWith('room1');
+  });
+
+  // F3 — THE DISTINGUISHABILITY CONTROL: a poisoned room and an undiscovered
+  // room produce DIFFERENT errors, and the poisoned case still refuses. This is
+  // the property that makes the state actionable — a fix that collapses both
+  // into one error is a regression. crypto_mode_poisoned is never retriable
+  // (the room was tampered); crypto_mode_undiscovered is retriable the moment
+  // discovery lands.
+  it('#259 F3: a poisoned room and an undiscovered room produce DIFFERENT errors (crypto_mode_poisoned vs crypto_mode_undiscovered), and both refuse upload', async () => {
+    // A single fetch mock shared by both scenarios — both expect presign=0 (the
+    // gate refuses before any wire call), so the mock only needs to not crash
+    // mount. Sharing it avoids vi.unstubAllGlobals() between scenarios, which
+    // breaks the second element's mount path.
+    const { fetchMock, presignCalls, putCalls } = makeAttachmentFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // --- Scenario A: poisoned room ---
+    const poisonedClient = makeCapableClient();
+    poisonedClient.assertRoomNotPoisoned = vi.fn((rid: string) => {
+      if (rid === 'room1') {
+        throw new SDKChatError('crypto_mode_poisoned', `room ${rid} was poisoned by a prior crypto_mode_mismatch`);
+      }
+    });
+    poisonedClient.getRoomCryptoMode = vi.fn(() => 'plaintext' as const);
+
+    const aErrors: WidgetError[] = [];
+    const elA = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    elA.setAttribute('app-id', 'app1');
+    elA.setAttribute('jwt', LOCALHOST_JWT);
+    elA.setAttribute('room-id', 'room1');
+    elA._setCallbacks({ _createClient: () => poisonedClient });
+    elA.addEventListener('oxpulse-chat:write-error', (ev) => aErrors.push((ev as CustomEvent<WidgetError>).detail));
+    container.appendChild(elA);
+    await new Promise((r) => setTimeout(r, 30));
+    await pasteImageFile(elA);
+    const aPresignCount = presignCalls.length;
+
+    // --- Scenario B: undiscovered room (separate element, same fetch mock) ---
+    const undiscoveredClient = makeCapableClient();
+    undiscoveredClient.assertRoomNotPoisoned = vi.fn(); // no-op: not poisoned
+    undiscoveredClient.getRoomCryptoMode = vi.fn(() => null); // undiscovered
+
+    const bErrors: WidgetError[] = [];
+    const elB = document.createElement('oxpulse-chat') as OxpulseChatElement;
+    elB.setAttribute('app-id', 'app1');
+    elB.setAttribute('jwt', LOCALHOST_JWT);
+    elB.setAttribute('room-id', 'room1');
+    elB._setCallbacks({ _createClient: () => undiscoveredClient });
+    elB.addEventListener('oxpulse-chat:write-error', (ev) => bErrors.push((ev as CustomEvent<WidgetError>).detail));
+    container.appendChild(elB);
+    await new Promise((r) => setTimeout(r, 30));
+    await pasteImageFile(elB);
+
+    // Both refuse: no presign for either scenario (the gate fires before any
+    // wire call on both paths).
+    expect(aPresignCount).toBe(0);
+    expect(presignCalls.length).toBe(0);
+    expect(putCalls).toHaveLength(0);
+
+    // Both surfaced a write-error (the gate fired on both paths).
+    expect(aErrors.length).toBeGreaterThanOrEqual(1);
+    expect(bErrors.length).toBeGreaterThanOrEqual(1);
+
+    // The errors are DIFFERENT — poisoned mentions "poisoned", undiscovered
+    // mentions "not yet discovered". A fix that collapses both into one error
+    // makes these equal and fails this assertion.
+    const poisonedMsg = aErrors[0].message;
+    const undiscoveredMsg = bErrors[0].message;
+    expect(poisonedMsg).not.toEqual(undiscoveredMsg);
+    expect(poisonedMsg).toMatch(/poisoned/);
+    expect(undiscoveredMsg).toMatch(/not yet discovered/);
   });
 
   it('logs an orphaned-attachment warning when send() fails AFTER a successful presign+PUT (review fix)', async () => {

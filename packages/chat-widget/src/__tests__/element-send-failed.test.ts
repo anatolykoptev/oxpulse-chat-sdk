@@ -246,6 +246,9 @@ describe('OxpulseChatElement — failed-message affordances (R3)', () => {
       baseUrl: 'https://chat.example.com',
       jwt: 'test-jwt',
       assertRoomNotPoisoned: vi.fn(),
+      // #259: positive-plaintext-mode read; this test exercises send-failure
+      // retry, so the room is discovered-plaintext and the upload proceeds.
+      getRoomCryptoMode: vi.fn(() => 'plaintext' as const),
       uploadAttachment: vi.fn().mockResolvedValue({
         attachmentId: 'att-1',
         attachment: { id: 'att-1', mime: 'image/png', filename: 'photo.png', sizeBytes: 100 },

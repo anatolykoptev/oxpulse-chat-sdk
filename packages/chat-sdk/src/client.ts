@@ -636,6 +636,27 @@ export class SDKChatClient {
   }
 
   /**
+   * #259: public read of the server-discovered crypto_mode for one room.
+   *
+   * `assertRoomNotPoisoned` (above) asserts "this room was not PROVEN wrong" — it
+   * cannot distinguish a room whose mode is genuinely known from one whose
+   * `list()`/`subscribe()` response has not yet arrived (#activeCryptoModeByRoom
+   * has no entry until that response carries `crypto_mode`). A direct-upload
+   * attachment wrapper that treats not-poisoned as sufficient would let a
+   * plaintext attachment envelope leave for a room the server considers E2EE,
+   * silently, in the window between mount and first discovery.
+   *
+   * This thin delegate exposes the SAME authoritative #activeCryptoModeByRoom the
+   * internal gates read — it is NOT a second mode store — so an out-of-client
+   * wrapper can require a POSITIVE plaintext mode (not merely the absence of
+   * poison) before uploading. Returns the discovered mode, or null when the room
+   * has not yet been discovered.
+   */
+  getRoomCryptoMode(roomId: string): CryptoMode | null {
+    return this.#activeCryptoModeByRoom.get(roomId) ?? null;
+  }
+
+  /**
    * SEC-CR-001: validate a server-emitted crypto_mode for ONE room against the
    * client-configured expectation (#cryptoMode) and cache the resolved mode for that
    * room. On mismatch/unknown, validateAndResolveCryptoMode poisons ONLY this room
