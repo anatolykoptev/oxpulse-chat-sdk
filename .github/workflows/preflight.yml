@@ -4,8 +4,23 @@ name: preflight
 on:
   pull_request:
     branches: [main]
+  # Also gate `main` itself. A PR is only ever tested against the base it was
+  # branched from, and `required_status_checks.strict` is false, so a green PR
+  # merges even when main has moved underneath it. Two PRs that are each green
+  # can therefore produce a red main, and nothing would run to say so:
+  # 2026-08-07, #267 and #270 were each green against a main lacking the other,
+  # and the breakage surfaced only when an unrelated one-line changeset PR (#273)
+  # happened to run the merged tree.
+  #
+  # This does NOT prevent the merge — it detects it immediately instead of at the
+  # next unrelated PR. Prevention would be `strict: true` on the required check,
+  # which forces every PR to rebase whenever main moves; that is a merge-ergonomics
+  # tradeoff, deliberately left to the operator rather than taken here.
+  push:
+    branches: [main]
 
 concurrency:
+  # Keyed by ref, so a main push and a PR run never cancel each other.
   group: preflight-${{ github.ref }}
   cancel-in-progress: true
 
