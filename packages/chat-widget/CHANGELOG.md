@@ -1,5 +1,65 @@
 # @oxpulse/chat-widget — Changelog
 
+## 0.24.1
+
+### Patch Changes
+
+- 1aa4701: Require a positive plaintext mode before the attachment upload path presigns.
+
+  The widget's direct-upload path (presignAttachment + PUT, bypassing sendFile)
+  called `assertRoomNotPoisoned` before presign — but that gate only asserts
+  "this room was not PROVEN wrong." It cannot tell a room whose `crypto_mode` is
+  genuinely known from one whose `list()`/`subscribe()` response has not yet
+  arrived. Between mount and that first response the room is neither poisoned nor
+  known, and not-poisoned alone was treated as sufficient — so a plaintext
+  attachment envelope could upload and send into a room the server considers
+  E2EE, silently, with no error on either side.
+
+  `@oxpulse/chat-sdk` gains a public `getRoomCryptoMode(roomId)` accessor — the
+  smallest seam matching how `assertRoomNotPoisoned` is exposed — so the widget
+  can read the same authoritative `#activeCryptoModeByRoom` the internal gates
+  read. No existing public accessor for the discovered mode existed; a new seam
+  was necessary because `#activeCryptoModeByRoom` is private and the widget must
+  require a POSITIVE plaintext mode, not merely the absence of poison.
+
+  `@oxpulse/chat-widget` now requires `getRoomCryptoMode(roomId) === 'plaintext'`
+  (positively discovered) before presign, alongside the existing poison check.
+  The error is `crypto_mode_undiscovered` (distinguishable from
+  `crypto_mode_poisoned`: the latter is never retriable, the former is retriable
+  the moment discovery lands) and fires before any outbox entry is created, so
+  `PERMANENT_OUTBOX_FAILURE_CODES` is untouched. The attachment-picker catch path
+  surfaces it as a per-card error with a retry button — the softer composer
+  state — appropriate for a window that closes on its own within ~1s of mount.
+
+  Closes #259.
+
+- 02c64c5: Pressing retry on a failed message no longer queues a second copy alongside it.
+
+  A send that exhausts its retries deliberately stays queued in the outbox, so a
+  later flushOutbox can still deliver it. The widget's retry button restores the
+  caption to the composer and the user re-picks the attachment, which mints a new
+  msgId — so the original entry was still queued alongside it and the next flush
+  sent both. One user intent, two messages in the room, with no error, counter or
+  log to show for it.
+
+  Retry now dequeues the original entry first, matching what TDLib and GetStream
+  do. Reusing the msgId instead would be worse here: the user re-picks the
+  attachment, so the content can differ, and the server's dedup would keep the
+  original and silently discard what the user just chose.
+
+  Scope, stated precisely: this removes the queued duplicate. It does not cancel a
+  send already in flight. flushOutbox calls send() directly rather than through the
+  per-room serial chain, and dequeuing an entry from storage does not stop a request
+  that has already left — so a retry pressed while a background flush is mid-send of
+  the same entry can still produce two messages. That window needs flushOutbox's
+  in-flight guard (#263) to close, and is not claimed here.
+
+  The failed bubble stays visible after retry, unchanged — it is the only evidence
+  of the lost message until the user has re-staged the attachment.
+
+- Updated dependencies [1aa4701]
+  - @oxpulse/chat-sdk@3.3.0
+
 ## 0.24.0
 
 ### Minor Changes
