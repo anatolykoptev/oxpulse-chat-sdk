@@ -46,6 +46,15 @@ const WIDGET_VERSION = typeof __WIDGET_VERSION__ !== 'undefined' ? __WIDGET_VERS
 const ELEMENT_TAG = 'oxpulse-chat';
 /** Default OxPulse API base URL when no `base-url` override is set. Single source for the postMessage target origin. */
 const DEFAULT_BASE_URL = 'https://oxpulse.chat';
+/**
+ * #263: debounce window for the reconnect-triggered flushOutbox. Reconnects on
+ * a flaky network arrive in bursts (the Reconnector retries with backoff, and
+ * browser online/offline events can fire rapidly). 500ms collapses a burst
+ * into one flush without noticeably delaying the retry of transient-failure
+ * entries. The SDK's in-flight guard handles concurrent calls; this reduces
+ * the call count.
+ */
+const FLUSH_DEBOUNCE_MS = 500;
 
 /**
  * Derive the self uid from the JWT `sub` claim (display-side only — the
@@ -191,6 +200,13 @@ export class OxpulseChatElement extends HTMLElement {
   #subscribeOnError: ((err: unknown) => void) | null = null;
   /** Timer ID for anon-read token pre-expiry re-mint. */
   #anonRenewTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * #263: debounce timer for the reconnect-triggered flushOutbox. Repeated
+   * reconnects on a flaky network collapse into one flush instead of one per
+   * reconnect (N×M request amplification). Cleared + restarted on each
+   * reconnect; cleared on teardown.
+   */
+  #flushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** Live sandboxed iframe (iframe mode only) — target for in-place token refresh. */
   #iframe: HTMLIFrameElement | null = null;
   /** Guard: true while refreshToken() syncs the jwt attribute in place — suppresses the remount. */
@@ -253,6 +269,11 @@ export class OxpulseChatElement extends HTMLElement {
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
+    }
+    // #263: cancel any pending debounced reconnect flush.
+    if (this.#flushDebounceTimer !== null) {
+      clearTimeout(this.#flushDebounceTimer);
+      this.#flushDebounceTimer = null;
     }
     // Clear shadow DOM content (resource cleanup)
     if (this.#shadow) {
@@ -409,6 +430,11 @@ export class OxpulseChatElement extends HTMLElement {
     if (this.#anonRenewTimer !== null) {
       clearTimeout(this.#anonRenewTimer);
       this.#anonRenewTimer = null;
+    }
+    // #263: cancel any pending debounced reconnect flush.
+    if (this.#flushDebounceTimer !== null) {
+      clearTimeout(this.#flushDebounceTimer);
+      this.#flushDebounceTimer = null;
     }
     if (this.#shadow) {
       while (this.#shadow.firstChild) {
@@ -1568,10 +1594,24 @@ export class OxpulseChatElement extends HTMLElement {
       // calls this fn to re-establish the stream. We route new messages and reactions
       // to the existing MessageList via its public handleMessage()/handleReaction() methods.
       const subscribeFn: SubscribeFn = (roomId, onError) => {
-        // H3: Drive flushOutbox on reconnect — the connection is back, so
+        // H3/#263: Drive flushOutbox on reconnect — the connection is back, so
         // transient-failure entries from a prior session get another send
-        // attempt. Fire-and-forget: the reconnect must not block on retries.
-        void effectiveSendClient?.flushOutbox?.(roomId).catch(() => {});
+        // attempt. Debounced: repeated reconnects on a flaky network collapse
+        // into one flush instead of N (N×M request amplification, bounded by
+        // the pending count but unbounded by the reconnect count). The debounce
+        // lives in the widget (not the SDK) because the reconnect is a widget
+        // concept — the SDK's flushOutbox is a public method with immediate
+        // semantics, and a debounce there would change its contract for every
+        // caller. The in-flight guard in the SDK prevents duplicate sends from
+        // concurrent calls; this debounce reduces the NUMBER of calls.
+        // Fire-and-forget: the reconnect must not block on retries.
+        if (this.#flushDebounceTimer !== null) {
+          clearTimeout(this.#flushDebounceTimer);
+        }
+        this.#flushDebounceTimer = setTimeout(() => {
+          this.#flushDebounceTimer = null;
+          void effectiveSendClient?.flushOutbox?.(roomId).catch(() => {});
+        }, FLUSH_DEBOUNCE_MS);
         return sdkClient.subscribe(roomId, {
           onMessage: (row) => { this.#messageList?.handleMessage(decodeRowAttachments(row, resolvedBaseUrl)); },
           onError,
