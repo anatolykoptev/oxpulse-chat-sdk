@@ -98,15 +98,37 @@ Importing the module auto-registers `<oxpulse-chat>` as a Custom Element. Safe t
 
 All attribute names are kebab-case:
 
+This table is the complete `observedAttributes` set. `element.test.ts` asserts that
+every entry in `OBSERVED_ATTRIBUTES` (`src/types.ts`) appears here, so it cannot
+quietly fall behind the code — it did before, missing five of fourteen including
+`base-url`.
+
 | Attribute | Required | Values | Description |
 |---|---|---|---|
 | `app-id` | Yes | string | OxPulse app identifier |
-| `jwt` | Yes | string | Scoped JWT from your backend |
+| `jwt` | Yes¹ | string | Scoped JWT from your backend |
 | `room-id` | Yes | string | Room to display |
+| `base-url` | No | absolute http(s) URL | **Which server to talk to.** Default `https://oxpulse.chat` — production. Set it to `https://staging.oxpulse.chat` for a staging integration, or your own host. A malformed value is ignored with a `console.warn` and the default is used. |
 | `mode` | No | `'inline'` \| `'iframe'` | Render mode. Default `'inline'`. |
 | `theme` | No | `'light'` \| `'dark'` \| `'auto'` | Color scheme. Default `'auto'` (follows `prefers-color-scheme`). |
 | `lang` | No | BCP 47 string | Locale override, e.g. `'en'`, `'ru'`. |
-| `self-uid` | No | string | UID of the current user — used to highlight the user's own reaction chips. |
+| `self-uid` | No | string | UID of the current user — used to highlight the user's own reaction chips. Falls back to the JWT `sub` claim. |
+| `allow-anon-read` | No | presence-only | Read-only mode with a self-minted anonymous token. Makes `jwt` optional. |
+| `allow-write` | No | presence-only | Named-write mode — see the section below. |
+| `write-mint-endpoint` | No | URL | Your endpoint that mints a named-write token. See the named-write section. |
+| `reactions-enabled` | No | `'false'` to disable | Default enabled. **Only the exact string `false` disables it** — any other value, including `"0"` and `"no"`, leaves it on. |
+| `pinned-messages-enabled` | No | `'false'` to disable | Default enabled. Same exact-string rule as above. |
+| `seller-catalog` | No | presence-only | Enables the product-card composer. |
+
+¹ `jwt` is required unless `allow-anon-read` is present.
+
+**`base-url` defaulting to production is the one to get right.** There is no error and no
+warning when it is omitted: an embed you believe is pointed at staging will read and write
+production rooms, and it will look like it is working.
+
+The three presence-only attributes (`allow-anon-read`, `allow-write`, `seller-catalog`) are
+read with `hasAttribute`, so `allow-write="false"` **enables** it. Omit the attribute to
+disable.
 
 Changing `app-id`, `jwt`, `room-id`, or `self-uid` triggers a re-bootstrap. Multiple synchronous `setAttribute` calls are debounced into one bootstrap via `queueMicrotask`.
 
