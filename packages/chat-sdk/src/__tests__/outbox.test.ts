@@ -297,6 +297,133 @@ describe('outbox', () => {
     expect(remaining.map((m) => m.msgId).sort()).toEqual(['t-1', 't-2']);
   });
 
+  // ── #263: in-flight guard on flushOutbox ──────────────────────────────────
+  //
+  // flushOutbox is driven on mount and on every reconnect. Two concurrent calls
+  // (mount racing a reconnect, or two reconnects) both read the same pending
+  // list and both send the same entries — wasted work, not corruption (the
+  // server deduplicates on msgId). The guard ensures a second concurrent call
+  // for the same room is a no-op while the first is still running.
+  //
+  // F1 — the gate: two concurrent calls send each entry ONCE.
+  //   Mutation: remove the `if (this.#flushInFlight.has(roomId)) return;` guard
+  //   in flushOutbox → RED (sendCalls becomes 2).
+  it('F1_two_concurrent_flushOutbox_calls_send_each_entry_once', async () => {
+    await enqueue('room-guard-f1', {
+      msgId: 'guard-1',
+      roomId: 'room-guard-f1',
+      senderUid: 'u',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+
+    // Delay the fetch response so both flush calls read the same pending list
+    // before either dequeues. Without the guard both calls send the entry.
+    let sendCalls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      sendCalls++;
+      await new Promise((r) => setTimeout(r, 10));
+      return new Response(
+        JSON.stringify({ seq: sendCalls, sender_uid: 'u', msg_id: 'guard-1', created_at: 0 }),
+        { status: 200 },
+      );
+    });
+
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT });
+    // Two concurrent flushes — both read the same pending list.
+    await Promise.all([c.flushOutbox('room-guard-f1'), c.flushOutbox('room-guard-f1')]);
+
+    // The entry is sent ONCE — the second concurrent call is a no-op.
+    expect(sendCalls).toBe(1);
+
+    // The entry is dequeued.
+    const after = await pending('room-guard-f1');
+    expect(after.every((m) => m.msgId !== 'guard-1')).toBe(true);
+  });
+
+  // F2 — the release control: after a flush completes, a later flush still runs.
+  //   Without this, F1 passes against a guard that latches forever and silently
+  //   disables the outbox.
+  //   Mutation: remove the `finally { this.#flushInFlight.delete(roomId); }`
+  //   block → RED (the second flush is skipped, the second entry is never sent).
+  it('F2_after_flush_completes_a_later_flush_still_runs', async () => {
+    await enqueue('room-guard-f2', {
+      msgId: 'f2-a',
+      roomId: 'room-guard-f2',
+      senderUid: 'u',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ seq: 1, sender_uid: 'u', msg_id: 'f2-a', created_at: 0 }), { status: 200 }),
+    );
+
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT });
+    await c.flushOutbox('room-guard-f2');
+
+    // First flush sent + dequeued the entry.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await pending('room-guard-f2')).every((m) => m.msgId !== 'f2-a')).toBe(true);
+
+    // Enqueue a new entry and flush again — the guard must have released.
+    await enqueue('room-guard-f2', {
+      msgId: 'f2-b',
+      roomId: 'room-guard-f2',
+      senderUid: 'u',
+      sealedB64: 'BB==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ seq: 2, sender_uid: 'u', msg_id: 'f2-b', created_at: 0 }), { status: 200 }),
+    );
+    await c.flushOutbox('room-guard-f2');
+
+    // Second flush ran (guard released after first).
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await pending('room-guard-f2')).every((m) => m.msgId !== 'f2-b')).toBe(true);
+  });
+
+  // F3 — the throw control: a flush whose send rejects still releases the guard.
+  //   This is the failure mode that turns a network blip into a permanently dead
+  //   outbox — a latching guard on a send rejection means the outbox never flushes
+  //   again, even after the network recovers.
+  //   Mutation: remove the `finally { this.#flushInFlight.delete(roomId); }`
+  //   block → RED (the second flush is skipped, the entry is never retried).
+  it('F3_flush_whose_send_rejects_releases_guard_for_next_flush', async () => {
+    await enqueue('room-guard-f3', {
+      msgId: 'f3-1',
+      roomId: 'room-guard-f3',
+      senderUid: 'u',
+      sealedB64: 'AA==',
+      attempts: 0,
+      enqueuedAt: Date.now(),
+    });
+
+    // First flush: send rejects (network error — transient, stays queued).
+    globalThis.fetch = vi.fn(async () => { throw new TypeError('network'); });
+
+    const c = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, _testNoSleep: true });
+    await c.flushOutbox('room-guard-f3');
+
+    // The send failed (transient) — entry stays queued.
+    expect((await pending('room-guard-f3')).some((m) => m.msgId === 'f3-1')).toBe(true);
+
+    // Second flush: send succeeds. The guard must have released after the
+    // first flush's send rejection.
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ seq: 1, sender_uid: 'u', msg_id: 'f3-1', created_at: 0 }), { status: 200 }),
+    );
+    await c.flushOutbox('room-guard-f3');
+
+    // The entry was sent + dequeued on the second flush.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await pending('room-guard-f3')).every((m) => m.msgId !== 'f3-1')).toBe(true);
+  });
+
   // CR17-C-01 (unify doctrine across ALL THREE outbox-writing paths): the foreground
   // optimistic-send catches must obey the same permanence rule flushOutbox uses — keep a
   // transient failure queued, dequeue only a permanent code.
@@ -733,6 +860,48 @@ describe('outbox', () => {
 
       expect(seen).toEqual(['pruneFailedEntries']);
       expect(mod.isOutboxDurable()).toBe(false);
+    });
+
+    // F5 (#263) — flushOutbox must RESOLVE when storage is dead in every
+    // direction. This is the invariant the #263 in-flight guard rests on.
+    //
+    // The guard releases in a `finally`, but no test can currently distinguish
+    // that from a release at the end of the `try`: moving it out leaves all of
+    // this file GREEN, because flushOutbox cannot throw — every helper above
+    // swallows its own error rather than propagating. So the `finally` is
+    // defence-in-depth, not a tested guarantee, and what actually keeps the
+    // outbox alive is this no-reject property.
+    //
+    // If a future refactor makes a helper propagate instead of degrade, the
+    // failure is invisible: the widget calls flushOutbox fire-and-forget with
+    // `.catch(() => {})`, so the rejection is swallowed, and the guard latches
+    // that room's outbox dead for the page's lifetime with no error, no counter
+    // and no log. This test goes RED first.
+    //
+    // Mutation: src/outbox.ts `pending`'s `return [];` -> `throw err;`
+    //   -> RED (flushOutbox rejects instead of resolving).
+    it('F5_263_flushOutbox_against_a_broken_store_resolves_rather_than_rejecting', async () => {
+      vi.resetModules();
+      vi.doMock('idb-keyval', () => ({
+        get: () => Promise.reject(new Error('idb unavailable')),
+        update: () => Promise.reject(new Error('idb unavailable')),
+        set: () => Promise.reject(new Error('idb unavailable')),
+        clear: () => Promise.resolve(),
+      }));
+      // Fresh client, so it binds to the broken-storage module graph.
+      const { SDKChatClient: BrokenStoreClient } = await import('../client.js');
+      const c = new BrokenStoreClient({ baseUrl: BASE_URL, jwt: JWT });
+
+      await expect(c.flushOutbox('r263-broken')).resolves.toBeUndefined();
+
+      // NOTE on what this does NOT prove: with `pending` degraded to [] a
+      // latched guard would resolve too, so a second call cannot observe the
+      // release. The release itself is unobservable until some helper can
+      // propagate — which is exactly why the invariant above is the thing
+      // worth pinning.
+
+      vi.doUnmock('idb-keyval');
+      vi.resetModules();
     });
 
     it('F4_CONTROL_working_storage_never_signals', async () => {

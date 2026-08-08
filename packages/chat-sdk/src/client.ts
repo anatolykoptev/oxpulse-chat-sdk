@@ -388,6 +388,24 @@ export class SDKChatClient {
   #sendChains = new Map<string, Promise<void>>();
 
   /**
+   * #263: per-room in-flight guard for flushOutbox. The widget drives flushOutbox
+   * on mount and on every reconnect; two concurrent calls (mount racing a
+   * reconnect, or two reconnects) both read the same pending list and both send
+   * the same entries — wasted work (the server deduplicates on msgId), not
+   * corruption. A second concurrent call for a room already in the set returns
+   * immediately. The entry is removed in a `finally` so a send rejection (or any
+   * throw) releases the guard — a latching guard would turn a transient network
+   * blip into a permanently dead outbox.
+   *
+   * This is SEPARATE from #sendChains (#serializeSend): feeding a background bulk
+   * retry into the foreground serial chain would park the user's next message
+   * behind the whole outbox queue (#258's head-of-line problem by another door).
+   * The guard serializes only flushes against each other, not against foreground
+   * sends.
+   */
+  #flushInFlight = new Set<string>();
+
+  /**
    * Serialize a send operation per room. The returned promise resolves/rejects
    * with fn's result, but the chain itself never breaks — a failed send does
    * not block subsequent sends.
@@ -2532,50 +2550,76 @@ export class SDKChatClient {
    * retriable ciphertext message would be silent E2EE message loss (CR17-C-01).
    */
   async flushOutbox(roomId: string): Promise<void> {
-    for (const m of await pending(roomId)) {
-      // Pending-attachment entries are in-memory orphans after a page reload
-      // (the uploadPromise is not persisted, the blob is gone). Mark them as
-      // permanently failed — do NOT silently dequeue. The entry stays in the
-      // outbox so the widget can surface it as a failed message bubble with
-      // the caption preserved (dismiss-only, no retry — the blob is
-      // unrecoverable).
-      if (m.pendingAttachments && !m.sendFailed) {
-        await updateEntry(roomId, m.msgId, {
-          sendFailed: {
-            reason: 'Upload interrupted — attachment must be re-picked',
-            failedAt: Date.now(),
-          },
-        });
-        continue;
-      }
-      // Already-marked failed entries are skipped (not retried).
-      if (m.sendFailed) {
-        continue;
-      }
-      try {
-        await this.send(roomId, {
-          senderUid: m.senderUid,
-          // sealedB64 is already ciphertext (pre-sealed at enqueue time by sendTextOptimistic).
-          // No re-seal on retry — same nonce/CTR is fine because the server never ACK'd the original.
-          sealed: base64ToArrayBuffer(m.sealedB64),
-          msgId: m.msgId,
-          threadRootMsgId: m.threadRootMsgId,
-          productRef: m.productRef,
-          productMeta: m.productMeta,
-        });
-        await dequeue(roomId, m.msgId);
-      } catch (e) {
-        const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
-        // Scrub ONLY a permanently-failed entry; keep transient failures queued (fail-safe).
-        if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+    // #263: in-flight guard — a second concurrent call for the same room
+    // returns immediately. The running call is already sending every pending
+    // entry; a duplicate flush would re-send the same entries (wasted requests,
+    // server-deduplicated on msgId).
+    //
+    // "Return immediately" (not "wait") because the widget calls this
+    // fire-and-forget. The cost of that choice, stated precisely: an entry
+    // enqueued AFTER the running flush read its pending list is NOT picked up
+    // by that flush, and the dropped call would have been the one to take it —
+    // so it waits for the next reconnect or mount. Nothing is lost, delivery is
+    // deferred. "Wait" would close that window at the price of queueing flushes
+    // behind each other.
+    //
+    // The guard releases in `finally`, on every exit path. Today no exit path
+    // can throw: every outbox helper swallows its own error and degrades
+    // instead (#261), which is what keeps this from latching. The `finally` is
+    // therefore defence-in-depth for a future where one of them propagates —
+    // and outbox.test.ts F5_263 pins that no-reject invariant, because a latched
+    // guard is invisible (the widget's caller swallows the rejection) and kills
+    // the room's outbox for the page's lifetime.
+    if (this.#flushInFlight.has(roomId)) return;
+    this.#flushInFlight.add(roomId);
+    try {
+      for (const m of await pending(roomId)) {
+        // Pending-attachment entries are in-memory orphans after a page reload
+        // (the uploadPromise is not persisted, the blob is gone). Mark them as
+        // permanently failed — do NOT silently dequeue. The entry stays in the
+        // outbox so the widget can surface it as a failed message bubble with
+        // the caption preserved (dismiss-only, no retry — the blob is
+        // unrecoverable).
+        if (m.pendingAttachments && !m.sendFailed) {
+          await updateEntry(roomId, m.msgId, {
+            sendFailed: {
+              reason: 'Upload interrupted — attachment must be re-picked',
+              failedAt: Date.now(),
+            },
+          });
+          continue;
+        }
+        // Already-marked failed entries are skipped (not retried).
+        if (m.sendFailed) {
+          continue;
+        }
+        try {
+          await this.send(roomId, {
+            senderUid: m.senderUid,
+            // sealedB64 is already ciphertext (pre-sealed at enqueue time by sendTextOptimistic).
+            // No re-seal on retry — same nonce/CTR is fine because the server never ACK'd the original.
+            sealed: base64ToArrayBuffer(m.sealedB64),
+            msgId: m.msgId,
+            threadRootMsgId: m.threadRootMsgId,
+            productRef: m.productRef,
+            productMeta: m.productMeta,
+          });
           await dequeue(roomId, m.msgId);
+        } catch (e) {
+          const err = e instanceof SDKChatError ? e : new SDKChatError('network', String(e));
+          // Scrub ONLY a permanently-failed entry; keep transient failures queued (fail-safe).
+          if (PERMANENT_OUTBOX_FAILURE_CODES.has(err.code)) {
+            await dequeue(roomId, m.msgId);
+          }
         }
       }
+      // R3/F2: prune failed entries (sendFailed || pendingAttachments) to the
+      // per-room cap, evicting the oldest first. Without this, failed entries
+      // grow without bound — a slow leak with a UI attached.
+      await pruneFailedEntries(roomId);
+    } finally {
+      this.#flushInFlight.delete(roomId);
     }
-    // R3/F2: prune failed entries (sendFailed || pendingAttachments) to the
-    // per-room cap, evicting the oldest first. Without this, failed entries
-    // grow without bound — a slow leak with a UI attached.
-    await pruneFailedEntries(roomId);
   }
 
   /**
