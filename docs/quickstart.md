@@ -1,6 +1,6 @@
 # Quickstart — @oxpulse/chat-sdk
 
-Build a chat experience in a web app using the SDK directly. For a zero-JS-framework drop-in, see [embedding.md](./embedding.md).
+Build a chat experience in a web app using the SDK directly. For a zero-JS-framework drop-in, see [embedding.md](./embedding.md); for the end-to-end integration path — credentials, environments, the server side — see [integration.md](./integration.md).
 
 ## Install
 
@@ -56,7 +56,7 @@ import { SDKChatClient } from '@oxpulse/chat-sdk';
 
 // 1. Construct the client with a JWT your backend minted
 const client = new SDKChatClient({
-  baseUrl: 'https://chat.example.com',    // OxPulse server base URL (no trailing slash)
+  baseUrl: 'https://staging.oxpulse.chat', // no trailing slash. Prod: https://api.oxpulse.chat
   jwt: jwtFromYourBackend,                // Bearer JWT — do NOT include "Bearer " prefix
 });
 
@@ -100,7 +100,7 @@ unsubscribe();
 
 | Option | Type | Required | Description |
 |---|---|---|---|
-| `baseUrl` | `string` | Yes | OxPulse server base URL, no trailing slash |
+| `baseUrl` | `string` | Yes | Server base URL, no trailing slash. `https://staging.oxpulse.chat` or `https://api.oxpulse.chat` — see [integration.md](./integration.md#environments) |
 | `jwt` | `string` | Yes | Scoped JWT from your backend. No `"Bearer "` prefix. |
 | `appId` | `string` | No | App namespace ID — matches JWT `aud` claim. Recommended for multi-tenant setups. |
 | `cryptoMode` | `'sframe-static' \| 'plaintext'` | No | Pin the expected server crypto mode. When set, the client rejects mismatches to prevent downgrade attacks. |
@@ -131,7 +131,7 @@ const hkdfKey = await crypto.subtle.importKey(
 );
 
 const client = new SDKChatClient({
-  baseUrl: 'https://chat.example.com',
+  baseUrl: 'https://staging.oxpulse.chat',
   jwt: jwtFromYourBackend,
   cryptoMode: 'sframe-static',
   e2ee: {

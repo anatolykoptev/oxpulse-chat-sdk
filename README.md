@@ -15,6 +15,7 @@ of truth for what is current.
 
 ## Documentation
 
+- **[docs/integration.md](docs/integration.md)** — **start here**: environments and base URLs, the API contract, entities, getting credentials, the server-side mint, and where integrations usually fail
 - **[docs/quickstart.md](docs/quickstart.md)** — integrate `@oxpulse/chat-sdk` into a web app: install, auth model, send/list/subscribe, E2EE, rooms
 - **[docs/embedding.md](docs/embedding.md)** — drop-in `@oxpulse/chat-widget` with no framework: Custom Element attributes, events, iframe postMessage protocol, CSS theming
 
