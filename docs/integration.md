@@ -32,7 +32,7 @@ The five you will touch. Field-level detail is in the OpenAPI document; this is 
 | **Key** | a server-side credential, `key_id` + a raw secret. Your backend uses it to mint user tokens. **Never reaches a browser.** |
 | **User JWT** | short-lived (default 1 h, max 24 h), minted per user by your backend, carries scopes. This is what your frontend holds. |
 | **Room** | a conversation. Has a `crypto_mode` fixed at creation — `sframe-static` (end-to-end encrypted) or `plaintext` (server-readable, searchable, moderatable). |
-| **Message** | belongs to a room, carries a monotonic sequence number per room. Supports edit, delete, reactions, threads, pins and attachments. |
+| **Message** | belongs to a room. `msg_id` is a **UUID** — the field is declared `format: uuid` and any other id is a `422`. Carries a `seq` that is monotonic **per app, not per room** (see below). Supports edit, delete, reactions, threads, pins and attachments. |
 
 ## Setup
 
@@ -86,6 +86,39 @@ The `*` is literal and the wildcard is asymmetric — a per-room grant does not 
 
 There is no server-side SDK package yet; drive those endpoints from your backend with the OpenAPI contract above. ([#244](https://github.com/anatolykoptev/oxpulse-chat-sdk/issues/244) tracks the package.)
 
+### A scope is not a membership
+
+This is the one that costs an afternoon. A token carrying `chat:read:<roomId>` for a room the
+user has not been **added to** gets `403`, not `404` — the right to read the room and being in
+it are separate checks. Room membership is a server-side call your backend makes:
+
+```bash
+curl -fsS -X POST "$BASE/api/sdk/rooms/$ROOM/members" \
+  -H "Authorization: Bearer $BACKEND_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u_42"}'
+```
+
+### `seq` counts the app, not the room
+
+`seq` is monotonic across the whole app. The first message in a brand-new room does not come
+back as `1` — in a live walk it came back as `2152`, and the next as `2153`. It is still a
+correct cursor for `after_seq` resumption; it is not a per-room message count, and treating it
+as one will make a room look like it has thousands of messages it does not have.
+
+### Subscribing needs a ticket
+
+`EventSource` cannot set an `Authorization` header, so the stream is not opened with the JWT
+directly — mint a short-lived ticket with it first:
+
+```bash
+curl -fsS -X POST "$BASE/api/sdk/messages/subscribe-ticket" \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"room_id\":\"$ROOM\"}"
+# -> {"ticket":"…"}   then:  GET /api/sdk/messages/subscribe?room_id=<room>&ticket=<ticket>
+```
+
 ## Your frontend: two paths
 
 **A drop-in widget, no build step** — a `<script>` tag and one element. See [embedding.md](./embedding.md).
@@ -117,7 +150,9 @@ const client = new SDKChatClient({
 |---|---|
 | `401` on `/api/sdk/tokens` | the signature covers different bytes than the body sent — see above. Also: revoked key, or wrong environment for the key. |
 | `401` on an SDK call with a valid-looking JWT | expired (`exp`, zero leeway), or the scope does not name this exact `roomId`. |
-| `403` where you expected `404` | you have the scope but not the membership or role. Room-log delete and message edit/delete need owner or moderator, not just `chat:write`. |
+| `403` where you expected `404` | you have the scope but not the membership — add the user to the room server-side. Room-log delete and message edit/delete additionally need owner or moderator, not just `chat:write`. |
+| `422` on append, no field named | `msg_id` is not a UUID. |
+| `400` opening the SSE stream | you passed the JWT instead of a subscribe-ticket. |
 | `crypto_mode_mismatch` thrown by the client | the room's mode is not the one pinned in `cryptoMode`. The mode is fixed at room creation and cannot be changed. |
 
 ## Support
