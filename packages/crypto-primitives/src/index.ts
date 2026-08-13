@@ -7,6 +7,9 @@ export { deriveKey, hkdfExtract, hkdfExpand } from './hkdf.ts';
 // AEAD
 export { aesGcmSeal, aesGcmOpen } from './aead.ts';
 
+// XChaCha20-Poly1305 AEAD with key commitment (192-bit nonce, random-safe)
+export { xchachaSeal, xchachaOpen, xchachaRandomNonce } from './xchacha.ts';
+
 // Addressing
 export { derivePeerIdTarget } from './peer-id.ts';
 
