@@ -63,8 +63,14 @@ const DEFAULT_EXPORT_LIMIT = 200;
  * contract assumes UTF-8 text bodies, and a provider returning binary breaks
  * that assumption upstream of here.
  *
- * There is deliberately no try/catch: under `fatal: false` decode does not
- * throw, so a catch block would be dead code that reads like a guard.
+ * There is deliberately no try/catch. Measured in Node (the test runtime),
+ * `fatal: false` decode returns a string rather than throwing for empty,
+ * malformed and detached buffers alike, so a catch here would be dead code that
+ * reads like a guard. The one edge not measured: a browser may throw TypeError
+ * for a DETACHED ArrayBuffer, reachable only from a custom provider that
+ * transfers its result buffer away. That is a broken provider, and failing loud
+ * beats the old behaviour of swallowing it and exporting the row as a null body
+ * counted as a success.
  */
 function decodeBody(buf: ArrayBuffer | undefined): string | null {
   if (buf === undefined) return null;
@@ -220,7 +226,10 @@ export async function exportRoomHistory(
 
     if (!result.hasNext || result.next === undefined) break;
 
-    // Honour AbortSignal between pages — a large room's export is cancellable.
+    // Honour AbortSignal BETWEEN PAGES. This is the only place the signal is
+    // read: it cannot interrupt the `list()` call above, which for a room with
+    // no live subscription unseals row-by-row with no bound. See the header and
+    // #312 — do not restate this as plain "cancellable".
     if (signal?.aborted) {
       throw new DOMException('export aborted', 'AbortError');
     }

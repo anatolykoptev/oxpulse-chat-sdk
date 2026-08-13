@@ -119,4 +119,34 @@ describe('SDKChatClient#exportRoom — production wiring (PR #311 finding 2)', (
     // Finding 3: the text content itself must expose loss, not only ExportResult.
     expect(result.content).toContain('# Exported 1/1 rows (0 failed)');
   });
+  it('signal reaches exportRoomHistory through the delegator (delta-review MED)', async () => {
+    // The other tests gate the delegator's existence and its limit/format forwarding.
+    // None gated `signal`, and the reviewer proved it: dropping signal from the
+    // forwarded opts left all 14 tests green. Since `signal` is the only cancellation
+    // the export exposes, that was the most load-bearing untested forwarding.
+    //
+    // MED mutation gate: in client.ts `exportRoom`, forward opts without signal —
+    //   const { signal: _s, ...rest } = opts ?? {};
+    //   return exportRoomHistory(this, roomId, rest as ExportRoomOptions);
+    // — this test must go RED (it resolves instead of rejecting).
+    //
+    // Two pages are required: the signal is read BETWEEN pages, so a single-page
+    // fixture never reaches the check and would pass with or without forwarding.
+    const client = new SDKChatClient({
+      baseUrl: TEST_BASE_URL,
+      jwt: TEST_JWT,
+      cryptoMode: 'plaintext',
+    });
+
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(page([{ seq: 1, body: 'page-one' }], true))
+      .mockResolvedValueOnce(page([{ seq: 2, body: 'page-two' }], false));
+
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(client.exportRoom(ROOM, { signal: ac.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
 });
