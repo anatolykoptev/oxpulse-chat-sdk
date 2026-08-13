@@ -540,7 +540,17 @@ export class SDKChatClient {
     // poison-mismatch (throw + tear down + refuse to send) instead of an accepted
     // silent downgrade. Without an e2ee provider, plaintext is a valid intended mode
     // (null = auto-detect from server, no validation).
-    this.#cryptoMode = opts.cryptoMode ?? (hasE2ee ? 'sframe-static' : null);
+    // The default has to follow the PROVIDER, not just the presence of one. An MLS
+    // client that defaults to 'sframe-static' declares an expectation the server's
+    // 'mls' can never equal, and validateAndResolveCryptoMode compares with `!==` —
+    // so the downgrade defense fires on the client's own correct mode, poisons the
+    // room and refuses every send. The feature could not work in the configuration
+    // its own docs describe unless the caller also passed cryptoMode: 'mls', which
+    // nothing in E2EEOptions asks for.
+    const providerDefaultMode: CryptoMode | null = hasE2ee
+      ? (opts.e2ee?.provider === 'mls' ? 'mls' : 'sframe-static')
+      : null;
+    this.#cryptoMode = opts.cryptoMode ?? providerDefaultMode;
 
     // W6 E2EE: initialize crypto provider from e2ee option.
     if (opts.e2ee !== undefined) {
