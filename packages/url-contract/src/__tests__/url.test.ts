@@ -370,13 +370,14 @@ describe('parseCallFragment', () => {
     expect(parseCallFragment('secret.')).toBeNull();
   });
 
-  it('decodes percent-encoded values (#341)', () => {
-    const result = parseCallFragment('secret%20value.pubkey%2Ftest');
-    expect(result).toEqual({ joinSecret: 'secret value', expectedHostPubkey: 'pubkey/test' });
+  // #354: standalone parsers return LITERAL payload — no percent-decoding.
+  it('returns literal payload for percent-encoded values (#354)', () => {
+    const result = parseCallFragment('a%2Eb.c');
+    expect(result).toEqual({ joinSecret: 'a%2Eb', expectedHostPubkey: 'c' });
   });
 
-  it('returns null for invalid percent-encoding', () => {
-    expect(parseCallFragment('secret%ZZ.pubkey')).toBeNull();
+  it('returns literal payload for malformed percent-encoding (#354)', () => {
+    expect(parseCallFragment('a%.b')).toEqual({ joinSecret: 'a%', expectedHostPubkey: 'b' });
   });
 });
 
@@ -405,13 +406,14 @@ describe('parseBurnerFragment', () => {
     expect(parseBurnerFragment('k=')).toBeNull();
   });
 
-  it('decodes percent-encoded values (#341)', () => {
-    const result = parseBurnerFragment('#k=key%20with%20spaces');
-    expect(result).toEqual({ fragB64: 'key with spaces' });
+  // #354: standalone parsers return LITERAL payload — no percent-decoding.
+  it('returns literal payload for percent-encoded values (#354)', () => {
+    const result = parseBurnerFragment('k=a%2Eb');
+    expect(result).toEqual({ fragB64: 'a%2Eb' });
   });
 
-  it('returns null for invalid percent-encoding', () => {
-    expect(parseBurnerFragment('k=%ZZ')).toBeNull();
+  it('returns literal payload for malformed percent-encoding (#354)', () => {
+    expect(parseBurnerFragment('k=%')).toEqual({ fragB64: '%' });
   });
 });
 
@@ -443,9 +445,14 @@ describe('buildRoomFragment + parseRoomFragment', () => {
     expect(parseRoomFragment('noseparator')).toBeNull();
   });
 
-  it('parseRoomFragment decodes percent-encoded values (#341)', () => {
-    const result = parseRoomFragment('secret%20value.pubkey%2Ftest');
-    expect(result).toEqual({ secret: 'secret value', hostPubkey: 'pubkey/test' });
+  // #354: standalone parsers return LITERAL payload — no percent-decoding.
+  it('parseRoomFragment returns literal payload for percent-encoded values (#354)', () => {
+    const result = parseRoomFragment('a%2Eb.c');
+    expect(result).toEqual({ secret: 'a%2Eb', hostPubkey: 'c' });
+  });
+
+  it('parseRoomFragment returns literal payload for malformed percent-encoding (#354)', () => {
+    expect(parseRoomFragment('a%.b')).toEqual({ secret: 'a%', hostPubkey: 'b' });
   });
 });
 
