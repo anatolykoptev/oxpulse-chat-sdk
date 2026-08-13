@@ -87,7 +87,12 @@ export class IdbMlsStateStore implements MLSStateStore {
       const record = await get<StateRecord>(roomId, this.#store);
       if (!record) return null;
       return record.state;
-    } catch {
+    } catch (err) {
+      // Distinguish IndexedDB unavailability (fallback to in-memory) from
+      // data corruption (surface the error). A thrown get() is almost always
+      // a transient/unavailability error, not corruption — but we log it
+      // so the caller can investigate.
+      console.warn(`MLSStateStore: IndexedDB read failed for room ${roomId}:`, err);
       this.#switchToFallback();
       return this.#fallback.get(roomId) ?? null;
     }

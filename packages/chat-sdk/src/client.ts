@@ -293,7 +293,7 @@ function validateAndResolveCryptoMode(
     return activeCryptoMode;
   }
   // SEC-CR-1695-03: validated cast — only known enum values accepted.
-  if (received !== 'sframe-static' && received !== 'plaintext') {
+  if (received !== 'sframe-static' && received !== 'plaintext' && received !== 'mls') {
     onPoison();
     console.error('[chat-sdk] crypto_mode_unknown', { received });
     throw new SDKChatError(
@@ -620,7 +620,13 @@ export class SDKChatClient {
       this.#cryptoProvider = mlsProvider;
       this.#mlsManager = mlsProvider.manager;
     })();
-    await this.#mlsInitPromise;
+    try {
+      await this.#mlsInitPromise;
+    } catch (err) {
+      // Clear the stale promise so transient failures (network, import) can retry.
+      this.#mlsInitPromise = null;
+      throw err;
+    }
   }
 
   /**
@@ -3012,10 +3018,16 @@ export class SDKChatClient {
 
     // Seal the text first, then delegate to sendOptimistic with pre-sealed bytes.
     // This prevents plaintext from ever entering the outbox.
-    const sealedPromise = provider.seal(
-      new TextEncoder().encode(args.text).buffer as ArrayBuffer,
-      ctx,
-    );
+    // For MLS, the provider may not be initialized yet — wrap the seal in
+    // an async IIFE that ensures the provider is ready first.
+    const sealedPromise: Promise<ArrayBuffer> = provider
+      ? provider.seal(new TextEncoder().encode(args.text).buffer as ArrayBuffer, ctx)
+      : (async () => {
+          await this.#ensureMlsProvider();
+          const p = this.#cryptoProvider;
+          if (!p) throw new SDKChatError('unsupported', 'sendTextOptimistic: e2ee not configured');
+          return p.seal(new TextEncoder().encode(args.text).buffer as ArrayBuffer, ctx);
+        })();
 
     const pendingCbs: Array<() => void> = [];
     const okCbs: Array<(result: { seq: number; msgId: string }) => void> = [];
@@ -3158,6 +3170,11 @@ export class SDKChatClient {
     const done = (async () => {
       // Microtask gap: lets caller register callbacks before we fire.
       await Promise.resolve();
+
+      // MLS provider is lazily initialized — ensure it's ready before the
+      // uploadPromise resolves with sealed bytes (the caller seals using the
+      // crypto provider, which must be initialized first).
+      await this.#ensureMlsProvider();
 
       pendingCbs.forEach((cb) => cb());
 

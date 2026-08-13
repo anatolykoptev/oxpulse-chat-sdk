@@ -64,6 +64,8 @@ import type { MlsChatProvider, MlsEpochParams } from 'sframe-ratchet/chat/mls';
 import type { MlsEpochMaterial } from 'sframe-ratchet/mls';
 import type { CryptoProvider, SealContext } from './types.js';
 import type { MLSStateStore } from './mls-state-store.js';
+import { SDKChatError } from './errors.js';
+import { arrayBufferToBase64, base64ToArrayBuffer } from './utils.js';
 
 // ---------------------------------------------------------------------------
 // Types (re-exported for the public API)
@@ -191,7 +193,8 @@ export class MLSGroupManager {
       this.#tsMls = await import('ts-mls');
       return this.#tsMls;
     } catch {
-      throw new Error(
+      throw new SDKChatError(
+        'unsupported',
         'MLSGroupManager: ts-mls is not installed. Run `npm install ts-mls` to use MLS.',
       );
     }
@@ -212,7 +215,7 @@ export class MLSGroupManager {
   async #applyEpoch(roomId: string, state: ClientState): Promise<void> {
     const cs = await this.#getCiphersuite();
     const groupId = this.#roomGroupIds.get(roomId);
-    if (!groupId) throw new Error(`MLSGroupManager: no groupId for room ${roomId}`);
+    if (!groupId) throw new SDKChatError('mls_epoch_desync', `MLSGroupManager: no groupId for room ${roomId}`);
 
     const material: MlsEpochMaterial = await deriveMlsEpochMaterial(
       state, cs, 'AES_128_GCM_SHA256', groupId,
@@ -234,7 +237,7 @@ export class MLSGroupManager {
    * Called on client init (and when the directory count drops below threshold).
    */
   async publishKeyPackage(): Promise<void> {
-    if (this.#disposed) throw new Error('MLSGroupManager: disposed');
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
@@ -271,7 +274,7 @@ export class MLSGroupManager {
       body: JSON.stringify({ key_package_b64: keyPackageB64 }),
     });
     if (!resp.ok) {
-      throw new Error(`MLSGroupManager.publishKeyPackage: server returned ${resp.status}`);
+      throw new SDKChatError('server_error', `MLSGroupManager.publishKeyPackage: server returned ${resp.status}`);
     }
 
     this.#pendingKeyPackages.push({ publicPackage, privatePackage });
@@ -282,14 +285,16 @@ export class MLSGroupManager {
    * Called by SDKChatClient.createRoom() when cryptoMode is 'mls'.
    */
   async createGroup(roomId: string, memberUids: string[]): Promise<void> {
-    if (this.#disposed) throw new Error('MLSGroupManager: disposed');
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
     if (this.#pendingKeyPackages.length === 0) {
-      throw new Error('MLSGroupManager.createGroup: no pending KeyPackage — call publishKeyPackage first');
+      throw new SDKChatError('mls_keypackage_not_found', 'MLSGroupManager.createGroup: no pending KeyPackage — call publishKeyPackage first');
     }
-    const myKp = this.#pendingKeyPackages.shift()!;
+    // Peek without consuming — shift only after the group is created successfully
+    // so a failure does not waste the KeyPackage (DoS vector).
+    const myKp = this.#pendingKeyPackages[0]!;
 
     // Generate a random group ID.
     const groupId = crypto.getRandomValues(new Uint8Array(16));
@@ -325,6 +330,8 @@ export class MLSGroupManager {
     }
 
     this.#roomStates.set(roomId, state);
+    // Consume the KeyPackage only after the group is fully created.
+    this.#pendingKeyPackages.shift();
     await this.#applyEpoch(roomId, state);
     await this.#persistRoom(roomId);
   }
@@ -334,23 +341,24 @@ export class MLSGroupManager {
    * Called on room join.
    */
   async processWelcome(roomId: string, welcome: Uint8Array): Promise<void> {
-    if (this.#disposed) throw new Error('MLSGroupManager: disposed');
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
     if (this.#pendingKeyPackages.length === 0) {
-      throw new Error('MLSGroupManager.processWelcome: no pending KeyPackage');
+      throw new SDKChatError('mls_keypackage_not_found', 'MLSGroupManager.processWelcome: no pending KeyPackage');
     }
-    const myKp = this.#pendingKeyPackages.shift()!;
+    // Peek without consuming — shift only after joinGroup succeeds.
+    const myKp = this.#pendingKeyPackages[0]!;
 
     // decodeMlsMessage returns [MLSMessage, newOffset] | undefined.
     const decoded = tsMls.decodeMlsMessage(welcome, 0);
     if (!decoded) {
-      throw new Error('MLSGroupManager.processWelcome: failed to decode welcome message');
+      throw new SDKChatError('mls_welcome_decrypt_failed', 'MLSGroupManager.processWelcome: failed to decode welcome message');
     }
     const [welcomeMsg] = decoded;
     if (welcomeMsg.wireformat !== 'mls_welcome') {
-      throw new Error(`MLSGroupManager.processWelcome: expected welcome, got ${welcomeMsg.wireformat}`);
+      throw new SDKChatError('mls_welcome_decrypt_failed', `MLSGroupManager.processWelcome: expected welcome, got ${welcomeMsg.wireformat}`);
     }
 
     const { joinGroup, emptyPskIndex } = tsMls;
@@ -364,8 +372,24 @@ export class MLSGroupManager {
 
     // Extract groupId from the welcome's group info.
     const groupId = state.groupContext.groupId;
+
+    // Verify the welcome's groupId is not already bound to a different room.
+    // This prevents a confusion attack where a welcome for group A is sent
+    // to a user expecting to join group B. The roomId → groupId mapping is
+    // set by createGroup (creator) or here (joiner); if it's already set,
+    // it must match.
+    const existingGroupId = this.#roomGroupIds.get(roomId);
+    if (existingGroupId && !arrayEquals(existingGroupId, groupId)) {
+      throw new SDKChatError(
+        'mls_welcome_decrypt_failed',
+        `MLSGroupManager.processWelcome: welcome groupId does not match existing binding for room ${roomId}`,
+      );
+    }
+
     this.#roomGroupIds.set(roomId, groupId);
     this.#roomStates.set(roomId, state);
+    // Consume the KeyPackage only after joinGroup succeeds.
+    this.#pendingKeyPackages.shift();
     await this.#applyEpoch(roomId, state);
     await this.#persistRoom(roomId);
   }
@@ -375,18 +399,18 @@ export class MLSGroupManager {
    * Called from the SSE handler on `mls-protocol` event.
    */
   async processMessage(roomId: string, message: Uint8Array): Promise<void> {
-    if (this.#disposed) throw new Error('MLSGroupManager: disposed');
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
     const state = this.#roomStates.get(roomId);
     if (!state) {
-      throw new Error(`MLSGroupManager.processMessage: no state for room ${roomId}`);
+      throw new SDKChatError('mls_epoch_desync', `MLSGroupManager.processMessage: no state for room ${roomId}`);
     }
 
     const decoded = tsMls.decodeMlsMessage(message, 0);
     if (!decoded) {
-      throw new Error('MLSGroupManager.processMessage: failed to decode message');
+      throw new SDKChatError('mls_commit_validation_failed', 'MLSGroupManager.processMessage: failed to decode message');
     }
     const [msg] = decoded;
 
@@ -413,13 +437,13 @@ export class MLSGroupManager {
    * Add a member: fetch their KeyPackage, create Add proposal + Commit, broadcast.
    */
   async addMember(roomId: string, uid: string): Promise<void> {
-    if (this.#disposed) throw new Error('MLSGroupManager: disposed');
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
     const state = this.#roomStates.get(roomId);
     if (!state) {
-      throw new Error(`MLSGroupManager.addMember: no state for room ${roomId}`);
+      throw new SDKChatError('mls_epoch_desync', `MLSGroupManager.addMember: no state for room ${roomId}`);
     }
 
     const memberKp = await this.#fetchKeyPackage(uid);
@@ -448,13 +472,13 @@ export class MLSGroupManager {
    * Remove a member: create Remove proposal + Commit, broadcast.
    */
   async removeMember(roomId: string, uid: string): Promise<void> {
-    if (this.#disposed) throw new Error('MLSGroupManager: disposed');
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
     const state = this.#roomStates.get(roomId);
     if (!state) {
-      throw new Error(`MLSGroupManager.removeMember: no state for room ${roomId}`);
+      throw new SDKChatError('mls_epoch_desync', `MLSGroupManager.removeMember: no state for room ${roomId}`);
     }
 
     // Find the leaf index for the member by credential identity.
@@ -468,7 +492,7 @@ export class MLSGroupManager {
         arrayEquals((m.credential as { identity: Uint8Array }).identity, targetIdentity),
     );
     if (memberIndex === -1) {
-      throw new Error(`MLSGroupManager.removeMember: member ${uid} not found in room ${roomId}`);
+      throw new SDKChatError('not_found', `MLSGroupManager.removeMember: member ${uid} not found in room ${roomId}`);
     }
 
     const commitResult = await createCommit(
@@ -549,20 +573,20 @@ export class MLSGroupManager {
       headers: { 'Authorization': `Bearer ${this.#opts.jwt}` },
     });
     if (!resp.ok) {
-      throw new Error(`MLSGroupManager: KeyPackage fetch failed for ${uid}: ${resp.status}`);
+      throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: KeyPackage fetch failed for ${uid}: ${resp.status}`);
     }
     const data = await resp.json() as { key_packages: Array<{ key_package_b64: string }> };
     if (!data.key_packages?.length) {
-      throw new Error(`MLSGroupManager: no KeyPackages for ${uid}`);
+      throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: no KeyPackages for ${uid}`);
     }
     const kpBytes = base64ToBytes(data.key_packages[0]!.key_package_b64);
     const decoded = tsMls.decodeMlsMessage(kpBytes, 0);
     if (!decoded) {
-      throw new Error(`MLSGroupManager: failed to decode KeyPackage for ${uid}`);
+      throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: failed to decode KeyPackage for ${uid}`);
     }
     const [kpMsg] = decoded;
     if (kpMsg.wireformat !== 'mls_key_package') {
-      throw new Error(`MLSGroupManager: expected key_package, got ${kpMsg.wireformat}`);
+      throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: expected key_package, got ${kpMsg.wireformat}`);
     }
     // Extract the KeyPackage from the MlsKeyPackage message.
     return (kpMsg as unknown as { keyPackage: KeyPackage }).keyPackage;
@@ -598,7 +622,7 @@ export class MLSGroupManager {
       },
     );
     if (!resp.ok) {
-      throw new Error(`MLSGroupManager: sendWelcome failed: ${resp.status}`);
+      throw new SDKChatError('server_error', `MLSGroupManager: sendWelcome failed: ${resp.status}`);
     }
   }
 
@@ -627,12 +651,13 @@ export class MLSGroupManager {
       },
     );
     if (!resp.ok) {
-      throw new Error(`MLSGroupManager: sendMlsMessage failed: ${resp.status}`);
+      throw new SDKChatError('server_error', `MLSGroupManager: sendMlsMessage failed: ${resp.status}`);
     }
   }
 
   /** Persist a room's ClientState to the state store. */
   async #persistRoom(roomId: string): Promise<void> {
+    if (this.#disposed) return;
     const state = this.#roomStates.get(roomId);
     if (!state) return;
     // ts-mls exposes encodeGroupState, but the ratchet tree is needed for
@@ -683,8 +708,13 @@ export interface MlsProvider extends CryptoProvider {
  */
 export async function createMlsProvider(opts: MlsProviderOptions): Promise<MlsProvider> {
   // Create the AEAD layer (sframe-ratchet chat/mls provider).
+  // uidToPeerId MUST match defaultCredentialToPeerId in sframe-ratchet/mls:
+  // basic credential → base64(identity bytes).
+  const uidToPeerId = (uid: string): string =>
+    bytesToBase64(new TextEncoder().encode(uid));
   const aead = createMlsChatProvider({
     suite: 'AES_128_GCM_SHA256',
+    uidToPeerId,
     ...(opts.replayWindow !== undefined ? { replayWindow: opts.replayWindow } : {}),
     durableReplayNamespace: opts.durableReplayNamespace ?? 'oxpulse-mls',
   });
@@ -724,17 +754,14 @@ export async function createMlsProvider(opts: MlsProviderOptions): Promise<MlsPr
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Uint8Array → standard base64 string (delegates to utils.arrayBufferToBase64). */
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return globalThis.btoa(binary);
+  return arrayBufferToBase64(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
 }
 
+/** Standard base64 string → Uint8Array (delegates to utils.base64ToArrayBuffer). */
 function base64ToBytes(b64: string): Uint8Array {
-  const binary = globalThis.atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+  return new Uint8Array(base64ToArrayBuffer(b64));
 }
 
 /** Constant-time array equality (avoids timing side-channels on identity match). */
