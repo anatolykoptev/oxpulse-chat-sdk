@@ -148,7 +148,13 @@ type CiphersuiteImpl = import('ts-mls').CiphersuiteImpl;
 type KeyPackage = import('ts-mls').KeyPackage;
 type PrivateKeyPackage = import('ts-mls').PrivateKeyPackage;
 type MLSMessage = import('ts-mls').MLSMessage;
-type LeafNode = import('ts-mls').LeafNode;
+
+/**
+ * The only MLS protocol version RFC 9420 defines. Every MLSMessage this SDK
+ * encodes must carry it — the wire format puts the version first, and a
+ * message encoded without it does not decode.
+ */
+const MLS_PROTOCOL_VERSION: import('ts-mls').ProtocolVersionName = 'mls10';
 
 /**
  * Manages MLS group lifecycle for rooms with cryptoMode 'mls'.
@@ -258,11 +264,18 @@ export class MLSGroupManager {
     // Serialize and publish to the server directory.
     // The KeyPackage is a public key — safe to send over HTTPS.
     // Wrap it in an MlsKeyPackage message for encoding.
-    const keyPackageMsg = {
-      wireformat: 'mls_key_package' as const,
+    //
+    // `version` is REQUIRED: MLSMessage is MlsMessageProtocol & MlsMessageContent,
+    // and encodeMlsMessage writes the version byte first. Omitting it encodes a
+    // message decodeMlsMessage rejects — i.e. a KeyPackage this very SDK cannot
+    // read back. Keep this object typed as MLSMessage (no `as unknown` cast) so
+    // the compiler keeps catching a missing field.
+    const keyPackageMsg: MLSMessage = {
+      version: MLS_PROTOCOL_VERSION,
+      wireformat: 'mls_key_package',
       keyPackage: publicPackage,
     };
-    const keyPackageBytes = tsMls.encodeMlsMessage(keyPackageMsg as unknown as MLSMessage);
+    const keyPackageBytes = tsMls.encodeMlsMessage(keyPackageMsg);
     const keyPackageB64 = bytesToBase64(keyPackageBytes);
 
     const resp = await fetch(`${this.#opts.keyPackageDirectoryUrl}/publish`, {
@@ -505,7 +518,7 @@ export class MLSGroupManager {
       throw new SDKChatError('not_found', `MLSGroupManager.removeMember: member ${uid} not found in room ${roomId}`);
     }
 
-    const commitResult = await createCommit(
+    const removeCommit = await createCommit(
       { state, cipherSuite: cs },
       {
         extraProposals: [{ proposalType: 'remove', remove: { removed: leafIndex } }],
@@ -514,9 +527,35 @@ export class MLSGroupManager {
       },
     );
 
-    this.#roomStates.set(roomId, commitResult.newState);
-    await this.#sendMlsMessage(roomId, commitResult.commit, 'commit', tsMls);
-    await this.#applyEpoch(roomId, commitResult.newState);
+    // ── Forward secrecy: the Remove commit alone does NOT revoke access ──
+    //
+    // RFC 9420 §12.4 requires a Commit to carry an UpdatePath when it covers
+    // any proposal that is not an Add. ts-mls 1.6.2 gets that condition wrong
+    // (clientState.js:460 tests `grouped.remove.length > 1`), so a commit that
+    // removes exactly ONE member ships with no path. With no path there is no
+    // fresh commit secret, the next epoch's key schedule follows deterministically
+    // from the previous init secret — which the removed member holds — and she
+    // derives the new chainKey byte-for-byte. Removal would revoke nothing.
+    //
+    // The follow-up is an EMPTY commit, which ts-mls does treat as requiring a
+    // path (same line: `allProposals.length === 0`). Its path secrets are
+    // encrypted to the resolution of the tree that no longer contains the
+    // removed leaf, so she cannot compute this epoch and cannot process the
+    // commit at all. The AEAD epoch is applied ONLY after both commits land, so
+    // nothing is ever sealed under the intermediate epoch she can still read.
+    //
+    // Remove this once ts-mls emits a path for a single Remove — the test
+    // "forward secrecy: a removed member cannot decrypt epoch N+1 from her own
+    // state" is what keeps the guarantee honest either way.
+    const rotateCommit = await createCommit(
+      { state: removeCommit.newState, cipherSuite: cs },
+      { extraProposals: [], ratchetTreeExtension: true, wireAsPublicMessage: true },
+    );
+
+    this.#roomStates.set(roomId, rotateCommit.newState);
+    await this.#sendMlsMessage(roomId, removeCommit.commit, 'commit', tsMls);
+    await this.#sendMlsMessage(roomId, rotateCommit.commit, 'commit', tsMls);
+    await this.#applyEpoch(roomId, rotateCommit.newState);
     await this.#persistRoom(roomId);
   }
 
@@ -611,11 +650,14 @@ export class MLSGroupManager {
     _cs: CiphersuiteImpl,
   ): Promise<void> {
     // Wrap the Welcome in an MlsWelcome message for encoding.
-    const welcomeMsg = {
-      wireformat: 'mls_welcome' as const,
+    // `version` is REQUIRED — see the note in publishKeyPackage. Without it the
+    // recipient's processWelcome fails at decodeMlsMessage.
+    const welcomeMsg: MLSMessage = {
+      version: MLS_PROTOCOL_VERSION,
+      wireformat: 'mls_welcome',
       welcome,
     };
-    const welcomeBytes = tsMls.encodeMlsMessage(welcomeMsg as unknown as MLSMessage);
+    const welcomeBytes = tsMls.encodeMlsMessage(welcomeMsg);
     const baseUrl = this.#opts.keyPackageDirectoryUrl.replace('/keys', '');
     const resp = await fetch(
       `${baseUrl}/rooms/${roomId}/mls-welcome`,

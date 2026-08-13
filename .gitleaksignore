@@ -1,9 +1,0 @@
-# False positives — MLS test code uses `chainKey` (a protocol field name,
-# not a secret) and ed25519 KAT vectors contain fixed test keys.
-packages/chat-sdk/src/__tests__/mls-provider.test.ts:generic-api-key:299
-packages/chat-sdk/src/__tests__/mls-provider.test.ts:generic-api-key:300
-packages/chat-sdk/src/__tests__/mls-provider.test.ts:generic-api-key:301
-packages/chat-sdk/src/__tests__/mls-provider.test.ts:generic-api-key:347
-packages/chat-sdk/src/__tests__/mls-provider.test.ts:generic-api-key:348
-packages/crypto-primitives/src/__tests__/kat-ed25519.test.ts:generic-api-key:16
-packages/crypto-primitives/src/__tests__/kat-ed25519.test.ts:generic-api-key:45

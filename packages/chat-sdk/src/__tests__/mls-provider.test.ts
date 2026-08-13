@@ -10,6 +10,10 @@
 //   3. createGroup → Alice creates, adds Bob, both derive same epoch.
 //   4. seal/unseal round-trip with MLS-derived keys.
 //   5. Epoch advance (addMember) → new key space, old ciphertext stale.
+//   5b. removeMember targets the correct LEAF across two sequential removals,
+//       driven through MLSGroupManager, oracle = ts-mls getGroupMembers.
+//   5c. Forward secrecy — a removed member who honestly processes her own
+//       removal still cannot decrypt epoch N+1.
 //   6. MLSStateStore (in-memory) save/load/delete/listRoomIds.
 //   7. getMlsManager() from SDKChatClient (lazy init).
 //   8. ts-mls not installed → clear error on first use.
@@ -113,6 +117,130 @@ async function getCiphersuiteImpl(): Promise<import('ts-mls').CiphersuiteImpl> {
 
 async function makeIdentityKey(): Promise<CryptoKey> {
   return crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+}
+
+/** KeyPackage directory base URL the MockDeliveryService answers on. */
+const KP_URL = 'http://mock/api/sdk/keys';
+
+type TsMls = typeof import('ts-mls');
+type TsClientState = import('ts-mls').ClientState;
+type RawKeyPackage = {
+  publicPackage: import('ts-mls').KeyPackage;
+  privatePackage: import('ts-mls').PrivateKeyPackage;
+};
+
+function textBytes(s: string): Uint8Array {
+  return new TextEncoder().encode(s);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Generate a KeyPackage for `uid` and put it in the mock directory the way the
+ * server would. The test keeps the private half so the member can join for
+ * real — which is why this cannot go through publishKeyPackage(), whose
+ * private package stays inside the manager it belongs to.
+ */
+async function publishRawKeyPackage(
+  ds: MockDeliveryService,
+  uid: string,
+  cs: import('ts-mls').CiphersuiteImpl,
+  tsMls: TsMls,
+): Promise<RawKeyPackage> {
+  const kp = await tsMls.generateKeyPackage(
+    { credentialType: 'basic', identity: textBytes(uid) },
+    tsMls.defaultCapabilities(),
+    tsMls.defaultLifetime,
+    [],
+    cs,
+  );
+  const bytes = tsMls.encodeMlsMessage({
+    version: 'mls10',
+    wireformat: 'mls_key_package',
+    keyPackage: kp.publicPackage,
+  });
+  const list = ds.keyPackages.get(uid) ?? [];
+  list.push(tsMls.bytesToBase64(bytes));
+  ds.keyPackages.set(uid, list);
+  return kp;
+}
+
+/** Join a group from the Welcome the manager actually relayed through the DS. */
+async function joinFromWelcome(
+  ds: MockDeliveryService,
+  uid: string,
+  kp: RawKeyPackage,
+  cs: import('ts-mls').CiphersuiteImpl,
+  tsMls: TsMls,
+): Promise<TsClientState> {
+  const queue = ds.welcomeQueue.get(uid);
+  if (!queue?.length) throw new Error(`joinFromWelcome: no Welcome queued for ${uid}`);
+  const entry = queue.shift()!;
+  const decoded = tsMls.decodeMlsMessage(base64ToBytes(entry.welcome_b64), 0);
+  if (!decoded) throw new Error(`joinFromWelcome: undecodable Welcome for ${uid}`);
+  const [msg] = decoded;
+  if (msg.wireformat !== 'mls_welcome') {
+    throw new Error(`joinFromWelcome: expected mls_welcome for ${uid}, got ${msg.wireformat}`);
+  }
+  return tsMls.joinGroup(msg.welcome, kp.publicPackage, kp.privatePackage, tsMls.emptyPskIndex, cs);
+}
+
+/**
+ * Replay every commit the manager broadcast to the DS from `from` onward onto
+ * an independently-held ClientState. This is how a survivor's view of the
+ * group is built from what the manager actually sent, rather than from what
+ * the test believes it sent.
+ */
+async function drainCommits(
+  ds: MockDeliveryService,
+  roomId: string,
+  from: number,
+  state: TsClientState,
+  cs: import('ts-mls').CiphersuiteImpl,
+  tsMls: TsMls,
+): Promise<{ state: TsClientState; cursor: number }> {
+  const msgs = ds.mlsMessages.get(roomId) ?? [];
+  let current = state;
+  for (let i = from; i < msgs.length; i++) {
+    const decoded = tsMls.decodeMlsMessage(base64ToBytes(msgs[i]!), 0);
+    if (!decoded) throw new Error(`drainCommits: undecodable message at index ${i}`);
+    const [msg] = decoded;
+    const result = await tsMls.processMessage(
+      msg as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
+      current,
+      tsMls.emptyPskIndex,
+      tsMls.acceptAll,
+      cs,
+    );
+    if (result.kind !== 'newState') {
+      throw new Error(`drainCommits: expected newState at index ${i}, got ${result.kind}`);
+    }
+    current = result.newState;
+  }
+  return { state: current, cursor: msgs.length };
+}
+
+/**
+ * Sorted basic-credential identities of a group, read with ts-mls's own
+ * getGroupMembers. Deliberately NOT derived the way removeMember derives its
+ * leaf index — an oracle that repeats the computation under test cannot
+ * falsify it.
+ */
+async function memberIdentities(state: TsClientState): Promise<string[]> {
+  const { getGroupMembers } = await import('ts-mls/clientState.js');
+  const decoder = new TextDecoder();
+  return getGroupMembers(state)
+    .map((leaf: import('ts-mls').LeafNode) => {
+      const cred = leaf.credential;
+      if (cred.credentialType !== 'basic') return `<${cred.credentialType}>`;
+      return decoder.decode((cred as { identity: Uint8Array }).identity);
+    })
+    .sort();
 }
 
 // ---- Tests -----------------------------------------------------------------
@@ -237,250 +365,197 @@ describe('MlsProvider', () => {
     bobAead.dispose();
   });
 
-  it('forward secrecy: removed member cannot decrypt epoch N+1', async () => {
+  // ── Epoch-transition tests, driven through MLSGroupManager ────────────────
+  //
+  // These two tests exist because a suite that re-implements the provider's
+  // logic cannot falsify it. Both drive the REAL manager (createGroup /
+  // addMember / removeMember) and take their oracle from ts-mls's own
+  // getGroupMembers over a survivor's independently-maintained ClientState —
+  // never from index arithmetic copied out of the code under test.
+  //
+  // Mutation gates (each must turn the named test RED):
+  //   T1  mls-provider.ts:494-503 — replace the ratchetTree loop with
+  //       `getGroupMembers(state).findIndex(...)` (the pre-63244db code)
+  //       → "removeMember targets the correct leaf" fails on membership.
+  //   T2  mls-provider.ts:475 — insert `throw new Error('x')` as the first
+  //       statement of removeMember → both tests fail (proves the call site).
+  //   T3  mls-provider.ts:511 — replace `extraProposals: [{...remove...}]`
+  //       with `extraProposals: []` → "forward secrecy" fails, because the
+  //       removed member would still derive the new epoch.
+
+  it('removeMember targets the correct leaf across two sequential removals', async () => {
     const cs = await getCiphersuiteImpl();
     const tsMls = await import('ts-mls');
-    const { generateKeyPackage, createGroup, createCommit, joinGroup, processMessage, emptyPskIndex, acceptAll, defaultCapabilities, defaultLifetime } = tsMls;
-    const { bytesToBase64 } = tsMls;
+    const roomId = 'room-remove';
+
+    // Alice drives the group through the real provider + manager.
+    const alice = await createMlsProvider({
+      identityKey: await makeIdentityKey(),
+      credential: 'basic',
+      uid: 'alice',
+      keyPackageDirectoryUrl: KP_URL,
+      jwt: 'mock-jwt-alice',
+      stateStore: new InMemoryMlsStateStore(),
+    });
+    await alice.manager.publishKeyPackage();
+
+    // The other four exist only as KeyPackages in the directory. `observer`
+    // is the oracle: leaf 1, never removed, and — critically — BELOW every
+    // leaf the compacted-index bug could mis-target, so it survives in both
+    // the correct and the buggy world and can report on either.
+    const observerKp = await publishRawKeyPackage(ds, 'observer', cs, tsMls);
+    await publishRawKeyPackage(ds, 'bob', cs, tsMls);
+    await publishRawKeyPackage(ds, 'carol', cs, tsMls);
+    await publishRawKeyPackage(ds, 'mallory', cs, tsMls);
+
+    // alice=leaf0, observer=leaf1.
+    await alice.manager.createGroup(roomId, ['observer']);
+
+    // The observer joins from the Welcome the manager actually sent.
+    let observerState = await joinFromWelcome(ds, 'observer', observerKp, cs, tsMls);
+    // Skip the commit that added her — she is already at that epoch.
+    let cursor = ds.mlsMessages.get(roomId)?.length ?? 0;
+
+    // bob=leaf2, carol=leaf3, mallory=leaf4.
+    await alice.manager.addMember(roomId, 'bob');
+    await alice.manager.addMember(roomId, 'carol');
+    await alice.manager.addMember(roomId, 'mallory');
+
+    // First removal blanks leaf 2, leaving an interior hole. From here the
+    // compacted array index and the leaf index disagree.
+    await alice.manager.removeMember(roomId, 'bob');
+    // Correct: leaf 4. Compacted-index bug: getGroupMembers is
+    // [alice, observer, carol, mallory], so findIndex(mallory) === 3 and the
+    // commit removes leaf 3 — Carol.
+    await alice.manager.removeMember(roomId, 'mallory');
+
+    // Replay every broadcast commit onto the observer's own state.
+    const drained = await drainCommits(ds, roomId, cursor, observerState, cs, tsMls);
+    observerState = drained.state;
+    cursor = drained.cursor;
+
+    // Oracle: ts-mls's own getGroupMembers, read as identities. No nodeIndex
+    // arithmetic here — if the manager removed the wrong leaf, the wrong name
+    // is missing from this list.
+    expect(await memberIdentities(observerState)).toEqual(['alice', 'carol', 'observer']);
+
+    alice.dispose();
+  });
+
+  it('forward secrecy: a removed member cannot decrypt epoch N+1 from her own state', async () => {
+    const cs = await getCiphersuiteImpl();
+    const tsMls = await import('ts-mls');
     const { deriveMlsEpochMaterial } = await import('sframe-ratchet/mls');
     const { createMlsChatProvider } = await import('sframe-ratchet/chat/mls');
-    const makeCred = (uid: string) => ({
-      credentialType: 'basic' as const,
-      identity: new TextEncoder().encode(uid),
+    const roomId = 'room-fs';
+    const uidToPeerId = (uid: string): string =>
+      tsMls.bytesToBase64(new TextEncoder().encode(uid));
+
+    const alice = await createMlsProvider({
+      identityKey: await makeIdentityKey(),
+      credential: 'basic',
+      uid: 'alice',
+      keyPackageDirectoryUrl: KP_URL,
+      jwt: 'mock-jwt-alice',
+      stateStore: new InMemoryMlsStateStore(),
     });
-    const uidToPeerId = (uid: string) => bytesToBase64(new TextEncoder().encode(uid));
+    await alice.manager.publishKeyPackage();
 
-    // Create 3 members: Alice, Bob, Mallory.
-    const aliceKp = await generateKeyPackage(makeCred('alice'), defaultCapabilities(), defaultLifetime, [], cs);
-    const bobKp = await generateKeyPackage(makeCred('bob'), defaultCapabilities(), defaultLifetime, [], cs);
-    const malloryKp = await generateKeyPackage(makeCred('mallory'), defaultCapabilities(), defaultLifetime, [], cs);
+    const observerKp = await publishRawKeyPackage(ds, 'observer', cs, tsMls);
+    const malloryKp = await publishRawKeyPackage(ds, 'mallory', cs, tsMls);
 
-    const groupId = new TextEncoder().encode('fs-test-room');
+    await alice.manager.createGroup(roomId, ['observer']);
+    let observerState = await joinFromWelcome(ds, 'observer', observerKp, cs, tsMls);
+    let observerCursor = ds.mlsMessages.get(roomId)?.length ?? 0;
 
-    // Alice creates the group and adds Bob + Mallory.
-    let aliceState = await createGroup(groupId, aliceKp.publicPackage, aliceKp.privatePackage, [], cs);
+    await alice.manager.addMember(roomId, 'mallory');
+    let malloryState = await joinFromWelcome(ds, 'mallory', malloryKp, cs, tsMls);
+    const malloryCursor = ds.mlsMessages.get(roomId)?.length ?? 0;
 
-    // Add Bob
-    const addBob = await createCommit(
-      { state: aliceState, cipherSuite: cs },
-      { extraProposals: [{ proposalType: 'add', add: { keyPackage: bobKp.publicPackage } }], ratchetTreeExtension: true, wireAsPublicMessage: true },
-    );
-    aliceState = addBob.newState;
-    if (!addBob.welcome) throw new Error('no welcome for bob');
-    let bobState = await joinGroup(addBob.welcome, bobKp.publicPackage, bobKp.privatePackage, emptyPskIndex, cs);
+    const oDrain = await drainCommits(ds, roomId, observerCursor, observerState, cs, tsMls);
+    observerState = oDrain.state;
+    observerCursor = oDrain.cursor;
 
-    // Add Mallory
-    const addMallory = await createCommit(
-      { state: aliceState, cipherSuite: cs },
-      { extraProposals: [{ proposalType: 'add', add: { keyPackage: malloryKp.publicPackage } }], ratchetTreeExtension: true, wireAsPublicMessage: true },
-    );
-    aliceState = addMallory.newState;
-    if (!addMallory.welcome) throw new Error('no welcome for mallory');
-    let malloryState = await joinGroup(addMallory.welcome, malloryKp.publicPackage, malloryKp.privatePackage, emptyPskIndex, cs);
-
-    // Bob processes the addMallory commit to stay in sync.
-    let bobStateAfterMallory = await processMessage(
-      addMallory.commit as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
-      bobState, emptyPskIndex, acceptAll, cs,
-    );
-    if (bobStateAfterMallory.kind !== 'newState') throw new Error('bob: expected newState from addMallory commit');
-    bobState = bobStateAfterMallory.newState;
-
-    // All three are at the same epoch — derive and install AEAD keys.
-    const aliceMat0 = await deriveMlsEpochMaterial(aliceState, cs, 'AES_128_GCM_SHA256', groupId);
-    const bobMat0 = await deriveMlsEpochMaterial(bobState, cs, 'AES_128_GCM_SHA256', groupId);
-    const malloryMat0 = await deriveMlsEpochMaterial(malloryState, cs, 'AES_128_GCM_SHA256', groupId);
-    expect(aliceMat0.epoch).toBe(bobMat0.epoch);
-    expect(bobMat0.epoch).toBe(malloryMat0.epoch);
-
-    const aliceAead = createMlsChatProvider({ uidToPeerId });
-    const bobAead = createMlsChatProvider({ uidToPeerId });
+    // Mallory and the observer each run their own AEAD off their own state.
     const malloryAead = createMlsChatProvider({ uidToPeerId });
-    await aliceAead.setEpoch('room-fs', { epoch: aliceMat0.epoch, peerIndexMap: aliceMat0.peerIndexMap, chainKey: aliceMat0.chainKey });
-    await bobAead.setEpoch('room-fs', { epoch: bobMat0.epoch, peerIndexMap: bobMat0.peerIndexMap, chainKey: bobMat0.chainKey });
-    await malloryAead.setEpoch('room-fs', { epoch: malloryMat0.epoch, peerIndexMap: malloryMat0.peerIndexMap, chainKey: malloryMat0.chainKey });
+    const observerAead = createMlsChatProvider({ uidToPeerId });
+    const malloryGid = malloryState.groupContext.groupId;
+    const observerGid = observerState.groupContext.groupId;
 
-    // Mallory CAN decrypt at the current epoch.
-    const plaintext0 = new TextEncoder().encode('hello all three');
-    const sealed0 = await aliceAead.seal(plaintext0, { roomId: 'room-fs', senderUid: 'alice' });
-    const malloryOpened0 = await malloryAead.unseal(sealed0, { roomId: 'room-fs', senderUid: 'alice' });
-    expect(new TextDecoder().decode(malloryOpened0)).toBe('hello all three');
-
-    // ── Now remove Mallory ──
-    // Find Mallory's leaf index by iterating the ratchet tree (same logic as removeMember).
-    const tree = aliceState.ratchetTree;
-    const malloryIdentity = new TextEncoder().encode('mallory');
-    let malloryLeafIndex = -1;
-    for (let ni = 0; ni < tree.length; ni += 2) {
-      const node = tree[ni];
-      if (!node || node.nodeType !== 'leaf' || !node.leaf) continue;
-      const cred = node.leaf.credential;
-      if (cred.credentialType === 'basic' &&
-          new TextDecoder().decode((cred as { identity: Uint8Array }).identity) === 'mallory') {
-        malloryLeafIndex = Math.floor(ni / 2);
-        break;
-      }
-    }
-    expect(malloryLeafIndex).toBeGreaterThanOrEqual(0);
-
-    const removeMallory = await createCommit(
-      { state: aliceState, cipherSuite: cs },
-      { extraProposals: [{ proposalType: 'remove', remove: { removed: malloryLeafIndex } }], ratchetTreeExtension: true, wireAsPublicMessage: true },
-    );
-    aliceState = removeMallory.newState;
-
-    // Bob processes the remove commit.
-    const bobAfterRemove = await processMessage(
-      removeMallory.commit as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
-      bobState, emptyPskIndex, acceptAll, cs,
-    );
-    if (bobAfterRemove.kind !== 'newState') throw new Error('bob: expected newState from remove commit');
-    bobState = bobAfterRemove.newState;
-
-    // Alice and Bob derive the new epoch material.
-    const aliceMat1 = await deriveMlsEpochMaterial(aliceState, cs, 'AES_128_GCM_SHA256', groupId);
-    const bobMat1 = await deriveMlsEpochMaterial(bobState, cs, 'AES_128_GCM_SHA256', groupId);
-    expect(aliceMat1.epoch).toBe(bobMat1.epoch);
-    expect(aliceMat1.epoch).toBeGreaterThan(aliceMat0.epoch);
-
-    // Install the new epoch for Alice and Bob.
-    await aliceAead.setEpoch('room-fs', { epoch: aliceMat1.epoch, peerIndexMap: aliceMat1.peerIndexMap, chainKey: aliceMat1.chainKey });
-    await bobAead.setEpoch('room-fs', { epoch: bobMat1.epoch, peerIndexMap: bobMat1.peerIndexMap, chainKey: bobMat1.chainKey });
-
-    // Alice sends a message at the new epoch.
-    const plaintext1 = new TextEncoder().encode('mallory is gone');
-    const sealed1 = await aliceAead.seal(plaintext1, { roomId: 'room-fs', senderUid: 'alice' });
-
-    // Bob CAN decrypt the new epoch message.
-    const bobOpened1 = await bobAead.unseal(sealed1, { roomId: 'room-fs', senderUid: 'alice' });
-    expect(new TextDecoder().decode(bobOpened1)).toBe('mallory is gone');
-
-    // Mallory CANNOT decrypt the new epoch message — her AEAD still has the old epoch.
-    // The ChainKey advanced, so the old key can't decrypt the new ciphertext.
-    await expect(malloryAead.unseal(sealed1, { roomId: 'room-fs', senderUid: 'alice' })).rejects.toThrow();
-
-    aliceAead.dispose();
-    bobAead.dispose();
-    malloryAead.dispose();
-  });
-
-  it('removeMember: two sequential removals target the correct members (leaf index, not compacted)', async () => {
-    // This test would have caught the original removeMember bug where
-    // getGroupMembers() compacted array index was used instead of leaf index.
-    const cs = await getCiphersuiteImpl();
-    const tsMls = await import('ts-mls');
-    const { generateKeyPackage, createGroup, createCommit, joinGroup, processMessage, emptyPskIndex, acceptAll, defaultCapabilities, defaultLifetime } = tsMls;
-    const makeCred = (uid: string) => ({
-      credentialType: 'basic' as const,
-      identity: new TextEncoder().encode(uid),
+    const mMat0 = await deriveMlsEpochMaterial(malloryState, cs, 'AES_128_GCM_SHA256', malloryGid);
+    await malloryAead.setEpoch(roomId, {
+      epoch: mMat0.epoch, peerIndexMap: mMat0.peerIndexMap, chainKey: mMat0.chainKey,
     });
 
-    // Create 4 members: Alice (creator), Bob, Carol, Mallory.
-    const kps = {
-      alice: await generateKeyPackage(makeCred('alice'), defaultCapabilities(), defaultLifetime, [], cs),
-      bob: await generateKeyPackage(makeCred('bob'), defaultCapabilities(), defaultLifetime, [], cs),
-      carol: await generateKeyPackage(makeCred('carol'), defaultCapabilities(), defaultLifetime, [], cs),
-      mallory: await generateKeyPackage(makeCred('mallory'), defaultCapabilities(), defaultLifetime, [], cs),
-    };
+    // Baseline: while she is a member, Mallory reads Alice's traffic. Without
+    // this the negative below would prove nothing about the removal.
+    const sealedN = await alice.seal(textBytes('before removal').buffer as ArrayBuffer, {
+      roomId, senderUid: 'alice',
+    });
+    const readN = await malloryAead.unseal(new Uint8Array(sealedN), { roomId, senderUid: 'alice' });
+    expect(new TextDecoder().decode(readN)).toBe('before removal');
 
-    const groupId = new TextEncoder().encode('remove-test-room');
-    let aliceState = await createGroup(groupId, kps.alice.publicPackage, kps.alice.privatePackage, [], cs);
+    // ── Remove Mallory ──
+    await alice.manager.removeMember(roomId, 'mallory');
 
-    // Add Bob, Carol, Mallory sequentially.
-    const members = ['bob', 'carol', 'mallory'] as const;
-    const states: Record<string, import('ts-mls').ClientState> = {};
-    for (const uid of members) {
-      const addResult = await createCommit(
-        { state: aliceState, cipherSuite: cs },
-        { extraProposals: [{ proposalType: 'add', add: { keyPackage: kps[uid].publicPackage } }], ratchetTreeExtension: true, wireAsPublicMessage: true },
-      );
-      aliceState = addResult.newState;
-      if (!addResult.welcome) throw new Error(`no welcome for ${uid}`);
-      states[uid] = await joinGroup(addResult.welcome, kps[uid].publicPackage, kps[uid].privatePackage, emptyPskIndex, cs);
-      // Other existing members process the commit.
-      for (const otherUid of members) {
-        if (otherUid === uid || !states[otherUid]) continue;
-        const result = await processMessage(
-          addResult.commit as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
-          states[otherUid], emptyPskIndex, acceptAll, cs,
-        );
-        if (result.kind === 'newState') states[otherUid] = result.newState;
-      }
+    // Mallory plays the protocol honestly: she processes the very commit that
+    // removed her. She is not simply denied the key by the test.
+    try {
+      const mDrain = await drainCommits(ds, roomId, malloryCursor, malloryState, cs, tsMls);
+      malloryState = mDrain.state;
+    } catch {
+      // A removed member may be unable to process her own removal at all.
+      // Either way she must not reach the new epoch — asserted below.
     }
 
-    // Helper: find leaf index by uid via ratchet tree iteration.
-    const findLeafIndex = (state: import('ts-mls').ClientState, uid: string): number => {
-      const tree = state.ratchetTree;
-      const target = new TextEncoder().encode(uid);
-      for (let ni = 0; ni < tree.length; ni += 2) {
-        const node = tree[ni];
-        if (!node || node.nodeType !== 'leaf' || !node.leaf) continue;
-        const cred = node.leaf.credential;
-        if (cred.credentialType === 'basic') {
-          const identity = (cred as { identity: Uint8Array }).identity;
-          if (identity.length === target.length) {
-            let match = true;
-            for (let i = 0; i < identity.length; i++) {
-              if (identity[i] !== target[i]) { match = false; break; }
-            }
-            if (match) return Math.floor(ni / 2);
-          }
-        }
-      }
-      return -1;
-    };
+    const oDrain2 = await drainCommits(ds, roomId, observerCursor, observerState, cs, tsMls);
+    observerState = oDrain2.state;
 
-    // ── First removal: remove Bob (leaf index 1) ──
-    const bobLeafIndex = findLeafIndex(aliceState, 'bob');
-    expect(bobLeafIndex).toBe(1); // Bob is the first added member
+    const sealedN1 = await alice.seal(textBytes('after removal').buffer as ArrayBuffer, {
+      roomId, senderUid: 'alice',
+    });
 
-    const removeBob = await createCommit(
-      { state: aliceState, cipherSuite: cs },
-      { extraProposals: [{ proposalType: 'remove', remove: { removed: bobLeafIndex } }], ratchetTreeExtension: true, wireAsPublicMessage: true },
-    );
-    aliceState = removeBob.newState;
+    // CONTROL — a surviving member reads epoch N+1. This is what separates
+    // "Mallory is locked out" from "the ciphertext is broken for everyone".
+    const oMat1 = await deriveMlsEpochMaterial(observerState, cs, 'AES_128_GCM_SHA256', observerGid);
+    await observerAead.setEpoch(roomId, {
+      epoch: oMat1.epoch, peerIndexMap: oMat1.peerIndexMap, chainKey: oMat1.chainKey,
+    });
+    const observerRead = await observerAead.unseal(new Uint8Array(sealedN1), {
+      roomId, senderUid: 'alice',
+    });
+    expect(new TextDecoder().decode(observerRead)).toBe('after removal');
+    expect(oMat1.epoch).toBeGreaterThan(mMat0.epoch);
 
-    // Carol + Mallory process the remove.
-    for (const uid of ['carol', 'mallory'] as const) {
-      const result = await processMessage(
-        removeBob.commit as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
-        states[uid], emptyPskIndex, acceptAll, cs,
-      );
-      if (result.kind === 'newState') states[uid] = result.newState;
+    // THE PROPERTY — Mallory's best honest effort from her own state yields
+    // nothing: she either cannot derive epoch N+1 material, or derives the
+    // wrong key and the AEAD rejects the ciphertext.
+    let malloryRead: string | null = null;
+    try {
+      const mMat1 = await deriveMlsEpochMaterial(malloryState, cs, 'AES_128_GCM_SHA256', malloryGid);
+      await malloryAead.setEpoch(roomId, {
+        epoch: mMat1.epoch, peerIndexMap: mMat1.peerIndexMap, chainKey: mMat1.chainKey,
+      });
+      const opened = await malloryAead.unseal(new Uint8Array(sealedN1), {
+        roomId, senderUid: 'alice',
+      });
+      malloryRead = new TextDecoder().decode(opened);
+    } catch {
+      malloryRead = null;
     }
+    expect(malloryRead).toBeNull();
 
-    // Verify Bob is actually removed (not in the tree).
-    const bobStillInTree = findLeafIndex(aliceState, 'bob') !== -1;
-    expect(bobStillInTree).toBe(false);
-
-    // ── Second removal: remove Mallory ──
-    // This is where the bug would manifest: if we used the compacted array
-    // index from getGroupMembers, we'd target Carol (index 1 in the compacted
-    // array) instead of Mallory (leaf index 3 in the tree).
-    const malloryLeafIndex = findLeafIndex(aliceState, 'mallory');
-    expect(malloryLeafIndex).toBe(3); // Mallory was the third added member → leaf index 3
-
-    const removeMallory = await createCommit(
-      { state: aliceState, cipherSuite: cs },
-      { extraProposals: [{ proposalType: 'remove', remove: { removed: malloryLeafIndex } }], ratchetTreeExtension: true, wireAsPublicMessage: true },
-    );
-    aliceState = removeMallory.newState;
-
-    // Carol processes the remove.
-    const carolAfterRemove = await processMessage(
-      removeMallory.commit as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
-      states.carol, emptyPskIndex, acceptAll, cs,
-    );
-    if (carolAfterRemove.kind === 'newState') states.carol = carolAfterRemove.newState;
-
-    // Verify Mallory is removed and Carol is still present.
-    expect(findLeafIndex(aliceState, 'mallory')).toBe(-1);
-    expect(findLeafIndex(aliceState, 'carol')).not.toBe(-1);
-
-    // If the bug were present, Carol would have been removed instead of Mallory.
-    // This assertion proves the leaf index calculation is correct.
-    expect(findLeafIndex(states.carol, 'carol')).not.toBe(-1); // Carol still has her own state
-  });
+    malloryAead.dispose();
+    observerAead.dispose();
+    alice.dispose();
+    // 30s, not the 5s default, and the reason is measured rather than assumed:
+    // ts-mls burns ~5.7s inside processMessage when a REMOVED member is handed
+    // the rotation commit, before throwing RangeError('Invalid array length').
+    // The surviving member processes the same two commits in ~10ms. That cost
+    // is upstream (see the note in mls-provider.ts removeMember) and is tracked
+    // as a DoS concern for the SSE path, which feeds processMessage untrusted,
+    // server-relayed commits.
+  }, 30_000);
 });
 
 // ---- MLSStateStore tests ---------------------------------------------------
