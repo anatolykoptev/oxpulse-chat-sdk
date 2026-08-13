@@ -20,7 +20,19 @@ export type SDKChatErrorCode =
   /** Phase 2 SEC-CR-1695-02: client was poisoned by a prior crypto_mode_mismatch; recreate the instance. */
   | 'crypto_mode_poisoned'
   /** Phase 2 code-quality: sendText called before crypto_mode was discovered and e2ee is configured. */
-  | 'crypto_mode_undiscovered';
+  | 'crypto_mode_undiscovered'
+  /** MLS: Welcome message could not be decrypted or processed. */
+  | 'mls_welcome_decrypt_failed'
+  /** MLS: No KeyPackage found for the requested user. */
+  | 'mls_keypackage_not_found'
+  /** MLS: Commit validation failed (invalid proposal, conflicting epoch, etc.). */
+  | 'mls_commit_validation_failed'
+  /** MLS: Local epoch does not match the expected epoch (desync). */
+  | 'mls_epoch_desync'
+  /** MLS: Persisted ClientState is corrupted or incompatible. */
+  | 'mls_state_corruption'
+  /** MLS: IndexedDB is unavailable for state persistence (private browsing, SSR). */
+  | 'mls_idb_unavailable';
 
 /**
  * Typed error thrown by SDKChatClient for all API failures.
