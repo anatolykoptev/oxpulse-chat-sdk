@@ -93,7 +93,7 @@ export function xchachaOpen(key: Uint8Array, aad: Uint8Array, sealed: Uint8Array
 	// XOR-reduce: if any byte differs, the OR accumulates to non-zero.
 	let diff = 0;
 	for (let i = 0; i < COMMIT_LEN; i++) {
-		diff |= expectedCommit[i] ^ actualCommit[i];
+		diff |= expectedCommit[i]! ^ actualCommit[i]!;
 	}
 	zeroize(expectedCommit);
 	if (diff !== 0) {

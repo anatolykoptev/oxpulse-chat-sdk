@@ -1,6 +1,17 @@
 // X25519 primitives
 export { generateEphemeralKeypair, deriveSharedSecret } from './x25519.ts';
 
+// PQXDH hybrid key agreement (X25519 + ML-KEM-768) — post-quantum forward secrecy
+export {
+	mlKemKeygen,
+	hybridKemKeygen,
+	hybridKemEncaps,
+	hybridKemDecaps,
+	type MlKemKeyPair,
+	type HybridKemKeyPair,
+	type HybridKemEncapsulation,
+} from './kem.ts';
+
 // HKDF
 export { deriveKey, hkdfExtract, hkdfExpand } from './hkdf.ts';
 
