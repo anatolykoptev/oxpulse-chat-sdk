@@ -189,8 +189,9 @@ function toText(
  *
  * Walks `client.list()` forward from the beginning of the room (`afterSeq: 0`)
  * to exhaustion, following the `next` thunk on each page. Every row — including
- * rows that failed to unseal — is serialised. An `AbortSignal` is honoured
- * between pages.
+ * rows that failed to unseal — is serialised. An `AbortSignal` cancels the
+ * export both between pages and DURING one: it is forwarded to `list()` (#312),
+ * which hands it to the HTTP fetch and to the per-row unseal.
  *
  * @param client  Object satisfying {@link ExportClient} (e.g. {@link SDKChatClient}).
  * @param roomId  The room to export.

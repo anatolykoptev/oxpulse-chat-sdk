@@ -8,10 +8,23 @@
  * and neither must the ratchet's at-most-one-unseal-in-flight invariant
  * (SEC-CR-14-02) bend around the early reject.
  *
- * A regression guard rather than a mutation gate: it fails on a change that leaks
- * the caller's signal into subscriber tasks, or that lets the abandoned page run
+ * MUTATION GATE — must go RED:
+ *   client.ts #appendDecryptTask — delete the whole
+ *     `if (signal?.aborted === true) { deliver(mappedRow); return; }`
+ *   block. The cancelled scrollback row is then unsealed anyway and `started`
+ *   becomes [1, 10] instead of [1] (measured, round-2 review).
+ *
+ * It also guards two things no mutation of the current code produces, and those
+ * are regression guards rather than gates: a change that leaked the caller's
+ * signal into subscriber tasks, and one that let the abandoned page run
  * concurrently with the live stream. Both would be SILENT in production — the
  * subscriber would simply stop delivering, or the ratchet would desync.
+ *
+ * NOT gated, and deliberately not claimed as such: the `deliver(mappedRow)` call
+ * INSIDE that block. Replacing it with a bare `return` leaves every test green,
+ * because the early reject in `#unsealRowsOnChain` has already abandoned the
+ * `Promise.all` whose slot it resolves. It stays because the chain's
+ * exactly-once contract says so, not because anything here would catch its loss.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SDKChatClient } from '../client.js';
