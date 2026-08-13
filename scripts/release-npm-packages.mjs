@@ -105,8 +105,8 @@ const PACKAGES = [
 // period for a brand-new package, and remove it once its trusted publisher is
 // configured. See ADR-013 + release.yml header comment.
 const SOFT_PACKAGES_OIDC = new Set([
-	'@oxpulse/crypto-primitives',
 	// intro-protocol: trusted publisher works (published v0.2.1 via OIDC on 2026-08-13)
+	// crypto-primitives: trusted publisher configured 2026-08-13, v0.3.0 published
 	// url-contract: no new version since v0.2.0, trusted publisher status unknown
 	'@oxpulse/url-contract',
 ]);
