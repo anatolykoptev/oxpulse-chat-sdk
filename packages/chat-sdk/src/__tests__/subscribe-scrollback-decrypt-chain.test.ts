@@ -253,9 +253,9 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
     installFetchRouter(pageByRoom);
 
     const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
-    // No subscribe() → refCountOf(room) === 0 → the chain has no entry. Routing
-    // this through #decryptChain.append would no-op (drop every row); it MUST
-    // unseal directly off-chain and deliver.
+    // No subscribe() → refCountOf(room) === 0. The F7 fix (#185) temporarily
+    // acquires the chain entry so rows append onto it (instead of being
+    // dropped), then releases after the page drains.
     const res = await client.list(room, { limit: 50 });
     expect(res.items.map((r) => r.seq)).toEqual([5, 6, 7]);
     for (const r of res.items) {
@@ -511,5 +511,128 @@ describe('list() scrollback — per-room decrypt chain (SEC-CR-14-02)', () => {
     expect(provider.maxFor(room)).toBe(1);
     expect(r1.items.map((r) => r.seq)).toEqual([2]);
     expect(r2.items.map((r) => r.seq)).toEqual([3]);
+  });
+
+  // ── F7 regression (#185): the two residual off-chain windows ────────────
+  // Both were accepted residuals in the pre-#185 code: when refCount === 0
+  // at dispatch, list() unsealed directly off-chain, which could race a
+  // streamed unseal. The fix: ALWAYS route through the serial chain, even
+  // when refCount === 0 (temporarily acquire/release the chain entry).
+
+  it('F7-window-1: subscribe appearing AFTER a refCount-0 list() dispatch must NOT run its first streamed unseal concurrently', async () => {
+    const room = 'room-f7-w1';
+    const provider = makeRoomTrackingProvider();
+    const es = installMockEventSource();
+    const pageByRoom = new Map<string, unknown[]>();
+    installFetchRouter(pageByRoom);
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    // No subscribe() yet → refCount === 0. list() dispatches and the fix
+    // acquires the chain entry so the rows append onto it (instead of
+    // unsealing off-chain).
+    pageByRoom.set(room, [listRow(1)]);
+    const listPromise = client.list(room, { limit: 50 });
+    await flushMicrotasks();
+    // The scrollback unseal(1) is now in-flight on the chain (hung).
+    expect(provider.inFlightByRoom.get(room)).toBe(1);
+
+    // NOW a subscription appears — its first streamed frame must queue BEHIND
+    // the in-flight scrollback unseal, not run concurrently.
+    client.subscribe(room, { onMessage: vi.fn() });
+    await settleInitialSubscribe();
+    es.getLastController()!.emitMessage(frame(2));
+    await flushMicrotasks();
+
+    // INVARIANT: the streamed unseal(2) queued behind scrollback unseal(1) —
+    // never concurrent. Pre-fix (off-chain) this would be maxInFlight === 2.
+    expect(provider.maxFor(room)).toBeLessThanOrEqual(1);
+
+    // Drain both in order.
+    provider.release(room, 1);
+    await flushMicrotasks();
+    provider.release(room, 2);
+    await flushMicrotasks();
+
+    const res = await listPromise;
+    expect(res.items.map((r) => r.seq)).toEqual([1]);
+    expect(provider.maxFor(room)).toBe(1);
+  });
+
+  it('F7-window-2: list() during release() drain window must NOT run off-chain concurrently with the draining unseal', async () => {
+    const room = 'room-f7-w2';
+    const provider = makeRoomTrackingProvider();
+    const es = installMockEventSource();
+    const pageByRoom = new Map<string, unknown[]>();
+    installFetchRouter(pageByRoom);
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    const teardown = client.subscribe(room, { onMessage: vi.fn() });
+    await settleInitialSubscribe();
+
+    // Live seq=1 unseal starts and hangs — holds the chain.
+    es.getLastController()!.emitMessage(frame(1));
+    await flushMicrotasks();
+    expect(provider.inFlightByRoom.get(room)).toBe(1);
+
+    // Tear down: refCount → 0, but the entry lingers (deferred delete waits
+    // for the chain to drain). The hung unseal(1) is still draining.
+    teardown();
+    await flushMicrotasks();
+    // refCount is now 0 but the entry still exists (drain window).
+
+    // A list() dispatches during this drain window. Pre-fix: refCount === 0
+    // → off-chain → concurrent with the draining unseal(1). Post-fix: the
+    // list() acquires the chain entry (refCount 0 → acquire) and appends
+    // behind the draining unseal(1).
+    pageByRoom.set(room, [listRow(2)]);
+    const listPromise = client.list(room, { limit: 50 });
+    await flushMicrotasks();
+
+    // INVARIANT: scrollback unseal(2) queued behind the draining unseal(1) —
+    // never concurrent. Pre-fix (off-chain) this would be maxInFlight === 2.
+    expect(provider.maxFor(room)).toBeLessThanOrEqual(1);
+
+    // Drain both in order.
+    provider.release(room, 1);
+    await flushMicrotasks();
+    provider.release(room, 2);
+    await flushMicrotasks();
+
+    const res = await listPromise;
+    expect(res.items.map((r) => r.seq)).toEqual([2]);
+    expect(provider.maxFor(room)).toBe(1);
+  });
+
+  it('F7: one-shot list() with NO subscription now gets the abort-deadline + force-drain bound (no indefinite hang)', async () => {
+    // The off-chain path previously awaited provider.unseal with NO bound —
+    // a stuck row hung the fetch indefinitely. Now ALL fetched-row unseals
+    // go through #appendDecryptTask which has a 5s deadline + 5s force-drain.
+    const room = 'room-f7-timeout';
+    const provider = makeRoomTrackingProvider(false); // ignores abort, never settles
+    installMockEventSource();
+    const pageByRoom = new Map<string, unknown[]>();
+    pageByRoom.set(room, [listRow(1)]);
+    installFetchRouter(pageByRoom);
+
+    const client = new SDKChatClient({ baseUrl: BASE_URL, jwt: JWT, e2ee: { provider } });
+    // No subscribe() → refCount === 0. Pre-fix: list() hangs forever.
+    const listPromise = client.list(room, { limit: 50 });
+    await flushMicrotasks();
+    expect(provider.inFlightByRoom.get(room)).toBe(1);
+
+    // Advance past the 5s deadline — abort signalled but ignored.
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushMicrotasks();
+    // Advance past the force-drain bound (5s + 5s grace = 10s) → row bails.
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushMicrotasks();
+
+    const res = await listPromise;
+    expect(res.items.map((r) => r.seq)).toEqual([1]);
+    expect(res.items[0]!.unsealError).toBe('unknown');
+    expect(res.items[0]!.plaintext).toBeUndefined();
+
+    provider.releaseAll();
+    await flushMicrotasks();
   });
 });
