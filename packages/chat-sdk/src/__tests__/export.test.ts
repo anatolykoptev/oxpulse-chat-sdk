@@ -60,6 +60,27 @@ function failedRow(seq: number, unsealError: 'replay' | 'auth' | 'unknown' = 'au
 }
 
 /**
+ * Build a MessageRow that was never decrypted: no `plaintext` AND no
+ * `unsealError`. This is what `list()` delivers when the client has no crypto
+ * provider configured for the room — neither of the other two builders produces
+ * it, which is why the original three mutation guards could not detect it being
+ * mishandled.
+ */
+function neverDecryptedRow(seq: number): MessageRow {
+  return {
+    seq,
+    msgId: `msg-${seq}`,
+    senderUid: 'u1',
+    sealed: encSealed(seq),
+    createdAt: `2026-08-12T00:00:${String(seq).padStart(2, '0')}Z`,
+    threadRootMsgId: null,
+    productRef: null,
+    productMeta: null,
+    editCount: 0,
+  };
+}
+
+/**
  * Build a mock ExportClient from an array of pages (each page = MessageRow[]).
  * Pages are returned in order; the last page has hasNext=false. Intermediate
  * pages have hasNext=true and a `next` thunk that fetches the next page.
@@ -255,5 +276,48 @@ describe('exportRoomHistory — falsification guards', () => {
     expect(errorRow).toBeDefined();
     expect(errorRow!.body).toBeNull();
     expect(errorRow!.unsealError).toBe('auth');
+  });
+});
+
+// ── F4: a row that was never decrypted must not count as exported ────────────
+//
+// Regression guard for the defect found in review: `plaintext` undefined with
+// NO `unsealError` fell through to the decrypted branch, producing `body: null`
+// counted as EXPORTED. A caller checking `failedRows === 0` then reads a lossy
+// export as a clean one.
+//
+// F4 mutation: in export.ts `toExportRow`, drop the `row.plaintext === undefined`
+// arm of the `undecrypted` ternary (leaving only `row.unsealError`) -> this
+// suite must go RED on both the count and the row's `unsealError`.
+describe('exportRoomHistory — never-decrypted rows (F4)', () => {
+  it('counts a row with no plaintext and no unsealError as FAILED, not exported', async () => {
+    const client = mockClient([[decryptedRow(1, 'hello'), neverDecryptedRow(2)]]);
+
+    const result = await exportRoomHistory(client, 'r1');
+
+    expect(result.totalRows).toBe(2);
+    expect(result.exportedRows).toBe(1);
+    expect(result.failedRows).toBe(1);
+
+    const parsed = JSON.parse(result.content) as {
+      rows: Array<{ seq: number; body: string | null; unsealError?: string }>;
+      counts: { total: number; exported: number; failed: number };
+    };
+    expect(parsed.counts).toEqual({ total: 2, exported: 1, failed: 1 });
+
+    const row2 = parsed.rows.find((r) => r.seq === 2);
+    expect(row2).toBeDefined();
+    expect(row2?.body).toBeNull();
+    expect(row2?.unsealError).toBe('not-decrypted');
+  });
+
+  it('a whole room with no crypto provider reports zero exported, not a clean export', async () => {
+    const client = mockClient([[neverDecryptedRow(1), neverDecryptedRow(2), neverDecryptedRow(3)]]);
+
+    const result = await exportRoomHistory(client, 'r1');
+
+    expect(result.totalRows).toBe(3);
+    expect(result.exportedRows).toBe(0);
+    expect(result.failedRows).toBe(3);
   });
 });

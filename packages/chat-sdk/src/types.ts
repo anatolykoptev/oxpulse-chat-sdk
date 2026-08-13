@@ -690,8 +690,14 @@ export interface ExportMessageRow {
   ts: string;
   /** Decrypted plaintext body as a UTF-8 string. `null` when `unsealError` is set. */
   body: string | null;
-  /** Present when the row was received but unseal() failed. */
-  unsealError?: 'replay' | 'auth' | 'unknown';
+  /**
+   * Present when the row could not be exported as plaintext. Three sources, and
+   * all three count toward {@link ExportResult.failedRows}:
+   * `replay` / `auth` / `unknown` come from a failed `unseal()`; `not-decrypted`
+   * means the row arrived with no plaintext and no unseal attempt at all, which
+   * is what `list()` returns when no crypto provider is configured for the room.
+   */
+  unsealError?: 'replay' | 'auth' | 'unknown' | 'not-decrypted';
   /** UUID of the root message for thread replies. `null` for top-level messages. */
   threadRootMsgId?: string | null;
   /** RFC 3339 timestamp of the last edit, when present. */

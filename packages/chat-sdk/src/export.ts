@@ -59,14 +59,28 @@ function decodeBody(buf: ArrayBuffer | undefined): string | null {
  * `body` is `null`, `unsealError` is carried through. The row is NEVER skipped.
  */
 function toExportRow(row: MessageRow): ExportMessageRow {
-  if (row.unsealError !== undefined) {
+  // A row has THREE possible states, not two. Besides "decrypted" and "unseal
+  // failed", `list()` can deliver a row with `plaintext` undefined and NO
+  // `unsealError` — that is its no-crypto-provider path, where nothing ever
+  // attempted a decrypt. Folding that into the decrypted branch exports
+  // `body: null` and counts it as exported, so a client with no provider gets
+  // `{ total: N, exported: N, failed: 0 }` and N empty bodies: a lossy export
+  // indistinguishable from a complete one, which is the failure this export
+  // exists to make impossible.
+  const undecrypted: ExportMessageRow['unsealError'] =
+    row.unsealError !== undefined
+      ? row.unsealError
+      : row.plaintext === undefined
+        ? 'not-decrypted'
+        : undefined;
+  if (undecrypted !== undefined) {
     return {
       seq: row.seq,
       msgId: row.msgId,
       senderUid: row.senderUid,
       ts: row.createdAt,
       body: null,
-      unsealError: row.unsealError,
+      unsealError: undecrypted,
       threadRootMsgId: row.threadRootMsgId,
       editedAt: row.editedAt,
       deletedAt: row.deletedAt,
