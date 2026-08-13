@@ -106,7 +106,8 @@ const PACKAGES = [
 // configured. See ADR-013 + release.yml header comment.
 const SOFT_PACKAGES_OIDC = new Set([
 	'@oxpulse/crypto-primitives',
-	'@oxpulse/intro-protocol',
+	// intro-protocol: trusted publisher works (published v0.2.1 via OIDC on 2026-08-13)
+	// url-contract: no new version since v0.2.0, trusted publisher status unknown
 	'@oxpulse/url-contract',
 ]);
 
