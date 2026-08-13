@@ -186,6 +186,17 @@ export interface OpenMessageResult {
 	flags: number;
 }
 
+/**
+ * Unseals a pairwise-sealed envelope.
+ *
+ * @remarks
+ * **Replay protection is the caller's responsibility.** This library is
+ * stateless — it does not track seen `msgId`s. Without a `replayWindow`,
+ * the same envelope opens twice. Production callers MUST pass a
+ * `replayWindow` (see the `ReplayWindow` interface JSDoc for invariants).
+ * The crypto layer authenticates `msgId` (bound into the binding transcript
+ * digest), which enables caller-side replay detection, but does not perform it.
+ */
 export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageResult> {
 	// 1. Decode envelope (rejects v1 — hard break, ADR-8)
 	const env = decodeMessageEnvelope(args.envelopeBytes);
