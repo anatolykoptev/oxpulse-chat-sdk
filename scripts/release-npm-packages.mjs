@@ -59,6 +59,7 @@ import { spawnSync, execSync, execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { assertNoPublishConfigDirectory } from './assert-no-publishconfig-directory.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -413,6 +414,14 @@ try {
 }
 
 log(`repo_root=${REPO_ROOT}`);
+
+// Assert no workspace package declares publishConfig.directory — it makes
+// `pnpm pack` fail with ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND, which breaks
+// the release script (it packs before it publishes). Sibling to the
+// `workspace:`-string assertion in packAndAssert. Derives the package list
+// from pnpm-workspace.yaml, not from the PACKAGES array below, so a package
+// nobody added to that array is still checked. See issue #321.
+assertNoPublishConfigDirectory();
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
