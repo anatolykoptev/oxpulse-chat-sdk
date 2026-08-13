@@ -482,23 +482,33 @@ export class MLSGroupManager {
     }
 
     // Find the leaf index for the member by credential identity.
-    // getGroupMembers is not exported from the main index — import from clientState.
-    const { getGroupMembers } = await import('ts-mls/clientState.js');
+    // CRITICAL: we must iterate the ratchet tree directly and compute the
+    // leaf index as nodeIndex / 2 — NOT use getGroupMembers(), which returns
+    // a compacted array of non-blank leaves. After a removal that leaves an
+    // interior hole, the compacted array index diverges from the leaf index,
+    // causing removeMember to target the wrong member.
     const { createCommit } = tsMls;
-    const members = getGroupMembers(state);
     const targetIdentity = new TextEncoder().encode(uid);
-    const memberIndex = members.findIndex(
-      (m: LeafNode) => m.credential.credentialType === 'basic' &&
-        arrayEquals((m.credential as { identity: Uint8Array }).identity, targetIdentity),
-    );
-    if (memberIndex === -1) {
+    const tree = state.ratchetTree;
+    let leafIndex = -1;
+    for (let nodeIndex = 0; nodeIndex < tree.length; nodeIndex += 2) {
+      const node = tree[nodeIndex];
+      if (!node || node.nodeType !== 'leaf' || !node.leaf) continue;
+      const cred = node.leaf.credential;
+      if (cred.credentialType === 'basic' &&
+          arrayEquals((cred as { identity: Uint8Array }).identity, targetIdentity)) {
+        leafIndex = Math.floor(nodeIndex / 2);
+        break;
+      }
+    }
+    if (leafIndex === -1) {
       throw new SDKChatError('not_found', `MLSGroupManager.removeMember: member ${uid} not found in room ${roomId}`);
     }
 
     const commitResult = await createCommit(
       { state, cipherSuite: cs },
       {
-        extraProposals: [{ proposalType: 'remove', remove: { removed: memberIndex } }],
+        extraProposals: [{ proposalType: 'remove', remove: { removed: leafIndex } }],
         ratchetTreeExtension: true,
         wireAsPublicMessage: true,
       },

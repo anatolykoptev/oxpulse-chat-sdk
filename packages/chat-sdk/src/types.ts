@@ -170,7 +170,14 @@ export type E2EEOptions =
         keyPackageDirectoryUrl: string;
         /** Called after each epoch advance with the 32-byte authenticator. */
         onEpochAuthenticator?: (roomId: string, authenticator: Uint8Array) => void;
-        /** State store — defaults to IndexedDB-backed. */
+        /**
+         * State store for MLS ClientState. Defaults to IndexedDB-backed.
+         *
+         * ⚠️ v1 LIMITATION: the default store does NOT persist state yet
+         * (ts-mls lacks a complete serialize/deserialize API). MLS group
+         * state does NOT survive a page reload in v1. This option is
+         * exported for DI/testing — do not rely on it for persistence.
+         */
         stateStore?: import('./mls-state-store.js').MLSStateStore;
       };
     }

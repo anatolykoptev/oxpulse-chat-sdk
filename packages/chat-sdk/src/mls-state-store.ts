@@ -1,21 +1,27 @@
 /**
  * IndexedDB persistence for MLS ClientState.
  *
- * Stores serialized MLS ClientState per room so that MLS group membership
- * survives page reloads. Falls back to in-memory storage when IndexedDB
- * is unavailable (private browsing, SSR, legacy browsers).
+ * **⚠️ v1 LIMITATION — this store does NOT persist MLS state yet.**
  *
- * ## Schema
+ * ts-mls does not currently expose a public serialize/deserialize API for
+ * ClientState (`encodeGroupState` needs the ratchet tree separately, and
+ * `decodeGroupState` requires it as a parameter). Until ts-mls adds a
+ * complete serialization API, `saveClientState` stores a zero-length
+ * placeholder and `restoreAll` is a no-op. MLS group state does NOT
+ * survive a page reload in v1.
+ *
+ * The interface is exported so that:
+ * 1. Consumers can pass a custom `MLSStateStore` (e.g. for testing).
+ * 2. When ts-mls adds serialization, only the `#persistRoom` / `restoreAll`
+ *    internals need to change — the public API stays stable.
+ *
+ * If you need cross-reload MLS state today, this is not it. Do not rely on
+ * this store for state persistence until the limitation is lifted.
+ *
+ * ## Schema (when serialization is wired)
  * - Database: `oxpulse-mls-state`
  * - Object store: `client-states` (keyPath: `roomId`)
  * - Records: `{ roomId: string, state: Uint8Array, epoch: number, version: 1 }`
- *
- * ## Limitation
- * ts-mls does not currently expose a public serialize/deserialize API for
- * ClientState. Until it does, the state store stores placeholder bytes
- * and MLS state does NOT survive reload. This is a documented limitation —
- * the interface is in place so that when ts-mls adds serialization support,
- * only the serialize/deserialize calls need to be wired in.
  */
 
 import { get, set, del, keys, createStore, type UseStore } from 'idb-keyval';
