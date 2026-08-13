@@ -1,8 +1,11 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "_comment": "Mutation testing for @oxpulse/crypto-primitives — X25519/HKDF/AEAD/envelope/timing-safe. Non-blocking baseline (continue-on-error in CI). Raise break after baseline.",
+  "_comment": "Mutation testing for @oxpulse/crypto-primitives — X25519, HKDF, AES-GCM, XChaCha20, PQXDH, pairwise-seal, zeroize, replay. Crypto-critical: every mutant must be killed. Threshold break=80 (gate).",
   "packageManager": "pnpm",
   "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vitest.stryker.config.mjs"
+  },
   "plugins": ["@stryker-mutator/vitest-runner", "@stryker-mutator/typescript-checker"],
   "checkers": ["typescript"],
   "tsconfigFile": "tsconfig.json",
@@ -28,9 +31,9 @@
     "fileName": "reports/mutation/mutation.json"
   },
   "thresholds": {
-    "high": 80,
-    "low": 60,
-    "break": 0
+    "high": 90,
+    "low": 80,
+    "break": 80
   },
   "timeoutMS": 60000,
   "concurrency": 1,
