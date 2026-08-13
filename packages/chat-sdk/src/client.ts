@@ -2036,7 +2036,17 @@ export class SDKChatClient {
    * Body: { alias: string } — the alias IS the capability; no prior membership required.
    *
    * Scope: rooms:write:*.
-   * Status mapping: 403→forbidden, 404→not_found (alias malformed/absent/expired/wrong room).
+   *
+   * Status mapping — note the server's split, which is deliberate and not the obvious one:
+   *   404→not_found     the alias is MALFORMED only (fails the [A-Za-z0-9]{4,6} shape check).
+   *   403→forbidden     the alias is well-formed but absent, EXPIRED, for another room, or
+   *                     not a group-chat alias. The server returns 403 rather than 404 so the
+   *                     joiner learns the link is invalid for THIS room without learning
+   *                     whether it exists for some other room.
+   *   500/503→server_error  DB error during alias lookup or membership insert.
+   *
+   * So an EXPIRED link surfaces as `forbidden`, not `not_found` — a caller that branches on
+   * `not_found` to show "this link has expired" will never reach that branch.
    *
    * `joined: false` in the response means the caller was ALREADY a member — this is
    * the idempotent success path, NOT an error. The method returns it as-is.
