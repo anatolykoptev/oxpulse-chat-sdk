@@ -38,8 +38,7 @@
     "LICENSE"
   ],
   "publishConfig": {
-    "access": "public",
-    "directory": "dist"
+    "access": "public"
   },
   "scripts": {
     "prepare": "tsc --outDir dist",
