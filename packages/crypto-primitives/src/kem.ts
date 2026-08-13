@@ -6,12 +6,33 @@
  *
  *   1. X25519 ephemeral DH → classical shared secret (32 bytes)
  *   2. ML-KEM-768 encapsulation → post-quantum shared secret (32 bytes)
- *   3. Both shared secrets concatenated → HKDF-SHA256 → 32-byte key
+ *   3. Both shared secrets + F prefix → HKDF-SHA256 → 32-byte key
  *
  * The classical component provides forward secrecy (ephemeral X25519).
  * The post-quantum component provides resistance to harvest-now-decrypt-later
  * attacks from quantum adversaries. Both are required — compromising only
  * one does not break the hybrid key (FIPS 203 + RFC 7748).
+ *
+ * KDF construction (Signal PQXDH §3.3 with one deliberate deviation):
+ *   IKM  = F(32×0xFF) ‖ x25519_ss ‖ ml_kem_ss  (96 bytes)
+ *   salt = recipient_x25519_pub ‖ eph_pub ‖ ml_kem_ct  (transcript, 1152 bytes)
+ *   info = "oxp/pqxdh/v1"
+ *
+ * F prefix: 32 bytes of 0xFF prepended to IKM per Signal spec — ensures the
+ * first bits of HKDF input are never a valid X25519 scalar/point encoding.
+ *
+ * DELIBERATE DEVIATION from Signal spec: salt is the full transcript (public
+ * keys + ML-KEM ciphertext) instead of Signal's zero-filled salt. This provides
+ * stronger transcript binding — an attacker cannot substitute key shares
+ * (UKS defense) because the salt binds all public material. Signal relies on
+ * the info parameter for this; we bind in salt for defense-in-depth. The IKM
+ * F-prefix and shared-secret ordering match the spec exactly.
+ *
+ * Identity binding: this KEM is a PRIMITIVE — it does not bind sender/recipient
+ * identity keys. Identity binding is provided by the higher-level protocol
+ * (pairwise-seal.ts: AAD = "oxp/pw/v1" ‖ sender_ed25519_pub ‖ msg_id, plus
+ * Ed25519 signature verification). Callers MUST NOT use hybridKemEncaps/
+ * Decaps in isolation without an identity-binding layer.
  *
  * ML-KEM-768 key sizes (FIPS 203):
  *   - publicKey: 1184 bytes
@@ -27,6 +48,7 @@ import { hkdfExtract, hkdfExpand } from './hkdf.ts';
 import { zeroize } from './zeroize.ts';
 
 const PQXDH_INFO = new TextEncoder().encode('oxp/pqxdh/v1');
+const F_PREFIX = new Uint8Array(32).fill(0xff); // Signal PQXDH §3.3: F = 32×0xFF for X25519
 
 /**
  * ML-KEM-768 keypair (post-quantum prekey).
@@ -106,10 +128,10 @@ export function hybridKemEncaps(
 	const mlKemSecret = mlKemResult.sharedSecret;
 	const mlKemCiphertext = mlKemResult.cipherText;
 
-	// 3. Hybrid KDF: concat both secrets → HKDF
-	//    IKM = x25519_secret ‖ ml_kem_secret (64 bytes)
-	//    salt = recipient_x25519_pub ‖ eph_pub ‖ ml_kem_ct (32 + 32 + 1088 = 1152 bytes)
-	const ikm = concatBytes(x25519Secret, mlKemSecret);
+	// 3. Hybrid KDF: F prefix + both secrets → HKDF
+	//    IKM = F(32×0xFF) ‖ x25519_secret ‖ ml_kem_secret (96 bytes)
+	//    salt = recipient_x25519_pub ‖ eph_pub ‖ ml_kem_ct (transcript, 1152 bytes)
+	const ikm = concatBytes(F_PREFIX, x25519Secret, mlKemSecret);
 	const salt = concatBytes(recipientX25519Pub, ephPub, mlKemCiphertext);
 
 	const prk = hkdfExtract(ikm, salt);
@@ -154,7 +176,8 @@ export function hybridKemDecaps(
 	const mlKemSecret = ml_kem768.decapsulate(mlKemCiphertext, recipientMlKemPriv);
 
 	// 3. Hybrid KDF — must match encapsulate exactly
-	const ikm = concatBytes(x25519Secret, mlKemSecret);
+	//    IKM = F(32×0xFF) ‖ x25519_secret ‖ ml_kem_secret (96 bytes)
+	const ikm = concatBytes(F_PREFIX, x25519Secret, mlKemSecret);
 	const salt = concatBytes(recipientX25519Pub, ephX25519Pub, mlKemCiphertext);
 
 	const prk = hkdfExtract(ikm, salt);
