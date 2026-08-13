@@ -11,14 +11,22 @@
  * web-internal paths. GROUP_FIRST_LETTERS comes from constants.js.
  * Adds round-trip tests: generated codes pass parseRoomCode + verifyChecksum.
  *
- * Plan: docs/superpowers/plans/2026-05-22-url-contract-extract-plan.md W5.5
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { generateRoomCode, generateOpaqueRoomId, messengerSafeBase64Url16 } from '../generators.js';
+import {
+  generateRoomCode,
+  generateOpaqueRoomId,
+  messengerSafeBase64Url16,
+  generateShortId,
+  generateShortLinkAlias,
+  base64urlToBytes,
+} from '../generators.js';
 import { parseRoomCode } from '../parse.js';
 import { verifyChecksum } from '../checksum.js';
 import { GROUP_FIRST_LETTERS } from '../constants.js';
+import { tryAsShortId, tryAsShortLinkAlias } from '../brands.js';
 
 // 10-char typed code: 4 letters + '-' + 4 digits + 1 checksum char from [0-9A-HJ-NP-Z]
 const TYPED_SHAPE_RE = /^[A-HJ-NP-Z]{4}-[0-9]{4}[0-9A-HJ-NP-Z]$/;
@@ -360,5 +368,149 @@ describe('CSPRNG routing proof', () => {
       throw new Error('crypto.getRandomValues deliberately disabled');
     });
     expect(() => generateOpaqueRoomId()).toThrow('crypto.getRandomValues deliberately disabled');
+  });
+});
+
+// ── Fail-closed: messengerSafeBase64Url16 throws after 8 unsafe draws (#327) ─
+
+describe('messengerSafeBase64Url16 — fail-closed after 8 unsafe draws (#327)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('throws when all 8 draws produce messenger-unsafe output', () => {
+    // Mock crypto.getRandomValues to always produce bytes that encode to a
+    // string starting with '-' (unsafe per invariant 2). We craft 16 bytes
+    // whose base64url encoding starts with '-'. The simplest approach: mock
+    // bytesToBase64Url indirectly by making getRandomValues return a fixed
+    // pattern that always produces an unsafe string.
+    //
+    // base64url('-') at position 0 means the first 6 bits encode to index 62
+    // (the '-' char in base64url). 6 bits = 0b111110 = 62. So byte[0] = 0b11111011
+    // = 251 → first 6 bits = 251 >> 2 = 62 → '-'.
+    vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation((buf: Uint8Array) => {
+      // Fill with 251 so the first char is always '-' (unsafe).
+      buf.fill(251);
+      return buf;
+    });
+    expect(() => messengerSafeBase64Url16()).toThrow(/8 consecutive unsafe draws/);
+  });
+
+  it('the thrown error is observable (not a silent return of unsafe value)', () => {
+    vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation((buf: Uint8Array) => {
+      // Produce a string with leading '_' (unsafe): first 6 bits = 63 → '_'.
+      // 63 = 0b111111, byte[0] = 0b11111111 = 255 → first 6 bits = 255 >> 2 = 63.
+      buf.fill(255);
+      return buf;
+    });
+    let threw = false;
+    try {
+      messengerSafeBase64Url16();
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+});
+
+// ── generateShortId (#326) ───────────────────────────────────────────────────
+
+describe('generateShortId', () => {
+  it('default length is 12 and produces a valid ShortId', () => {
+    for (let i = 0; i < 100; i++) {
+      const id = generateShortId();
+      expect(id).toHaveLength(12);
+      expect(tryAsShortId(id)).not.toBeNull();
+    }
+  });
+
+  it('respects custom length (minimum 4)', () => {
+    for (const len of [4, 8, 16, 32]) {
+      const id = generateShortId(len);
+      expect(id).toHaveLength(len);
+      expect(tryAsShortId(id)).not.toBeNull();
+    }
+  });
+
+  it('throws RangeError for length < 4', () => {
+    expect(() => generateShortId(3)).toThrow(RangeError);
+    expect(() => generateShortId(0)).toThrow(RangeError);
+  });
+
+  it('produces only alphanumeric chars', () => {
+    for (let i = 0; i < 100; i++) {
+      expect(generateShortId()).toMatch(/^[A-Za-z0-9]+$/);
+    }
+  });
+
+  it('5000 draws are all unique', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 5000; i++) seen.add(generateShortId());
+    expect(seen.size).toBe(5000);
+  });
+});
+
+// ── generateShortLinkAlias (#326) ────────────────────────────────────────────
+
+describe('generateShortLinkAlias', () => {
+  it('default length is 5 and produces a valid ShortLinkAlias', () => {
+    for (let i = 0; i < 100; i++) {
+      const alias = generateShortLinkAlias();
+      expect(alias).toHaveLength(5);
+      expect(tryAsShortLinkAlias(alias)).not.toBeNull();
+    }
+  });
+
+  it('respects custom length in [4, 6]', () => {
+    for (const len of [4, 5, 6]) {
+      const alias = generateShortLinkAlias(len);
+      expect(alias).toHaveLength(len);
+      expect(tryAsShortLinkAlias(alias)).not.toBeNull();
+    }
+  });
+
+  it('throws RangeError for length < 4', () => {
+    expect(() => generateShortLinkAlias(3)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for length > 6', () => {
+    expect(() => generateShortLinkAlias(7)).toThrow(RangeError);
+  });
+
+  it('produces only alphanumeric chars', () => {
+    for (let i = 0; i < 100; i++) {
+      expect(generateShortLinkAlias()).toMatch(/^[A-Za-z0-9]+$/);
+    }
+  });
+});
+
+// ── base64urlToBytes round-trip (#328) ───────────────────────────────────────
+
+describe('base64urlToBytes — round-trip with generateOpaqueRoomId', () => {
+  it('base64urlToBytes(generateOpaqueRoomId()) returns 16 bytes', () => {
+    for (let i = 0; i < 100; i++) {
+      const id = generateOpaqueRoomId();
+      const bytes = base64urlToBytes(id);
+      expect(bytes).toHaveLength(16);
+    }
+  });
+
+  it('round-trip: encode(decode(s)) === s for random opaque IDs', () => {
+    // We can't call the private bytesToBase64Url, but we can verify that
+    // decoding an opaque ID and re-encoding via btoa produces the same string.
+    // This tests that base64urlToBytes is the correct inverse.
+    for (let i = 0; i < 100; i++) {
+      const id = generateOpaqueRoomId();
+      const bytes = base64urlToBytes(id);
+      // Re-encode manually using the same btoa pattern
+      const chars: string[] = [];
+      for (let j = 0; j < bytes.length; j++) chars.push(String.fromCharCode(bytes[j]!));
+      const reencoded = btoa(chars.join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      expect(reencoded).toBe(id);
+    }
+  });
+
+  it('throws on invalid base64', () => {
+    expect(() => base64urlToBytes('!!!not-valid-base64!!!')).toThrow();
   });
 });

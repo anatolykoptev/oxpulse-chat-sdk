@@ -10,7 +10,7 @@
  * isValidRoomId performs full semantic validation (structure + Luhn for 10-char).
  * kindFromFirstLetter maps letter → 'group' | null.
  *
- * Plan: docs/superpowers/plans/2026-05-22-url-contract-extract-plan.md W5.4
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  * Port: web/src/lib/routes/shortlink/__tests__/canonical.test.ts
  * Deviation: no encodeCanonicalShort/decodeCanonicalShort/generateRoomCode here
  * (W5.5). Uses appendChecksum from ./checksum.js for round-trip helpers.

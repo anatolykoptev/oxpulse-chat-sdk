@@ -12,8 +12,7 @@
  *   isValidRoomId()      — full semantic check including Luhn verification for
  *                          10-char typed codes. Available from ./parse.js (W5.4).
  *
- * Plan: docs/superpowers/plans/2026-05-22-url-contract-extract-plan.md W5.2
- * ADR:  docs/adr/0005-heterogeneous-room-urls.md
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
 import { BARE_LENGTH, TYPED_LENGTH, OPAQUE_LENGTH } from './constants.js';

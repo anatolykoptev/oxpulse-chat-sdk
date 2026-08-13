@@ -25,6 +25,7 @@
   "description": "Heterogeneous room URL contract — generators, parsers, brands (ADR-0005).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -47,6 +48,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "vitest bench",
     "stryker": "stryker run"
   },
   "devDependencies": {
@@ -54,10 +56,11 @@
     "@stryker-mutator/typescript-checker": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
     "@types/node": "^22",
+    "fast-check": "^4.9.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

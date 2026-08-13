@@ -15,9 +15,7 @@
  * Invariant: all inputs with an 'r:' prefix are rejected (mirrors Rust
  * validate_bare_room_id_no_opaque — no opaque-ID-like strings accepted as bare codes).
  *
- * Spec: docs/superpowers/specs/2026-05-20-heterogeneous-urls-design.md
- * ADR:  docs/adr/0005-heterogeneous-room-urls.md
- * Prev: docs/adr/0004-type-in-room-code-encoding.md (superseded)
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  *
  * Port: web/src/lib/routes/shortlink/canonical.ts (W5.4).
  * Deviation: imports from ./constants.js + ./checksum.js + ./brands.js instead

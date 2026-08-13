@@ -29,7 +29,7 @@
  * Input format for appendChecksum: 'AAAA-0000' (9 chars).
  * Output format: 'AAAA-0000C' (10 chars, C is the checksum char).
  *
- * Spec: docs/superpowers/specs/2026-05-19-routes-module-upgrade-design.md §shortlink/
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  * Decision Q6: checksum lands before type-in-code redesign; validator stays
  * permissive of bare AAAA-0000 during transition.
  *

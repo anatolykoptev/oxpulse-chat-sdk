@@ -11,3 +11,4 @@ export * from './checksum.js';
 export * from './parse.js';
 export * from './generators.js';
 export * from './room-ns.js';
+export * from './url.js';

@@ -26,7 +26,7 @@
  * exists — keep it until the `prefixed_r` join metric drains to zero over a full
  * SW-cache cycle (docs/DEBT.md D8).
  *
- * ADR-0005: docs/adr/0005-heterogeneous-room-urls.md
+ * ADR-0005: docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
 import { describe, it, expect } from 'vitest';

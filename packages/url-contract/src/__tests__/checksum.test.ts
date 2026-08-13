@@ -4,8 +4,7 @@
  * Alphabet: '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ' (34 chars; no I, O)
  * The '-' separator is positional and excluded from the alphabet.
  *
- * Spec: docs/superpowers/specs/2026-05-19-routes-module-upgrade-design.md §shortlink/
- * Plan: docs/superpowers/plans/2026-05-22-url-contract-extract-plan.md W5.3
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  *
  * Port: verbatim from web/src/lib/routes/shortlink/__tests__/checksum.test.ts,
  * plus 100 deterministic fixture cases (W5.3 addition).

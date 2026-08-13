@@ -6,9 +6,7 @@
  * package in W5.7 once the full extract is wired. Until then these values are
  * intentionally duplicated in web/ — the duplication is tracked and intentional.
  *
- * Spec: docs/superpowers/specs/2026-05-20-heterogeneous-urls-design.md
- * ADR:  docs/adr/0005-heterogeneous-room-urls.md
- * Plan: docs/superpowers/plans/2026-05-22-url-contract-extract-plan.md W5.2
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
 /**

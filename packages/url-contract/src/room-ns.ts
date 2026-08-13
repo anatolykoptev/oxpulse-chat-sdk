@@ -33,7 +33,7 @@
  * drains to zero over a full SW-cache cycle (stale clients fully gone). Tracked
  * in docs/DEBT.md (D8).
  *
- * Spec: docs/adr/0005-heterogeneous-room-urls.md
+ * Spec: docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
 /**
