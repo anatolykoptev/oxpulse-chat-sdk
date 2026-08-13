@@ -3,7 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { generateEphemeralKeypair, deriveSharedSecret } from './x25519.ts';
 import { deriveKey } from './hkdf.ts';
 import { aesGcmSeal, aesGcmOpen } from './aead.ts';
-import { encodeMessageEnvelope, decodeMessageEnvelope, type MessageEnvelopeV1 } from './envelope.ts';
+import { encodeMessageEnvelope, decodeMessageEnvelope, type MessageEnvelopeV2 } from './envelope.ts';
 import { derivePeerIdTarget } from './peer-id.ts';
 import { zeroize } from './zeroize.ts';
 import { timingSafeEqual } from './timing-safe.ts';
@@ -11,18 +11,60 @@ import { timingSafeEqual } from './timing-safe.ts';
 const AAD_PREFIX = new TextEncoder().encode('oxp/pw/v1'); // 9 bytes
 const HKDF_INFO = new TextEncoder().encode('oxp/pairwise/v1'); // 15 bytes
 
+// Binding transcript field sizes (all fixed — ADR-2: no length prefixes).
+const BINDING_VERSION_LEN = 1;
+const BINDING_FLAGS_LEN = 1;
+const BINDING_MSGID_LEN = 16;
+const BINDING_RECIPIENT_ADDR_LEN = 8;
+const BINDING_SENDER_PUB_LEN = 32;
+const BINDING_TRANSCRIPT_LEN =
+	AAD_PREFIX.length +
+	BINDING_VERSION_LEN +
+	BINDING_FLAGS_LEN +
+	BINDING_MSGID_LEN +
+	BINDING_RECIPIENT_ADDR_LEN +
+	BINDING_SENDER_PUB_LEN; // 9 + 1 + 1 + 16 + 8 + 32 = 67 bytes
+
 /**
- * Builds the bytes signed by the sender: SHA-256(IC) ‖ msg_id(16) ‖ recipient_x25519_pub(32).
- * Single source of truth for the sig-bytes layout (decision #11).
- * Internal — not exported from the barrel.
+ * Computes the SHA-256 binding transcript digest — the single anchor that
+ * authenticates ALL envelope metadata. Bound into BOTH the AEAD AAD and the
+ * Ed25519 signed bytes (ADR-1, ADR-6).
+ *
+ * Transcript (fixed-offset concatenation, ADR-2):
+ *   digest = SHA-256( AAD_PREFIX[9] ‖ version[1] ‖ flags[1]
+ *                      ‖ msgId[16] ‖ recipientAddr[8] ‖ senderEd25519PubKey[32] )
+ *          = SHA-256 over 67 bytes
+ *
+ * AAD_PREFIX is included directly (ADR-3) — it is the actual constant used
+ * in AEAD operations, so binding it is strictly stronger than a synthetic
+ * domain tag. ephPub and nonce are intentionally omitted (ADR-10): both are
+ * inside IC, sha256(IC) is in signedBytes, so they are authenticated by the
+ * Ed25519 signature — an attacker cannot strip them without breaking the IC
+ * hash.
+ *
+ * Internal — not exported from the barrel (ADR-12). Named function (not
+ * inlined) for Stryker testability + conceptual continuity with the v1
+ * transcript pattern (`buildSignedBytes`).
  */
-function buildSignedBytes(ic: Uint8Array, msgId: Uint8Array, recipientPub: Uint8Array): Uint8Array {
-	const icHash = sha256(ic);
-	const signedBytes = new Uint8Array(icHash.length + 16 + 32);
-	signedBytes.set(icHash, 0);
-	signedBytes.set(msgId, icHash.length);
-	signedBytes.set(recipientPub, icHash.length + 16);
-	return signedBytes;
+function computeBindingDigest(
+	version: number,
+	flags: number,
+	msgId: Uint8Array,
+	recipientAddr: Uint8Array,
+	senderEd25519PubKey: Uint8Array,
+): Uint8Array {
+	const transcript = new Uint8Array(BINDING_TRANSCRIPT_LEN);
+	let offset = 0;
+	transcript.set(AAD_PREFIX, offset);
+	offset += AAD_PREFIX.length;
+	transcript[offset++] = version;
+	transcript[offset++] = flags;
+	transcript.set(msgId, offset);
+	offset += BINDING_MSGID_LEN;
+	transcript.set(recipientAddr, offset);
+	offset += BINDING_RECIPIENT_ADDR_LEN;
+	transcript.set(senderEd25519PubKey, offset);
+	return sha256(transcript);
 }
 
 export interface SealMessageArgs {
@@ -46,31 +88,52 @@ export async function sealMessage(args: SealMessageArgs): Promise<Uint8Array> {
 	const kdfKey = deriveKey(ss, salt, HKDF_INFO, 32);
 
 	try {
-		// 3. AAD = "oxp/pw/v1" ‖ sender_ed25519_pub(32) ‖ msg_id(16) = 57 bytes
-		const aad = new Uint8Array(AAD_PREFIX.length + 32 + 16);
+		// 3. recipientAddr = SHA-256(recipient_x25519_pub)[0..8]
+		const recipientAddr = derivePeerIdTarget(args.recipientX25519Pub);
+
+		// 4. Binding transcript digest — authenticates ALL envelope metadata (ADR-6).
+		//    version=0x02 is the v2 wire version; binding it prevents a v1/v2
+		//    downgrade where an attacker rewrites the version byte.
+		const bindingDigest = computeBindingDigest(
+			0x02,
+			args.flags ?? 0,
+			args.msgId,
+			recipientAddr,
+			args.senderEd25519PubKey,
+		);
+
+		// 5. AAD = AAD_PREFIX[9] ‖ senderEd25519PubKey[32] ‖ bindingDigest[32] = 73 bytes
+		//    (msgId REMOVED from AAD — now inside bindingDigest)
+		const aad = new Uint8Array(AAD_PREFIX.length + 32 + bindingDigest.length);
 		aad.set(AAD_PREFIX, 0);
 		aad.set(args.senderEd25519PubKey, AAD_PREFIX.length);
-		aad.set(args.msgId, AAD_PREFIX.length + 32);
+		aad.set(bindingDigest, AAD_PREFIX.length + 32);
 
-		// 4. AEAD seal
+		// 6. AEAD seal
 		const nonce = crypto.getRandomValues(new Uint8Array(12));
 		const ctAndTag = await aesGcmSeal(kdfKey, nonce, aad, args.plaintext);
 
-		// 5. Assemble IC = eph_pub[32] ‖ nonce[12] ‖ ct_and_tag[…]
+		// 7. Assemble IC = eph_pub[32] ‖ nonce[12] ‖ ct_and_tag[…]
 		const ic = new Uint8Array(32 + 12 + ctAndTag.length);
 		ic.set(ephPub, 0);
 		ic.set(nonce, 32);
 		ic.set(ctAndTag, 44);
 
-		// 6. Sender signature — covers SHA-256(IC) ‖ msg_id ‖ recipient_x25519_pub (decision #11)
-		const signedBytes = buildSignedBytes(ic, args.msgId, args.recipientX25519Pub);
+		// 8. Sender signature — covers bindingDigest ‖ sha256(IC) (ADR-6).
+		//    sha256(IC) authenticates ephPub + nonce + ct_and_tag; bindingDigest
+		//    authenticates all envelope metadata. Together: AEAD success + Ed25519
+		//    success proves every transcript field is authentic.
+		const icHash = sha256(ic);
+		const signedBytes = new Uint8Array(bindingDigest.length + icHash.length);
+		signedBytes.set(bindingDigest, 0);
+		signedBytes.set(icHash, bindingDigest.length);
 		const senderSig = ed25519.sign(signedBytes, args.senderEd25519PrivKey);
 
-		// 7. Assemble envelope
-		const env: MessageEnvelopeV1 = {
+		// 9. Assemble envelope
+		const env: MessageEnvelopeV2 = {
 			flags: args.flags ?? 0,
 			msgId: args.msgId,
-			recipientAddr: derivePeerIdTarget(args.recipientX25519Pub),
+			recipientAddr,
 			senderSig,
 			innerCiphertext: ic,
 		};
@@ -111,7 +174,7 @@ export interface ReplayWindow {
 export interface OpenMessageArgs {
 	envelopeBytes: Uint8Array;
 	recipientX25519Priv: Uint8Array; // 32 bytes
-	recipientX25519Pub: Uint8Array; // 32 bytes — for HKDF salt + sig verify
+	recipientX25519Pub: Uint8Array; // 32 bytes — for HKDF salt + recipientAddr cross-check
 	expectedSenderEd25519Pub: Uint8Array; // caller looks up from contact cache
 	/** Optional replay window — if provided, replayed msgIds are rejected. */
 	replayWindow?: ReplayWindow;
@@ -124,10 +187,25 @@ export interface OpenMessageResult {
 }
 
 export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageResult> {
-	// 1. Decode envelope
+	// 1. Decode envelope (rejects v1 — hard break, ADR-8)
 	const env = decodeMessageEnvelope(args.envelopeBytes);
 
-	// 2. Parse IC fields
+	// 2. recipientAddr cross-check (ADR-11) — fail-fast BEFORE sig verification.
+	//    Ensures the message was sealed for THIS recipient. Replaces v1's direct
+	//    recipientX25519Pub in signedBytes (now inside bindingDigest). Uses
+	//    timingSafeEqual (XOR-reduce-OR); early return on length mismatch is safe
+	//    (length is non-secret).
+	//    TIMING: placement before sig verify creates a timing oracle (attacker
+	//    can distinguish recipientAddr match vs mismatch by response time).
+	//    This is accepted: recipientAddr is NOT secret (it's on the wire), and
+	//    fail-fast avoids wasting an expensive sig verify on messages not for
+	//    this recipient. Same low-severity trade-off as ReplayWindow.has() below.
+	const expectedRecipientAddr = derivePeerIdTarget(args.recipientX25519Pub);
+	if (!timingSafeEqual(expectedRecipientAddr, env.recipientAddr)) {
+		throw new Error('crypto-primitives/pairwise: recipient address mismatch');
+	}
+
+	// 3. Parse IC fields
 	if (env.innerCiphertext.byteLength < 32 + 12 + 16) {
 		throw new Error('crypto-primitives/pairwise: inner ciphertext too short');
 	}
@@ -135,21 +213,34 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	const nonce = env.innerCiphertext.subarray(32, 44);
 	const ctAndTag = env.innerCiphertext.subarray(44);
 
-	// 3. Verify sender signature BEFORE AEAD (fail-fast, decision #11).
-	//    Sig covers: SHA-256(IC) ‖ msg_id ‖ recipient_x25519_pub
+	// 4. Recompute binding digest from wire claims + caller-provided sender key.
+	//    If the caller passed the wrong key, or any wire field was tampered,
+	//    bindingDigest mismatch → sig verification fails. This IS the trust
+	//    check (ADR-5): caller authenticates crypto first (sig+AEAD), then
+	//    applies trust policy (contact-cache lookup) post-open.
+	const bindingDigest = computeBindingDigest(
+		0x02,
+		env.flags,
+		env.msgId,
+		env.recipientAddr,
+		args.expectedSenderEd25519Pub,
+	);
+
+	// 5. Verify sender signature — covers bindingDigest ‖ sha256(IC) (ADR-6).
 	//    zip215:false aligns with server dalek::verify_strict (RFC 8032 strict).
+	const icHash = sha256(env.innerCiphertext);
+	const signedBytes = new Uint8Array(bindingDigest.length + icHash.length);
+	signedBytes.set(bindingDigest, 0);
+	signedBytes.set(icHash, bindingDigest.length);
 	if (
-		!ed25519.verify(
-			env.senderSig,
-			buildSignedBytes(env.innerCiphertext, env.msgId, args.recipientX25519Pub),
-			args.expectedSenderEd25519Pub,
-			{ zip215: false },
-		)
+		!ed25519.verify(env.senderSig, signedBytes, args.expectedSenderEd25519Pub, {
+			zip215: false,
+		})
 	) {
 		throw new Error('crypto-primitives/pairwise: sender signature invalid');
 	}
 
-	// 4. Replay check — AFTER sig verify, BEFORE AEAD.
+	// 6. Replay check — AFTER sig verify, BEFORE AEAD.
 	//    Checked after sig to avoid timing oracle on replay state (an attacker
 	//    could distinguish "replayed" from "not replayed" by response time if
 	//    the check preceded the expensive sig verify).
@@ -157,7 +248,7 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 		throw new Error('crypto-primitives/pairwise: replayed message (msgId already seen)');
 	}
 
-	// 5. DH + HKDF
+	// 7. DH + HKDF
 	const ss = deriveSharedSecret(args.recipientX25519Priv, ephPub);
 	const salt = new Uint8Array(64);
 	salt.set(args.recipientX25519Pub, 0);
@@ -165,13 +256,13 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	const kdfKey = deriveKey(ss, salt, HKDF_INFO, 32);
 
 	try {
-		// 6. AAD = "oxp/pw/v1" ‖ sender_ed25519_pub(32) ‖ msg_id(16)
-		const aad = new Uint8Array(AAD_PREFIX.length + 32 + 16);
+		// 8. AAD = AAD_PREFIX[9] ‖ senderEd25519PubKey[32] ‖ bindingDigest[32]
+		const aad = new Uint8Array(AAD_PREFIX.length + 32 + bindingDigest.length);
 		aad.set(AAD_PREFIX, 0);
 		aad.set(args.expectedSenderEd25519Pub, AAD_PREFIX.length);
-		aad.set(env.msgId, AAD_PREFIX.length + 32);
+		aad.set(bindingDigest, AAD_PREFIX.length + 32);
 
-		// 7. AEAD open
+		// 9. AEAD open
 		let plaintext: Uint8Array;
 		try {
 			plaintext = await aesGcmOpen(kdfKey, nonce, aad, ctAndTag);
@@ -179,8 +270,8 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 			throw new Error('crypto-primitives/pairwise: AEAD authentication failed');
 		}
 
-		// 8. Record msgId in replay window — ONLY after successful AEAD open
-		//    (e2ee-invariants §5: advance window only after successful unseal).
+		// 10. Record msgId in replay window — ONLY after successful AEAD open
+		//     (e2ee-invariants §5: advance window only after successful unseal).
 		if (args.replayWindow) {
 			args.replayWindow.add(env.msgId);
 		}
