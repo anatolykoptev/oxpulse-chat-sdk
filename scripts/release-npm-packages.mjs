@@ -104,7 +104,7 @@ const PACKAGES = [
 // failure is now fatal. Add a name here ONLY as a temporary bootstrap grace
 // period for a brand-new package, and remove it once its trusted publisher is
 // configured. See ADR-013 + release.yml header comment.
-const SOFT_PACKAGES_OIDC = new Set([]);
+const SOFT_PACKAGES_OIDC = new Set(['@oxpulse/crypto-primitives']);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
