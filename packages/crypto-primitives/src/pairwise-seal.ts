@@ -109,8 +109,16 @@ export async function sealMessage(args: SealMessageArgs): Promise<Uint8Array> {
 		aad.set(args.senderEd25519PubKey, AAD_PREFIX.length);
 		aad.set(bindingDigest, AAD_PREFIX.length + 32);
 
-		// 6. AEAD seal
-		const nonce = crypto.getRandomValues(new Uint8Array(12));
+		// 6. AEAD seal — generate nonce via CSPRNG.
+		//    12 bytes is well under the 65536-byte QuotaExceededError threshold,
+		//    but the WebCrypto spec allows implementations to throw on CSPRNG
+		//    failure (entropy source exhaustion in constrained environments).
+		let nonce: Uint8Array;
+		try {
+			nonce = crypto.getRandomValues(new Uint8Array(12));
+		} catch {
+			throw new Error('crypto-primitives/pairwise: CSPRNG failure — cannot generate nonce');
+		}
 		const ctAndTag = await aesGcmSeal(kdfKey, nonce, aad, args.plaintext);
 
 		// 7. Assemble IC = eph_pub[32] ‖ nonce[12] ‖ ct_and_tag[…]
