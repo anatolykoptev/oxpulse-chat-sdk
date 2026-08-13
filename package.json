@@ -10,6 +10,7 @@
     "test": "pnpm -r --filter './packages/*' run test",
     "typecheck": "pnpm -r --filter './packages/*' run typecheck",
     "test:contract": "vitest run --config e2e/vitest.config.ts",
+    "lint:manifests": "node scripts/assert-no-publishconfig-directory.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "node scripts/release-npm-packages.mjs",

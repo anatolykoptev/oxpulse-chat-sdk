@@ -49,6 +49,14 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Guard: no workspace package may declare publishConfig.directory.
+      # It makes `pnpm pack` fail with ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND,
+      # breaking the release script. Derives the package list from
+      # pnpm-workspace.yaml — not a hand-written array — so a new package
+      # nobody registered is still checked. See issue #321.
+      - name: Assert no publishConfig.directory
+        run: pnpm lint:manifests
+
       # build:cdn is NOT part of the root build script, but
       # chat-widget/src/__tests__/cdn-bundle.test.ts asserts against the
       # dist-cdn/index.js artifact — provision it (never skip the test).
