@@ -563,6 +563,42 @@ export interface UpdateRoomArgs {
   archived?: boolean;
 }
 
+// ── #292: Share-link mint + join-by-link ──────────────────────────────────────
+
+/**
+ * #292: A minted share link for a room.
+ *
+ * Returned by `mintShareLink()`. Wire fields (snake_case on the server) are
+ * mapped to camelCase here, following the Room/Member convention.
+ *
+ * `url` is RELATIVE (e.g. `"/s/xA3kP"`) — the caller resolves it against the
+ * server base URL or their own share-link landing route.
+ */
+export interface ShareLink {
+  /** Short alias / capability string (e.g. `"xA3kP"`). */
+  alias: string;
+  /** The room this link grants access to. */
+  roomId: string;
+  /** RFC 3339 expiry timestamp. */
+  expiresAt: string;
+  /** Relative URL path (e.g. `"/s/xA3kP"`). */
+  url: string;
+}
+
+/**
+ * #292: Result of joining a room by share link.
+ *
+ * Returned by `joinByLink()`. `joined: false` means the caller was ALREADY a
+ * member — this is the idempotent success path, NOT an error.
+ */
+export interface JoinResult {
+  roomId: string;
+  userId: string;
+  role: string;
+  /** `true` = newly joined; `false` = was already a member (idempotent success). */
+  joined: boolean;
+}
+
 // -- W6 (outbox): Optimistic send types ---------------------------------------
 
 /**
