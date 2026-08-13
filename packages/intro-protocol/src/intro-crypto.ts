@@ -12,9 +12,9 @@
  *
  * ADR-008: timingSafeEqual + timingSafePubkeyEqualB64u are imported from
  * @oxpulse/crypto-primitives (the single public source of truth for
- * constant-time comparison). concatBytes + utf8 stay local here — they are
- * internal general-purpose helpers, not part of the crypto-primitives
- * public surface.
+ * constant-time comparison). concatBytes imported from @noble/hashes/utils.js
+ * (same source as crypto-primitives). zeroize imported from
+ * @oxpulse/crypto-primitives. utf8 stays local — trivial TextEncoder wrapper.
  */
 
 import { x25519, ed25519 } from '@noble/curves/ed25519.js';
@@ -28,12 +28,15 @@ import { encode as cborgEncode, rfc8949EncodeOptions } from 'cborg';
 // Constant-time comparison — single source of truth (ADR-008).
 // deriveSharedSecret — RFC 7748 §6.1 all-zero-shared-secret defense (low-order point guard).
 // b64uEncodeBytes / b64uDecodeBytes — single canonical base64url home (ADR-013 / #218 nit #11).
+// zeroize — single canonical zeroization primitive (ADR-013).
 import {
   timingSafeEqual,
   deriveSharedSecret,
   b64uEncodeBytes,
   b64uDecodeBytes,
+  zeroize,
 } from '@oxpulse/crypto-primitives';
+import { concatBytes } from '@noble/hashes/utils.js';
 
 // ---------------------------------------------------------------------------
 // Label constants (sub-spec §4.2) — UTF-8 encoded at use-site.
@@ -51,9 +54,9 @@ export const LABEL_ACTIVATE_MAC  = 'oxpulse-intro-v1/ACTIVATE_MAC';
 export const PROTOCOL_VERSION = 0x01;
 
 // ---------------------------------------------------------------------------
-// Internal helpers (ADR-008: concatBytes + utf8 stay local/general-purpose;
-// only timingSafeEqual + timingSafePubkeyEqualB64u are public exports from
-// crypto-primitives).
+// Internal helpers (ADR-008: utf8 stays local/general-purpose;
+// concatBytes imported from @noble/hashes/utils.js — same source as
+// crypto-primitives; zeroize imported from @oxpulse/crypto-primitives).
 // ---------------------------------------------------------------------------
 
 const enc = new TextEncoder();
@@ -63,36 +66,20 @@ function utf8(label: string): Uint8Array {
   return enc.encode(label);
 }
 
-/** Concatenate multiple Uint8Arrays into one. */
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const a of arrays) total += a.length;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}
-
 /**
  * Best-effort zeroization of secret key material (ADR-013 / #216).
  *
- * Overwrites the buffer with zeros. JS zeroization is best-effort — V8 may
- * copy Uint8Array contents during GC compaction, so this is NOT a guarantee
- * that no copy survives — but it is the recognized hardening baseline and
- * the SECURITY.md threat model already promises these values are secret.
+ * Delegates to {@link zeroize} from @oxpulse/crypto-primitives (which uses
+ * noble's `clean()` with detached-ArrayBuffer guard). Returns the same
+ * Uint8Array reference (now zeroed) for chaining convenience.
  *
  * Callers MUST wipe:
  *   - ephemeral private keys after `deriveMasterKey`
  *   - `masterKey` when done with all derived MAC keys + AEAD operations
  *   - MAC keys via {@link wipeMacKeys} when the handshake completes/aborts
- *
- * Returns the same Uint8Array reference (now zeroed) for convenience.
  */
 export function wipe(u: Uint8Array): Uint8Array {
-  u.fill(0);
+  zeroize(u);
   return u;
 }
 
