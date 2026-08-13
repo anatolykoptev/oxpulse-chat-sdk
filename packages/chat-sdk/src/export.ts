@@ -12,8 +12,14 @@
  *     omission makes a lossy export indistinguishable from a complete one.
  *   - Pagination is followed to the end. A partial export is never returned as
  *     a complete one.
- *   - An AbortSignal is honoured between pages — a large room's export is
- *     cancellable.
+ *   - An AbortSignal is honoured BETWEEN PAGES only. It cannot interrupt a
+ *     page already in flight: `ListArgs` carries no signal, so nothing reaches
+ *     `list()`'s unseal loop, and on the path export almost always takes (no
+ *     live subscription for the room) that loop is unbounded — it awaits
+ *     `provider.unseal` per row with no deadline. A custom provider that hangs
+ *     therefore hangs the export, and aborting does not free it. Do not read
+ *     "cancellable" as stronger than this. See #312 for threading the signal
+ *     through `list()`, which is the real fix and a public-API change.
  *   - Attachments are exported as the reference/URL embedded in the plaintext
  *     body, not the bytes.
  */
@@ -36,20 +42,33 @@ export interface ExportClient {
   list(roomId: string, args?: ListArgs): Promise<ListResult>;
 }
 
-/** Default page size for list() calls (server max). */
+/**
+ * Default page size for `list()` calls — this is the server's DEFAULT, not its
+ * maximum. `LIST_DEFAULT_LIMIT = 200` / `LIST_MAX_LIMIT = 1_000` in the server's
+ * `crates/sdk/src/messages/constants.rs`; the handler clamps at 1000. Raising
+ * this to 1000 is legal and fewer round trips; 200 is kept as the conservative
+ * default. (A comment claiming 200 was the cap is how the next person picks the
+ * wrong number.)
+ */
 const DEFAULT_EXPORT_LIMIT = 200;
 
 /**
- * Decode an ArrayBuffer to a UTF-8 string. Returns `null` if the bytes are
- * absent or not valid UTF-8 (a malformed plaintext should not crash the export).
+ * Decode an ArrayBuffer to a UTF-8 string, or `null` when the bytes are absent.
+ *
+ * `fatal: false` is deliberate — one row of malformed plaintext must not abort a
+ * whole export. The cost is that invalid byte sequences become U+FFFD rather
+ * than raising, so a row that unsealed successfully but carries non-UTF-8 bytes
+ * exports as replacement characters with NO `unsealError` and counts as
+ * exported. That is the one lossiness this module does not flag; the wire
+ * contract assumes UTF-8 text bodies, and a provider returning binary breaks
+ * that assumption upstream of here.
+ *
+ * There is deliberately no try/catch: under `fatal: false` decode does not
+ * throw, so a catch block would be dead code that reads like a guard.
  */
 function decodeBody(buf: ArrayBuffer | undefined): string | null {
   if (buf === undefined) return null;
-  try {
-    return new TextDecoder('utf-8', { fatal: false }).decode(buf);
-  } catch {
-    return null;
-  }
+  return new TextDecoder('utf-8', { fatal: false }).decode(buf);
 }
 
 /**
@@ -127,8 +146,17 @@ function toJSON(roomId: string, rows: ExportMessageRow[], counts: {
  *
  * Each row is rendered as a header line (`[seq] senderUid @ ts`) followed by
  * the body, or an `[unseal error: …]` marker for undecryptable rows.
+ *
+ * The trailing summary line is load-bearing, not decoration: a caller that
+ * writes `result.content` to a file and never reads `result.failedRows` would
+ * otherwise have to scan every row and count error markers to notice the export
+ * was lossy. The JSON envelope carries `counts` for the same reason.
  */
-function toText(roomId: string, rows: ExportMessageRow[]): string {
+function toText(
+  roomId: string,
+  rows: ExportMessageRow[],
+  counts: { total: number; exported: number; failed: number },
+): string {
   const lines: string[] = [`# Room export: ${roomId}`, ''];
   for (const row of rows) {
     lines.push(`[${row.seq}] ${row.senderUid} @ ${row.ts}`);
@@ -143,6 +171,9 @@ function toText(roomId: string, rows: ExportMessageRow[]): string {
     if (row.deletedAt) lines.push(`  (deleted ${row.deletedAt})`);
     lines.push('');
   }
+  lines.push(
+    `# Exported ${counts.exported}/${counts.total} rows (${counts.failed} failed)`,
+  );
   return lines.join('\n');
 }
 
@@ -202,7 +233,7 @@ export async function exportRoomHistory(
 
   const content =
     format === 'text'
-      ? toText(roomId, rows)
+      ? toText(roomId, rows, counts)
       : toJSON(roomId, rows, counts);
 
   return { format, content, totalRows, exportedRows, failedRows };

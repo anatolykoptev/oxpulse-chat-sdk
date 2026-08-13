@@ -669,9 +669,19 @@ interface BatchAppendItemDTO {
 export interface ExportRoomOptions {
   /** Output format. `'json'` (default) is canonical; `'text'` is human-readable. */
   format?: 'json' | 'text';
-  /** Page size passed to each `list()` call. Defaults to 200 (server max). */
+  /**
+   * Page size passed to each `list()` call. Defaults to 200, which is the
+   * server's DEFAULT page size — the server's maximum is 1000 and it clamps
+   * above that, so raising this is legal.
+   */
   limit?: number;
-  /** Honoured between pages — a large room's export is cancellable. */
+  /**
+   * Checked BETWEEN PAGES only. It cannot interrupt a page already in flight:
+   * `ListArgs` carries no signal, so nothing reaches `list()`'s per-row unseal.
+   * For a room with no live subscription — the usual export case — that loop is
+   * unbounded, so a hanging crypto provider hangs the export and aborting will
+   * not free it. See #312.
+   */
   signal?: AbortSignal;
 }
 

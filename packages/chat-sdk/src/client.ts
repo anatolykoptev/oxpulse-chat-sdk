@@ -995,7 +995,10 @@ export class SDKChatClient {
    *
    * Walks `list()` forward from the beginning of the room to exhaustion. Rows
    * that failed to unseal are exported as explicit error entries (never
-   * skipped). An `AbortSignal` is honoured between pages.
+   * skipped). An `AbortSignal` is checked BETWEEN PAGES only — it cannot
+   * interrupt a page already in flight, and for a room with no live
+   * subscription `list()`'s unseal loop is unbounded, so a hanging provider
+   * hangs the export. See #312.
    *
    * @param roomId  The room to export.
    * @param opts    Format (`'json'` default / `'text'`), page size, AbortSignal.
