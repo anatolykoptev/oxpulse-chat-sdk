@@ -1,5 +1,56 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.4.0
+
+### Minor Changes
+
+- a556a57: Add `exportRoom()` / `exportRoomHistory()` — client-side room history export.
+
+  Walks `list()` forward from the beginning of the room to exhaustion and
+  serialises the decrypted rows as JSON (canonical) or text. Rows that failed to
+  unseal are exported as explicit error entries carrying `seq`, `msgId` and
+  `unsealError` — never skipped. `ExportResult` reports `totalRows`,
+  `exportedRows` and `failedRows` so a caller can tell a clean export from a
+  lossy one without diffing the output. An `AbortSignal` cancels the export
+  (see the `ListArgs.signal` entry — both land in this release, and cancellation
+  is not limited to page boundaries). New module `export.ts` (does not grow
+  `client.ts`); thin delegating method on `SDKChatClient`.
+
+- 7a73467: Add `ListArgs.signal` — an `AbortSignal` that reaches inside `list()`.
+
+  The signal is handed to the HTTP fetch and to the per-row unseal, and
+  `ListResult.next` carries it forward, so one signal cancels a whole paged walk.
+  On abort `list()` rejects with `signal.reason` as soon as the abort fires,
+  rather than after the page's remaining rows drain — previously a caller with a
+  hanging crypto provider waited out the decrypt chain's per-row force-drain for
+  every row on the page. A row whose unseal had not started is never handed to
+  `provider.unseal`, so no ratchet or replay state advances for a cancelled row;
+  a row already in flight has its provider signalled and, if that provider
+  ignores the signal, is force-drained in the background on the existing bound.
+  An abort during the fetch now surfaces as `AbortError` instead of being
+  rewrapped as `SDKChatError('network')`.
+
+  `exportRoom()` forwards its signal into `list()`, so an export is cancellable
+  during a page and not only between pages.
+
+  Corrects the `export.ts`, `ListArgs`/`ExportRoomOptions` and
+  `SDKChatClient#exportRoom` docstrings, which described an unbounded off-chain
+  unseal loop that had already been removed.
+
+- 43b6395: feat(sdk): add mintShareLink + joinByLink for share-link room join (#292)
+
+  Two new public methods on SDKChatClient:
+
+  - `mintShareLink(roomId, args?)` — POST /api/sdk/rooms/:room_id/shortlink
+  - `joinByLink(roomId, alias)` — POST /api/sdk/rooms/:room_id/join
+
+  New exported types: `ShareLink`, `JoinResult`.
+
+  `joinByLink` returns `joined: false` for the idempotent already-a-member
+  path (not an error). Error mapping reuses the shared `httpStatusToCode`
+  so 429→rate_limited is distinguishable from 403→forbidden at the call site.
+  12 contract tests, 3 mutation gates (F1/F2/F3) verified RED.
+
 ## 3.3.2
 
 ### Patch Changes

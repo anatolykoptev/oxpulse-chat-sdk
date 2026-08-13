@@ -1,5 +1,11 @@
 # @oxpulse/crypto-primitives
 
+## 0.5.1
+
+### Patch Changes
+
+- 6a643d1: Fix KEM zeroize try/finally (#317), CSPRNG failure handling in xchachaRandomNonce (#318), and O(N²) string concatenation in b64uEncodeBytes (#319).
+
 ## 0.5.0
 
 ### Minor Changes

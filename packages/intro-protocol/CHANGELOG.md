@@ -1,5 +1,12 @@
 # @oxpulse/intro-protocol
 
+## 0.2.3
+
+### Patch Changes
+
+- Updated dependencies [6a643d1]
+  - @oxpulse/crypto-primitives@0.5.1
+
 ## 0.2.2
 
 ### Patch Changes
