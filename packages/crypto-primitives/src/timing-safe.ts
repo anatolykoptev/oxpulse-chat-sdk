@@ -9,6 +9,7 @@
  */
 
 import { equalBytes } from '@noble/curves/utils.js';
+import { b64uDecodeBytes } from './base64url.ts';
 
 /**
  * Constant-time byte-array equality (XOR-reduce-OR).
@@ -20,27 +21,14 @@ import { equalBytes } from '@noble/curves/utils.js';
  */
 export const timingSafeEqual: (a: Uint8Array, b: Uint8Array) => boolean = equalBytes;
 
-/** Decode a base64url string (no padding) to raw bytes.
- *
- * Module-internal helper — NOT re-exported from the package index. Callers
- * needing b64u decode from the public API should use the dedicated
- * `b64uDecodeBytes` re-exported via `./base64url.ts` (see #218 nit #11).
- * Kept here as a private helper for `timingSafePubkeyEqualB64u`. */
-function b64uDecodeBytes(s: string): Uint8Array {
-	const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
-	const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
-	const bin = atob(b64);
-	const out = new Uint8Array(bin.length);
-	for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-	return out;
-}
-
 /**
  * Constant-time comparison of two base64url-encoded public keys (or any
  * attacker-influenced cryptographic identifier).
  *
- * Decodes both strings to bytes, then compares with {@link timingSafeEqual}.
- * Returns `false` immediately on length mismatch (length is non-secret).
+ * Decodes both strings to bytes via the canonical `b64uDecodeBytes` from
+ * `./base64url.ts` (ADR-013 / #218 nit #11), then compares with
+ * {@link timingSafeEqual}. Returns `false` immediately on length mismatch
+ * (length is non-secret).
  *
  * Invalid base64url input (chars outside `[A-Za-z0-9_-]` or wrong padding)
  * returns `false` rather than throwing — the function is total for all

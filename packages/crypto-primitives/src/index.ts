@@ -2,7 +2,7 @@
 export { generateEphemeralKeypair, deriveSharedSecret } from './x25519.ts';
 
 // HKDF
-export { deriveKey } from './hkdf.ts';
+export { deriveKey, hkdfExtract, hkdfExpand } from './hkdf.ts';
 
 // AEAD
 export { aesGcmSeal, aesGcmOpen } from './aead.ts';

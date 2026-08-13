@@ -5,6 +5,7 @@ import { deriveKey } from './hkdf.ts';
 import { aesGcmSeal, aesGcmOpen } from './aead.ts';
 import { encodeMessageEnvelope, decodeMessageEnvelope, type MessageEnvelopeV1 } from './envelope.ts';
 import { derivePeerIdTarget } from './peer-id.ts';
+import { zeroize } from './zeroize.ts';
 
 const AAD_PREFIX = new TextEncoder().encode('oxp/pw/v1'); // 9 bytes
 const HKDF_INFO = new TextEncoder().encode('oxp/pairwise/v1'); // 15 bytes
@@ -52,6 +53,11 @@ export async function sealMessage(args: SealMessageArgs): Promise<Uint8Array> {
 	// 4. AEAD seal
 	const nonce = crypto.getRandomValues(new Uint8Array(12));
 	const ctAndTag = await aesGcmSeal(kdfKey, nonce, aad, args.plaintext);
+
+	// Zeroize ephemeral secrets — no longer needed after AEAD seal (#282).
+	zeroize(ephPriv);
+	zeroize(ss);
+	zeroize(kdfKey);
 
 	// 5. Assemble IC = eph_pub[32] ‖ nonce[12] ‖ ct_and_tag[…]
 	const ic = new Uint8Array(32 + 12 + ctAndTag.length);
@@ -133,8 +139,14 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	try {
 		plaintext = await aesGcmOpen(kdfKey, nonce, aad, ctAndTag);
 	} catch {
+		zeroize(ss);
+		zeroize(kdfKey);
 		throw new Error('crypto-primitives/pairwise: AEAD authentication failed');
 	}
+
+	// Zeroize shared secret + KDF key — no longer needed after successful open (#282).
+	zeroize(ss);
+	zeroize(kdfKey);
 
 	return { plaintext, msgId: env.msgId, flags: env.flags };
 }
