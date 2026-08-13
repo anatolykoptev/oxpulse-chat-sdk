@@ -22,9 +22,14 @@
     "x25519",
     "hkdf",
     "aead",
-    "timing-safe"
+    "timing-safe",
+    "xchacha20",
+    "poly1305",
+    "pqxdh",
+    "ml-kem",
+    "post-quantum"
   ],
-  "description": "Pairwise X25519+HKDF+AEAD primitives, MessageEnvelope v1 codec, and timing-safe comparison helpers for oxpulse-chat (Phase 1 unified transport).",
+  "description": "Pairwise X25519+HKDF+AEAD primitives, XChaCha20-Poly1305, PQXDH hybrid KEM, MessageEnvelope v1 codec, and timing-safe comparison helpers for oxpulse-chat.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -53,8 +58,10 @@
     "stryker": "stryker run"
   },
   "dependencies": {
+    "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0"
+    "@noble/hashes": "^2.2.0",
+    "@noble/post-quantum": "^0.6.1"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^9.6.1",

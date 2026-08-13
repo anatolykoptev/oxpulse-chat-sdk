@@ -1,11 +1,25 @@
 // X25519 primitives
 export { generateEphemeralKeypair, deriveSharedSecret } from './x25519.ts';
 
+// PQXDH hybrid key agreement (X25519 + ML-KEM-768) — post-quantum forward secrecy
+export {
+	mlKemKeygen,
+	hybridKemKeygen,
+	hybridKemEncaps,
+	hybridKemDecaps,
+	type MlKemKeyPair,
+	type HybridKemKeyPair,
+	type HybridKemEncapsulation,
+} from './kem.ts';
+
 // HKDF
-export { deriveKey } from './hkdf.ts';
+export { deriveKey, hkdfExtract, hkdfExpand } from './hkdf.ts';
 
 // AEAD
 export { aesGcmSeal, aesGcmOpen } from './aead.ts';
+
+// XChaCha20-Poly1305 AEAD with key commitment (192-bit nonce, random-safe)
+export { xchachaSeal, xchachaOpen, xchachaRandomNonce } from './xchacha.ts';
 
 // Addressing
 export { derivePeerIdTarget } from './peer-id.ts';
@@ -27,6 +41,7 @@ export {
 	type SealMessageArgs,
 	type OpenMessageArgs,
 	type OpenMessageResult,
+	type ReplayWindow,
 } from './pairwise-seal.ts';
 
 // Timing-safe comparison (ADR-008: public exports)
