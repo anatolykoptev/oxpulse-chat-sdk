@@ -14,6 +14,7 @@ to `SDKChatErrorCode`.
 ts-mls is an optional peer dependency — dynamically imported, not
 bundled into the main SDK or CDN widget (~672 KB, code-split).
 
-**v1 limitation:** `MLSStateStore` does NOT persist state yet (ts-mls
-lacks a complete serialize/deserialize API). MLS group state does NOT
-survive a page reload in v1. The store is exported for DI/testing only.
+**KNOWN LIMITATION:** `MLSStateStore` does NOT persist state yet
+(ts-mls lacks a complete serialize/deserialize API — tracked in #353).
+MLS group state does NOT survive a page reload. The store is exported
+for DI/testing only.

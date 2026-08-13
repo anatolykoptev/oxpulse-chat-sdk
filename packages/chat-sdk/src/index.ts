@@ -41,8 +41,8 @@ export type { SFrameProviderOptions } from './sframe.js';
 // implementation uses dynamic import('ts-mls') so it's only loaded when used.
 //
 // ⚠️ MLSStateStore does NOT persist state yet (ts-mls lacks a complete
-// serialize/deserialize API). It is exported for DI/testing only — do not
-// rely on it for cross-reload state persistence in v1.
+// serialize/deserialize API — tracked in #353). It is exported for
+// DI/testing only — do not rely on it for cross-reload state persistence.
 export { createMlsProvider } from './mls-provider.js';
 export type { MlsProvider, MlsProviderOptions, MlsCipherSuite, MLSGroupManager } from './mls-provider.js';
 export type { MLSStateStore } from './mls-state-store.js';

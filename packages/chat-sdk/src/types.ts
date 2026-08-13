@@ -173,10 +173,11 @@ export type E2EEOptions =
         /**
          * State store for MLS ClientState. Defaults to IndexedDB-backed.
          *
-         * ⚠️ v1 LIMITATION: the default store does NOT persist state yet
-         * (ts-mls lacks a complete serialize/deserialize API). MLS group
-         * state does NOT survive a page reload in v1. This option is
-         * exported for DI/testing — do not rely on it for persistence.
+         * ⚠️ KNOWN LIMITATION: the default store does NOT persist state yet
+         * (ts-mls lacks a complete serialize/deserialize API — tracked in
+         * #353). MLS group state does NOT survive a page reload. This
+         * option is exported for DI/testing — do not rely on it for
+         * persistence until #353 is resolved.
          */
         stateStore?: import('./mls-state-store.js').MLSStateStore;
       };

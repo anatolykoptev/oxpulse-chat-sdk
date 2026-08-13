@@ -1,14 +1,16 @@
 /**
  * IndexedDB persistence for MLS ClientState.
  *
- * **⚠️ v1 LIMITATION — this store does NOT persist MLS state yet.**
+ * **⚠️ KNOWN LIMITATION — this store does NOT persist MLS state yet.**
  *
  * ts-mls does not currently expose a public serialize/deserialize API for
  * ClientState (`encodeGroupState` needs the ratchet tree separately, and
  * `decodeGroupState` requires it as a parameter). Until ts-mls adds a
  * complete serialization API, `saveClientState` stores a zero-length
  * placeholder and `restoreAll` is a no-op. MLS group state does NOT
- * survive a page reload in v1.
+ * survive a page reload.
+ *
+ * Tracked in #353 (blocked on ts-mls upstream).
  *
  * The interface is exported so that:
  * 1. Consumers can pass a custom `MLSStateStore` (e.g. for testing).
@@ -16,7 +18,7 @@
  *    internals need to change — the public API stays stable.
  *
  * If you need cross-reload MLS state today, this is not it. Do not rely on
- * this store for state persistence until the limitation is lifted.
+ * this store for state persistence until #353 is resolved.
  *
  * ## Schema (when serialization is wired)
  * - Database: `oxpulse-mls-state`
