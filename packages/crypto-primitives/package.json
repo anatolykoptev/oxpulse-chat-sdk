@@ -1,6 +1,6 @@
 {
   "name": "@oxpulse/crypto-primitives",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
   "type": "module",
   "license": "AGPL-3.0-or-later",
@@ -29,7 +29,7 @@
     "ml-kem",
     "post-quantum"
   ],
-  "description": "Pairwise X25519+HKDF+AEAD primitives, XChaCha20-Poly1305, PQXDH hybrid KEM, MessageEnvelope v1 codec, and timing-safe comparison helpers for oxpulse-chat.",
+  "description": "Pairwise X25519+HKDF+AEAD primitives, XChaCha20-Poly1305, PQXDH hybrid KEM, MessageEnvelope v2 codec (authenticated binding transcript), and timing-safe comparison helpers for oxpulse-chat.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

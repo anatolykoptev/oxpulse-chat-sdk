@@ -31,7 +31,7 @@ export {
 	MESSAGE_ENVELOPE_MAGIC,
 	MESSAGE_ENVELOPE_VERSION,
 	HEADER_BYTES,
-	type MessageEnvelopeV1,
+	type MessageEnvelopeV2,
 } from './envelope.ts';
 
 // Pairwise seal (headline API for Phase 2 consumers)

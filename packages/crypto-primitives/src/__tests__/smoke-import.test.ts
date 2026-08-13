@@ -52,7 +52,7 @@ describe('crypto-primitives public API smoke', () => {
 		expect(magic).toBe('OXPE');
 	});
 
-	it('MESSAGE_ENVELOPE_VERSION is 0x01', () => {
-		expect(MESSAGE_ENVELOPE_VERSION).toBe(0x01);
+	it('MESSAGE_ENVELOPE_VERSION is 0x02', () => {
+		expect(MESSAGE_ENVELOPE_VERSION).toBe(0x02);
 	});
 });

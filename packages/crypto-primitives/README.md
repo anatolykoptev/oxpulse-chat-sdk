@@ -1,8 +1,9 @@
 # @oxpulse/crypto-primitives
 
-X25519 + HKDF-SHA256 + AES-256-GCM primitives, the `MessageEnvelope v1`
-wire codec, and timing-safe comparison helpers used by SDK + mesh
-transports to carry pairwise-sealed messages opaquely.
+X25519 + HKDF-SHA256 + AES-256-GCM primitives, the `MessageEnvelope v2`
+wire codec (authenticated binding transcript), and timing-safe comparison
+helpers used by SDK + mesh transports to carry pairwise-sealed messages
+opaquely.
 
 ## Public surface (flat exports — ADR-003)
 
@@ -15,9 +16,9 @@ there are no sub-path exports.
 - **Addressing** — `derivePeerIdTarget`
 - **Envelope codec** — `encodeMessageEnvelope`, `decodeMessageEnvelope`,
   `MESSAGE_ENVELOPE_MAGIC`, `MESSAGE_ENVELOPE_VERSION`, `HEADER_BYTES`,
-  `MessageEnvelopeV1`
+  `MessageEnvelopeV2`
 - **Pairwise seal** — `sealMessage`, `openMessage`, `SealMessageArgs`,
-  `OpenMessageArgs`, `OpenMessageResult`
+  `OpenMessageArgs`, `OpenMessageResult`, `ReplayWindow`
 - **Timing-safe comparison (ADR-008)** — `timingSafeEqual`,
   `timingSafePubkeyEqualB64u`
 
@@ -61,8 +62,6 @@ sole-consumer audit pattern).
 - No transport logic (routing, WebSocket, BLE).
 - No group ratchet. See `web/src/lib/chat-cryptor.ts::sealGroupFrame`
   (renamed in Phase 2) for group AEAD.
-- No `MessageEnvelope v2` — version 0x02 will live in a new `envelope-v2.ts`
-  file; this v1 codec stays frozen.
 
 ## License
 

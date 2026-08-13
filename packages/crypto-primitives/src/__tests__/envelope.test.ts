@@ -5,10 +5,10 @@ import {
 	HEADER_BYTES,
 	MESSAGE_ENVELOPE_MAGIC,
 	MESSAGE_ENVELOPE_VERSION,
-	type MessageEnvelopeV1,
+	type MessageEnvelopeV2,
 } from '../envelope.ts';
 
-function makeEnv(icLen: number = 64): MessageEnvelopeV1 {
+function makeEnv(icLen: number = 64): MessageEnvelopeV2 {
 	return {
 		flags: 0,
 		msgId: crypto.getRandomValues(new Uint8Array(16)),
@@ -49,7 +49,7 @@ describe('envelope', () => {
 		expect(bytes[3]).toBe(MESSAGE_ENVELOPE_MAGIC[3]); // 0x45
 	});
 
-	it('version byte is 0x01 at offset 4', () => {
+	it('version byte is 0x02 at offset 4', () => {
 		const bytes = encodeMessageEnvelope(makeEnv());
 		expect(bytes[4]).toBe(MESSAGE_ENVELOPE_VERSION);
 	});
@@ -75,9 +75,9 @@ describe('envelope', () => {
 		);
 	});
 
-	it('rejects version 0x02', () => {
+	it('rejects version 0x01 (v1 hard break, ADR-8)', () => {
 		const bytes = encodeMessageEnvelope(makeEnv());
-		bytes[4] = 0x02;
+		bytes[4] = 0x01;
 		expect(() => decodeMessageEnvelope(bytes)).toThrow(
 			'crypto-primitives/envelope: unsupported version',
 		);

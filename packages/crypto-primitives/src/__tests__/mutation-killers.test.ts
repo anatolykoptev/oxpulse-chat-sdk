@@ -96,21 +96,9 @@ describe('pairwise-seal — mutation-killing tests', () => {
 			msgId,
 		});
 
-		// Re-sign the tampered IC so sig verification passes, then AEAD fails
-		const decoded = decodeMessageEnvelope(env);
-		const tamperedIc = new Uint8Array(decoded.innerCiphertext);
-		tamperedIc[tamperedIc.length - 1] ^= 0xff; // flip last byte (tag)
-
-		// Re-sign with the tampered IC (sig covers SHA-256(IC) ‖ msgId ‖ recipientPub)
-		const { sha256 } = await import('@noble/hashes/sha2.js');
-		const { buildSignedBytes } = await import('../pairwise-seal.ts');
-		// We need to re-sign — but buildSignedBytes is not exported.
-		// Instead, use a different approach: seal with correct sig, then
-		// tamper ONLY the AEAD ciphertext portion (bytes 44+ of IC) —
-		// but the sig covers the whole IC, so any IC tamper breaks sig.
-		//
-		// Alternative: use wrong recipient private key (correct pub for sig,
-		// wrong priv for DH). Sig passes (pub is correct), AEAD fails (DH wrong).
+		// Use wrong recipient private key (correct pub for sig + recipientAddr
+		// cross-check, wrong priv for DH). Sig passes (pub is correct), AEAD
+		// fails (DH produces wrong shared secret → wrong KDF key).
 		const wrongPriv = x25519.keygen().secretKey;
 
 		await expect(
@@ -205,7 +193,7 @@ describe('envelope — mutation-killing tests', () => {
 		// Construct bytes with correct magic but wrong version
 		const bytes = new Uint8Array(HEADER_BYTES + 60);
 		bytes.set(MESSAGE_ENVELOPE_MAGIC, 0);
-		bytes[4] = 0x02; // version 2 (unsupported, current is 1)
+		bytes[4] = 0x01; // version 1 (unsupported, current is 2 — v1 hard break, ADR-8)
 		expect(() => decodeMessageEnvelope(bytes)).toThrow(/version/i);
 	});
 
