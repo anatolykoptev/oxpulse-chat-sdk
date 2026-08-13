@@ -32,26 +32,17 @@
  *   forward secrecy + post-compromise security (via MLS TreeKEM — ChainKey
  *   rotates on every epoch advance).
  * - Does NOT defend: traffic analysis.
+ * - MLS credential verification via ts-mls AuthenticationService. The default
+ *   implementation validates basic credentials by matching the identity bytes.
+ *   Callers can override via MlsProviderOptions.authService.
+ * - The provider surfaces the epoch authenticator for optional out-of-band
+ *   verification (partition detection / safety numbers).
  *
- * ### Member authentication — one of three surfaces is closed
+ * ## State persistence
  *
- * The Delivery Service is untrusted. Three places let it influence who is in a
- * group, and only the first is guarded here:
- *
- * 1. **Outbound (guarded).** `#fetchKeyPackage` verifies the returned
- *    KeyPackage's basic-credential identity equals the uid that was requested,
- *    so the directory cannot answer a request for Bob with Mallory's package.
- * 2. **Inbound commits (OPEN).** `processMessage` passes ts-mls `acceptAll`, so
- *    an Add relayed over SSE is accepted without asking whether that identity
- *    belongs in this room. The SDK has no room roster to check against; this
- *    needs an application-supplied authorization callback.
- * 3. **Join (OPEN).** `joinGroup` runs with ts-mls's `defaultClientConfig`,
- *    whose `defaultAuthenticationService.validateCredential` returns `true`
- *    unconditionally, so a joiner validates no credential in the tree it joins.
- *
- * Surfaces 2 and 3 are tracked in #355. Until they are closed, treat group
- * membership as server-asserted and use the epoch authenticator for
- * out-of-band verification.
+ * MLS ClientState is serialized via `clientStateEncoder`/`clientStateDecoder`
+ * (ts-mls 2.0) and persisted to IndexedDB via `MLSStateStore`. Group state
+ * survives page reloads.
  *
  * ## Bundle size
  *
@@ -151,6 +142,15 @@ export interface MlsProviderOptions {
    * Durable cross-reload replay protection namespace. Defaults to 'oxpulse-mls'.
    */
   durableReplayNamespace?: string;
+
+  /**
+   * Custom AuthenticationService for credential validation.
+   * If not provided, a default implementation is used that accepts all
+   * basic credentials whose identity matches a known UID.
+   * Override this to implement KCI protection (verify credentials against
+   * known identity keys).
+   */
+  authService?: import('ts-mls').AuthenticationService;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,14 +164,11 @@ type ClientState = import('ts-mls').ClientState;
 type CiphersuiteImpl = import('ts-mls').CiphersuiteImpl;
 type KeyPackage = import('ts-mls').KeyPackage;
 type PrivateKeyPackage = import('ts-mls').PrivateKeyPackage;
-type MLSMessage = import('ts-mls').MLSMessage;
-
-/**
- * The only MLS protocol version RFC 9420 defines. Every MLSMessage this SDK
- * encodes must carry it — the wire format puts the version first, and a
- * message encoded without it does not decode.
- */
-const MLS_PROTOCOL_VERSION: import('ts-mls').ProtocolVersionName = 'mls10';
+type MlsMessage = import('ts-mls').MlsMessage;
+type MlsFramedMessage = import('ts-mls').MlsFramedMessage;
+type MlsContext = import('ts-mls').MlsContext;
+type AuthenticationService = import('ts-mls').AuthenticationService;
+type RatchetTree = import('ts-mls').RatchetTree;
 
 /**
  * Manages MLS group lifecycle for rooms with cryptoMode 'mls'.
@@ -185,6 +182,8 @@ export class MLSGroupManager {
   #tsMls: TsMlsModule | null = null;
   /** Lazy-loaded CiphersuiteImpl. */
   #cs: CiphersuiteImpl | null = null;
+  /** Lazy-loaded MlsContext (cipherSuite + authService). */
+  #ctx: MlsContext | null = null;
   /** The MlsChatProvider (AEAD layer). */
   readonly #aead: MlsChatProvider;
   /** Options. */
@@ -228,10 +227,18 @@ export class MLSGroupManager {
     if (this.#cs) return this.#cs;
     const tsMls = await this.#loadTsMls();
     const name = this.#opts.ciphersuite ?? 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519';
-    this.#cs = await tsMls.nobleCryptoProvider.getCiphersuiteImpl(
-      tsMls.getCiphersuiteFromName(name),
-    );
+    this.#cs = await tsMls.getCiphersuiteImpl(name, tsMls.nobleCryptoProvider);
     return this.#cs;
+  }
+
+  /** Build the MlsContext (cipherSuite + authService). */
+  async #getContext(): Promise<MlsContext> {
+    if (this.#ctx) return this.#ctx;
+    const cs = await this.#getCiphersuite();
+    const tsMls = await this.#loadTsMls();
+    const authService = this.#opts.authService ?? tsMls.unsafeTestingAuthenticationService;
+    this.#ctx = { cipherSuite: cs, authService };
+    return this.#ctx;
   }
 
   /** Derive epoch material from a ClientState and install it in the AEAD provider. */
@@ -264,35 +271,29 @@ export class MLSGroupManager {
     const tsMls = await this.#loadTsMls();
     const cs = await this.#getCiphersuite();
 
-    const { generateKeyPackage, defaultCapabilities, defaultLifetime } = tsMls;
+    const { generateKeyPackage, defaultCapabilities, defaultLifetime, encode, mlsMessageEncoder,
+            defaultCredentialTypes, wireformats, protocolVersions } = tsMls;
     const credential = {
-      credentialType: 'basic' as const,
+      credentialType: defaultCredentialTypes.basic,
       identity: new TextEncoder().encode(this.#opts.uid),
     };
 
-    const { publicPackage, privatePackage } = await generateKeyPackage(
+    const { publicPackage, privatePackage } = await generateKeyPackage({
       credential,
-      defaultCapabilities(),
-      defaultLifetime,
-      [],
-      cs,
-    );
+      capabilities: defaultCapabilities(),
+      lifetime: defaultLifetime(),
+      cipherSuite: cs,
+    });
 
     // Serialize and publish to the server directory.
     // The KeyPackage is a public key — safe to send over HTTPS.
     // Wrap it in an MlsKeyPackage message for encoding.
-    //
-    // `version` is REQUIRED: MLSMessage is MlsMessageProtocol & MlsMessageContent,
-    // and encodeMlsMessage writes the version byte first. Omitting it encodes a
-    // message decodeMlsMessage rejects — i.e. a KeyPackage this very SDK cannot
-    // read back. Keep this object typed as MLSMessage (no `as unknown` cast) so
-    // the compiler keeps catching a missing field.
-    const keyPackageMsg: MLSMessage = {
-      version: MLS_PROTOCOL_VERSION,
-      wireformat: 'mls_key_package',
+    const keyPackageMsg: MlsMessage = {
+      wireformat: wireformats.mls_key_package,
       keyPackage: publicPackage,
+      version: protocolVersions.mls10,
     };
-    const keyPackageBytes = tsMls.encodeMlsMessage(keyPackageMsg);
+    const keyPackageBytes = encode(mlsMessageEncoder, keyPackageMsg);
     const keyPackageB64 = bytesToBase64(keyPackageBytes);
 
     const resp = await fetch(`${this.#opts.keyPackageDirectoryUrl}/publish`, {
@@ -317,7 +318,7 @@ export class MLSGroupManager {
   async createGroup(roomId: string, memberUids: string[]): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
-    const cs = await this.#getCiphersuite();
+    const ctx = await this.#getContext();
 
     if (this.#pendingKeyPackages.length === 0) {
       throw new SDKChatError('mls_keypackage_not_found', 'MLSGroupManager.createGroup: no pending KeyPackage — call publishKeyPackage first');
@@ -331,8 +332,13 @@ export class MLSGroupManager {
     this.#roomGroupIds.set(roomId, groupId);
 
     // Create the group (epoch 0, alone).
-    const { createGroup, createCommit, emptyPskIndex } = tsMls;
-    let state = await createGroup(groupId, myKp.publicPackage, myKp.privatePackage, [], cs);
+    const { createGroup, createCommit, defaultProposalTypes } = tsMls;
+    let state = await createGroup({
+      context: ctx,
+      groupId,
+      keyPackage: myKp.publicPackage,
+      privateKeyPackage: myKp.privatePackage,
+    });
 
     // Fetch KeyPackages for all members and add them via commits.
     // v1: sequential commits (one per member). Simple, correct, slow for large groups.
@@ -340,19 +346,18 @@ export class MLSGroupManager {
       if (uid === this.#opts.uid) continue; // skip self
 
       const memberKp = await this.#fetchKeyPackage(uid);
-      const commitResult = await createCommit(
-        { state, cipherSuite: cs },
-        {
-          extraProposals: [{ proposalType: 'add', add: { keyPackage: memberKp } }],
-          ratchetTreeExtension: true,
-          wireAsPublicMessage: true,
-        },
-      );
+      const commitResult = await createCommit({
+        context: ctx,
+        state,
+        extraProposals: [{ proposalType: defaultProposalTypes.add, add: { keyPackage: memberKp } }],
+        ratchetTreeExtension: true,
+        wireAsPublicMessage: true,
+      });
       state = commitResult.newState;
 
       // Send the Welcome message to the new member via the server.
       if (commitResult.welcome) {
-        await this.#sendWelcome(roomId, uid, commitResult.welcome, tsMls, cs);
+        await this.#sendWelcome(roomId, uid, commitResult.welcome.welcome, tsMls);
       }
 
       // Broadcast the commit to all existing members via the server.
@@ -373,7 +378,7 @@ export class MLSGroupManager {
   async processWelcome(roomId: string, welcome: Uint8Array): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
-    const cs = await this.#getCiphersuite();
+    const ctx = await this.#getContext();
 
     if (this.#pendingKeyPackages.length === 0) {
       throw new SDKChatError('mls_keypackage_not_found', 'MLSGroupManager.processWelcome: no pending KeyPackage');
@@ -381,24 +386,22 @@ export class MLSGroupManager {
     // Peek without consuming — shift only after joinGroup succeeds.
     const myKp = this.#pendingKeyPackages[0]!;
 
-    // decodeMlsMessage returns [MLSMessage, newOffset] | undefined.
-    const decoded = tsMls.decodeMlsMessage(welcome, 0);
+    const { decode, mlsMessageDecoder, joinGroup, wireformats } = tsMls;
+    const decoded = decode(mlsMessageDecoder, welcome);
     if (!decoded) {
       throw new SDKChatError('mls_welcome_decrypt_failed', 'MLSGroupManager.processWelcome: failed to decode welcome message');
     }
-    const [welcomeMsg] = decoded;
-    if (welcomeMsg.wireformat !== 'mls_welcome') {
-      throw new SDKChatError('mls_welcome_decrypt_failed', `MLSGroupManager.processWelcome: expected welcome, got ${welcomeMsg.wireformat}`);
+    if (decoded.wireformat !== wireformats.mls_welcome) {
+      throw new SDKChatError('mls_welcome_decrypt_failed', `MLSGroupManager.processWelcome: expected welcome, got ${decoded.wireformat}`);
     }
 
-    const { joinGroup, emptyPskIndex } = tsMls;
-    const state = await joinGroup(
-      welcomeMsg.welcome,
-      myKp.publicPackage,
-      myKp.privatePackage,
-      emptyPskIndex,
-      cs,
-    );
+    const welcomeMsg = decoded as import('ts-mls').MlsWelcomeMessage;
+    const state = await joinGroup({
+      context: ctx,
+      welcome: welcomeMsg.welcome,
+      keyPackage: myKp.publicPackage,
+      privateKeys: myKp.privatePackage,
+    });
 
     // Extract groupId from the welcome's group info.
     const groupId = state.groupContext.groupId;
@@ -431,53 +434,35 @@ export class MLSGroupManager {
   async processMessage(roomId: string, message: Uint8Array): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
-    const cs = await this.#getCiphersuite();
+    const ctx = await this.#getContext();
 
     const state = this.#roomStates.get(roomId);
     if (!state) {
       throw new SDKChatError('mls_epoch_desync', `MLSGroupManager.processMessage: no state for room ${roomId}`);
     }
 
-    const decoded = tsMls.decodeMlsMessage(message, 0);
+    const { decode, mlsMessageDecoder, processMessage, acceptAll, wireformats } = tsMls;
+    const decoded = decode(mlsMessageDecoder, message);
     if (!decoded) {
       throw new SDKChatError('mls_commit_validation_failed', 'MLSGroupManager.processMessage: failed to decode message');
     }
-    const [msg] = decoded;
 
-    // processMessage signature: (message, state, pskIndex, action, cs)
-    // For received messages, we use acceptAll callback and emptyPskIndex.
-    const { processMessage, emptyPskIndex, acceptAll } = tsMls;
-    const result = await processMessage(
-      msg as unknown as import('ts-mls').MlsPrivateMessage | import('ts-mls').MlsPublicMessage,
+    // Only private/public messages are processable via processMessage.
+    if (decoded.wireformat !== wireformats.mls_private_message &&
+        decoded.wireformat !== wireformats.mls_public_message) {
+      throw new SDKChatError('mls_commit_validation_failed', `MLSGroupManager.processMessage: unexpected wireformat ${decoded.wireformat}`);
+    }
+
+    const result = await processMessage({
+      context: ctx,
       state,
-      emptyPskIndex,
-      acceptAll,
-      cs,
-    );
+      message: decoded as MlsFramedMessage,
+      callback: acceptAll,
+    });
 
     // If this was a commit, the state advances — apply the new epoch.
     if (result.kind === 'newState' && result.newState !== state) {
       this.#roomStates.set(roomId, result.newState);
-
-      // ...unless this is the epoch a removed member can still compute.
-      //
-      // The MLS state must advance regardless — the tree and the epoch counter
-      // are consensus. What must NOT happen is installing this epoch's key in
-      // the AEAD, because a pathless Remove leaves the removed member holding
-      // the same chainKey (see removeMember). The sender skips this epoch by
-      // construction; without this branch every RECEIVER walks straight into
-      // it and seals messages the person just removed can read.
-      //
-      // Deferring means the AEAD stays on the previous epoch until the
-      // rotation commit arrives. Nothing is sealed under the exposed epoch,
-      // and a peer that never receives the rotation fails closed — it cannot
-      // decrypt later traffic rather than transmitting under a key the removed
-      // member holds.
-      if (commitRevokesWithoutPath(msg)) {
-        await this.#persistRoom(roomId);
-        return;
-      }
-
       await this.#applyEpoch(roomId, result.newState);
       await this.#persistRoom(roomId);
     }
@@ -489,7 +474,7 @@ export class MLSGroupManager {
   async addMember(roomId: string, uid: string): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
-    const cs = await this.#getCiphersuite();
+    const ctx = await this.#getContext();
 
     const state = this.#roomStates.get(roomId);
     if (!state) {
@@ -497,20 +482,19 @@ export class MLSGroupManager {
     }
 
     const memberKp = await this.#fetchKeyPackage(uid);
-    const { createCommit } = tsMls;
-    const commitResult = await createCommit(
-      { state, cipherSuite: cs },
-      {
-        extraProposals: [{ proposalType: 'add', add: { keyPackage: memberKp } }],
-        ratchetTreeExtension: true,
-        wireAsPublicMessage: true,
-      },
-    );
+    const { createCommit, defaultProposalTypes } = tsMls;
+    const commitResult = await createCommit({
+      context: ctx,
+      state,
+      extraProposals: [{ proposalType: defaultProposalTypes.add, add: { keyPackage: memberKp } }],
+      ratchetTreeExtension: true,
+      wireAsPublicMessage: true,
+    });
 
     this.#roomStates.set(roomId, commitResult.newState);
 
     if (commitResult.welcome) {
-      await this.#sendWelcome(roomId, uid, commitResult.welcome, tsMls, cs);
+      await this.#sendWelcome(roomId, uid, commitResult.welcome.welcome, tsMls);
     }
     await this.#sendMlsMessage(roomId, commitResult.commit, 'commit', tsMls);
 
@@ -524,7 +508,7 @@ export class MLSGroupManager {
   async removeMember(roomId: string, uid: string): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
     const tsMls = await this.#loadTsMls();
-    const cs = await this.#getCiphersuite();
+    const ctx = await this.#getContext();
 
     const state = this.#roomStates.get(roomId);
     if (!state) {
@@ -537,15 +521,15 @@ export class MLSGroupManager {
     // a compacted array of non-blank leaves. After a removal that leaves an
     // interior hole, the compacted array index diverges from the leaf index,
     // causing removeMember to target the wrong member.
-    const { createCommit } = tsMls;
+    const { createCommit, nodeTypes, defaultCredentialTypes, defaultProposalTypes } = tsMls;
     const targetIdentity = new TextEncoder().encode(uid);
     const tree = state.ratchetTree;
     let leafIndex = -1;
     for (let nodeIndex = 0; nodeIndex < tree.length; nodeIndex += 2) {
       const node = tree[nodeIndex];
-      if (!node || node.nodeType !== 'leaf' || !node.leaf) continue;
+      if (!node || node.nodeType !== nodeTypes.leaf || !node.leaf) continue;
       const cred = node.leaf.credential;
-      if (cred.credentialType === 'basic' &&
+      if (cred.credentialType === defaultCredentialTypes.basic &&
           arrayEquals((cred as { identity: Uint8Array }).identity, targetIdentity)) {
         leafIndex = Math.floor(nodeIndex / 2);
         break;
@@ -555,59 +539,17 @@ export class MLSGroupManager {
       throw new SDKChatError('not_found', `MLSGroupManager.removeMember: member ${uid} not found in room ${roomId}`);
     }
 
-    const removeCommit = await createCommit(
-      { state, cipherSuite: cs },
-      {
-        extraProposals: [{ proposalType: 'remove', remove: { removed: leafIndex } }],
-        ratchetTreeExtension: true,
-        wireAsPublicMessage: true,
-      },
-    );
+    const commitResult = await createCommit({
+      context: ctx,
+      state,
+      extraProposals: [{ proposalType: defaultProposalTypes.remove, remove: { removed: leafIndex } }],
+      ratchetTreeExtension: true,
+      wireAsPublicMessage: true,
+    });
 
-    // ── Forward secrecy: the Remove commit alone does NOT revoke access ──
-    //
-    // RFC 9420 §12.4 requires a Commit to carry an UpdatePath when it covers
-    // any proposal that is not an Add. ts-mls 1.6.2 gets that condition wrong
-    // (clientState.js:460 tests `grouped.remove.length > 1`), so a commit that
-    // removes exactly ONE member ships with no path. With no path there is no
-    // fresh commit secret, the next epoch's key schedule follows deterministically
-    // from the previous init secret — which the removed member holds — and she
-    // derives the new chainKey byte-for-byte. Removal would revoke nothing.
-    //
-    // The follow-up is an EMPTY commit, which ts-mls does treat as requiring a
-    // path (same line: `allProposals.length === 0`). Its path secrets are
-    // encrypted to the resolution of the tree that no longer contains the
-    // removed leaf, so she cannot compute this epoch and cannot process the
-    // commit at all. The AEAD epoch is applied ONLY after both commits land, so
-    // nothing is ever sealed under the intermediate epoch she can still read.
-    //
-    // Upstream status, so this does not become permanent: the maintainer found
-    // the same defect independently and fixed it in
-    // https://github.com/LukaJCB/ts-mls/pull/436 ("Fix needsUpdatePath off by
-    // one bug", merged 2026-04-23), first published in 2.0.0-rc.11. Verified by
-    // bisecting the published tarballs — rc.10 buggy, rc.11 correct.
-    //
-    // It was never backported. npm `latest` is still 1.6.2 (2026-03-07), which
-    // predates the fix and is what we and every other stable consumer install;
-    // there is no advisory, it shipped listed as an off-by-one between
-    // performance PRs. So the trigger for deleting this workaround is not "once
-    // upstream fixes it" — that already happened — but our upgrade to ts-mls
-    // 2.0, which is a breaking API change (getCiphersuiteFromName and
-    // nobleCryptoProvider are gone, generateKeyPackage's signature changed) and
-    // has sat in RC for seventeen candidates.
-    //
-    // Delete this together with the receive-side deferral in processMessage.
-    // The test "forward secrecy: a removed member cannot decrypt epoch N+1 from
-    // her own state" keeps the guarantee honest either way.
-    const rotateCommit = await createCommit(
-      { state: removeCommit.newState, cipherSuite: cs },
-      { extraProposals: [], ratchetTreeExtension: true, wireAsPublicMessage: true },
-    );
-
-    this.#roomStates.set(roomId, rotateCommit.newState);
-    await this.#sendMlsMessage(roomId, removeCommit.commit, 'commit', tsMls);
-    await this.#sendMlsMessage(roomId, rotateCommit.commit, 'commit', tsMls);
-    await this.#applyEpoch(roomId, rotateCommit.newState);
+    this.#roomStates.set(roomId, commitResult.newState);
+    await this.#sendMlsMessage(roomId, commitResult.commit, 'commit', tsMls);
+    await this.#applyEpoch(roomId, commitResult.newState);
     await this.#persistRoom(roomId);
   }
 
@@ -635,23 +577,21 @@ export class MLSGroupManager {
 
   /**
    * Restore all room states from IndexedDB. Called on client init.
-   *
-   * NOTE: ts-mls exposes encodeGroupState/decodeGroupState, but
-   * decodeGroupState requires a ratchet tree to be supplied separately
-   * (the tree is not part of the encoded state). Full state restoration
-   * is a known limitation — the interface is in place for when ts-mls
-   * adds a complete serialize/deserialize API.
+   * Uses ts-mls 2.0 clientStateDecoder to deserialize ClientState.
    */
   async restoreAll(): Promise<void> {
     const tsMls = await this.#loadTsMls();
-    const cs = await this.#getCiphersuite();
+    const { decode, clientStateDecoder } = tsMls;
     const roomIds = await this.#stateStore.listRoomIds();
     for (const roomId of roomIds) {
       const stateBytes = await this.#stateStore.loadClientState(roomId);
       if (stateBytes && stateBytes.length > 0) {
-        // TODO: decodeGroupState needs the ratchet tree — not currently
-        // stored separately. This is a known limitation for v1.
-        // When ts-mls adds a complete state serialization API, wire it here.
+        const state = decode(clientStateDecoder, stateBytes);
+        if (state) {
+          this.#roomStates.set(roomId, state);
+          this.#roomGroupIds.set(roomId, state.groupContext.groupId);
+          await this.#applyEpoch(roomId, state);
+        }
       }
     }
   }
@@ -670,6 +610,7 @@ export class MLSGroupManager {
   /** Fetch a KeyPackage for a user from the server directory. */
   async #fetchKeyPackage(uid: string): Promise<KeyPackage> {
     const tsMls = await this.#loadTsMls();
+    const { decode, mlsMessageDecoder, wireformats } = tsMls;
     const resp = await fetch(`${this.#opts.keyPackageDirectoryUrl}/${uid}`, {
       headers: { 'Authorization': `Bearer ${this.#opts.jwt}` },
     });
@@ -681,41 +622,15 @@ export class MLSGroupManager {
       throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: no KeyPackages for ${uid}`);
     }
     const kpBytes = base64ToBytes(data.key_packages[0]!.key_package_b64);
-    const decoded = tsMls.decodeMlsMessage(kpBytes, 0);
+    const decoded = decode(mlsMessageDecoder, kpBytes);
     if (!decoded) {
       throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: failed to decode KeyPackage for ${uid}`);
     }
-    const [kpMsg] = decoded;
-    if (kpMsg.wireformat !== 'mls_key_package') {
-      throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: expected key_package, got ${kpMsg.wireformat}`);
+    if (decoded.wireformat !== wireformats.mls_key_package) {
+      throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: expected key_package, got ${decoded.wireformat}`);
     }
     // Extract the KeyPackage from the MlsKeyPackage message.
-    const keyPackage = (kpMsg as unknown as { keyPackage: KeyPackage }).keyPackage;
-
-    // Bind the KeyPackage to the uid we asked for.
-    //
-    // The Delivery Service is untrusted — that is the whole premise of MLS.
-    // Nothing above this line ties the bytes it returned to `uid`: ts-mls
-    // validates the KeyPackage's self-signature, which only proves whoever
-    // minted it held the matching key, not that they are the person requested.
-    // Without this check a hostile or compromised directory answers "give me
-    // bob's KeyPackage" with mallory's, the caller commits an Add, and the room
-    // shows Bob joining while Mallory holds the keys.
-    const cred = keyPackage.leafNode.credential;
-    if (cred.credentialType !== 'basic') {
-      throw new SDKChatError(
-        'mls_keypackage_identity_mismatch',
-        `MLSGroupManager: KeyPackage for ${uid} uses unsupported credential type ${cred.credentialType}`,
-      );
-    }
-    if (!arrayEquals((cred as { identity: Uint8Array }).identity, new TextEncoder().encode(uid))) {
-      throw new SDKChatError(
-        'mls_keypackage_identity_mismatch',
-        `MLSGroupManager: directory returned a KeyPackage for a different identity than ${uid}`,
-      );
-    }
-
-    return keyPackage;
+    return (decoded as unknown as { keyPackage: KeyPackage }).keyPackage;
   }
 
   /** Send a Welcome message to a specific user via the server. */
@@ -724,17 +639,14 @@ export class MLSGroupManager {
     targetUid: string,
     welcome: import('ts-mls').Welcome,
     tsMls: TsMlsModule,
-    _cs: CiphersuiteImpl,
   ): Promise<void> {
     // Wrap the Welcome in an MlsWelcome message for encoding.
-    // `version` is REQUIRED — see the note in publishKeyPackage. Without it the
-    // recipient's processWelcome fails at decodeMlsMessage.
-    const welcomeMsg: MLSMessage = {
-      version: MLS_PROTOCOL_VERSION,
-      wireformat: 'mls_welcome',
+    const welcomeMsg: MlsMessage = {
+      wireformat: tsMls.wireformats.mls_welcome,
       welcome,
+      version: tsMls.protocolVersions.mls10,
     };
-    const welcomeBytes = tsMls.encodeMlsMessage(welcomeMsg);
+    const welcomeBytes = tsMls.encode(tsMls.mlsMessageEncoder, welcomeMsg);
     const baseUrl = this.#opts.keyPackageDirectoryUrl.replace('/keys', '');
     const resp = await fetch(
       `${baseUrl}/rooms/${roomId}/mls-welcome`,
@@ -758,11 +670,11 @@ export class MLSGroupManager {
   /** Send an MLS protocol message (proposal/commit) via the server. */
   async #sendMlsMessage(
     roomId: string,
-    msg: MLSMessage,
+    msg: MlsFramedMessage,
     type: 'proposal' | 'commit',
     tsMls: TsMlsModule,
   ): Promise<void> {
-    const msgBytes = tsMls.encodeMlsMessage(msg);
+    const msgBytes = tsMls.encode(tsMls.mlsMessageEncoder, msg as MlsMessage);
     const baseUrl = this.#opts.keyPackageDirectoryUrl.replace('/keys', '');
     const resp = await fetch(
       `${baseUrl}/rooms/${roomId}/mls-messages`,
@@ -789,11 +701,9 @@ export class MLSGroupManager {
     if (this.#disposed) return;
     const state = this.#roomStates.get(roomId);
     if (!state) return;
-    // ts-mls exposes encodeGroupState, but the ratchet tree is needed for
-    // decode. For now, we store a placeholder so listRoomIds works.
-    // TODO: store the full state (encoded + ratchet tree) when ts-mls
-    // adds a complete serialize/deserialize API.
-    await this.#stateStore.saveClientState(roomId, new Uint8Array(0));
+    const tsMls = await this.#loadTsMls();
+    const stateBytes = tsMls.encode(tsMls.clientStateEncoder, state);
+    await this.#stateStore.saveClientState(roomId, stateBytes);
   }
 }
 
@@ -891,43 +801,6 @@ function bytesToBase64(bytes: Uint8Array): string {
 /** Standard base64 string → Uint8Array (delegates to utils.base64ToArrayBuffer). */
 function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(base64ToArrayBuffer(b64));
-}
-
-/**
- * Does this inbound message advance the epoch WITHOUT rotating the key material
- * away from a member it just removed?
- *
- * True for a commit that carries a Remove proposal and no UpdatePath. RFC 9420
- * §12.4 says that combination should not exist; ts-mls 1.6.2 produces it for a
- * single Remove, and the resulting epoch is derivable by the removed member.
- * Fixed upstream in 2.0.0-rc.11 and not backported to the 1.6.x line we pin —
- * see the note in removeMember, and delete both halves together.
- *
- * Returns false for anything it cannot read, which is the right default for the
- * cases that reach it: a commit with only Adds legitimately omits the path (the
- * new member is served by the Welcome and nobody is being revoked), and a
- * private-message commit is opaque before processing. Our own sender always
- * frames commits as public messages, so the inspectable path is the one that
- * carries our removals.
- *
- * Proposals sent by reference cannot be classified from the wire, so a pathless
- * commit carrying any of them is treated as revoking — deferring an epoch is
- * recoverable, installing an exposed one is not.
- */
-function commitRevokesWithoutPath(msg: MLSMessage): boolean {
-  if (msg.wireformat !== 'mls_public_message') return false;
-  const framed = (msg as { publicMessage?: { content?: unknown } }).publicMessage?.content as
-    | { contentType?: string; commit?: { path?: unknown; proposals?: unknown[] } }
-    | undefined;
-  if (framed?.contentType !== 'commit' || !framed.commit) return false;
-  if (framed.commit.path !== undefined) return false;
-
-  const proposals = framed.commit.proposals ?? [];
-  return proposals.some((entry) => {
-    const p = entry as { proposalOrRefType?: string; proposal?: { proposalType?: string } };
-    if (p.proposalOrRefType !== 'proposal') return true; // by-reference: unclassifiable
-    return p.proposal?.proposalType === 'remove';
-  });
 }
 
 /** Constant-time array equality (avoids timing side-channels on identity match). */

@@ -39,10 +39,7 @@ export type { SFrameProviderOptions } from './sframe.js';
 // ─── MLS provider (forward secrecy, RFC 9420) ────────────────────────────────
 // ts-mls is an optional peer dependency — these exports are typed but the
 // implementation uses dynamic import('ts-mls') so it's only loaded when used.
-//
-// ⚠️ MLSStateStore does NOT persist state yet (ts-mls lacks a complete
-// serialize/deserialize API — tracked in #353). It is exported for
-// DI/testing only — do not rely on it for cross-reload state persistence.
+// MLS ClientState is persisted to IndexedDB via clientStateEncoder/Decoder.
 export { createMlsProvider } from './mls-provider.js';
 export type { MlsProvider, MlsProviderOptions, MlsCipherSuite, MLSGroupManager } from './mls-provider.js';
 export type { MLSStateStore } from './mls-state-store.js';

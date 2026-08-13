@@ -1,3 +1,5 @@
 packages:
   - "packages/*"
   - "examples/*"
+overrides:
+  sframe-ratchet: link:../sframe-ratchet-mls-chat
