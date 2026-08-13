@@ -12,14 +12,15 @@
  *     omission makes a lossy export indistinguishable from a complete one.
  *   - Pagination is followed to the end. A partial export is never returned as
  *     a complete one.
- *   - An AbortSignal is honoured BETWEEN PAGES only. It cannot interrupt a
- *     page already in flight: `ListArgs` carries no signal, so nothing reaches
- *     `list()`'s unseal loop, and on the path export almost always takes (no
- *     live subscription for the room) that loop is unbounded — it awaits
- *     `provider.unseal` per row with no deadline. A custom provider that hangs
- *     therefore hangs the export, and aborting does not free it. Do not read
- *     "cancellable" as stronger than this. See #312 for threading the signal
- *     through `list()`, which is the real fix and a public-API change.
+ *   - An AbortSignal cancels the export both BETWEEN pages and DURING one. It
+ *     is forwarded to `list()` as `ListArgs.signal` (#312), which hands it to the
+ *     HTTP fetch and to the per-row unseal, and the pagination thunk carries it
+ *     to every subsequent page. The between-pages check below remains as the
+ *     cheap fast path — it avoids starting a fetch we would only cancel.
+ *
+ *     The bound on an already-in-flight row is the decrypt chain's, not ours: a
+ *     provider that ignores the signal is force-drained in the BACKGROUND while
+ *     the caller's promise has already rejected.
  *   - Attachments are exported as the reference/URL embedded in the plaintext
  *     body, not the bytes.
  */
@@ -195,8 +196,9 @@ function toText(
  * @param roomId  The room to export.
  * @param opts    Format, page size, and/or AbortSignal.
  * @returns       {@link ExportResult} with serialised content and row counts.
- * @throws        `DOMException` (name `'AbortError'`) if the signal is aborted
- *                between pages. Throws any `SDKChatError` from `list()`.
+ * @throws        `signal.reason` if the signal is aborted — a `DOMException`
+ *                named `'AbortError'` unless the caller supplied its own reason.
+ *                Throws any `SDKChatError` from `list()`.
  */
 export async function exportRoomHistory(
   client: ExportClient,
@@ -211,7 +213,10 @@ export async function exportRoomHistory(
   let exportedRows = 0;
   let failedRows = 0;
 
-  let result = await client.list(roomId, { afterSeq: 0, limit });
+  // #312: the signal goes INTO list(), so it reaches the fetch and the per-row
+  // unseal. list()'s pagination thunk carries it forward, so every later page is
+  // cancellable too without re-passing it.
+  let result = await client.list(roomId, { afterSeq: 0, limit, signal });
   // eslint-disable-next-line no-constant-condition
   while (true) {
     for (const row of result.items) {
@@ -226,12 +231,12 @@ export async function exportRoomHistory(
 
     if (!result.hasNext || result.next === undefined) break;
 
-    // Honour AbortSignal BETWEEN PAGES. This is the only place the signal is
-    // read: it cannot interrupt the `list()` call above, which for a room with
-    // no live subscription unseals row-by-row with no bound. See the header and
-    // #312 — do not restate this as plain "cancellable".
-    if (signal?.aborted) {
-      throw new DOMException('export aborted', 'AbortError');
+    // Fast path: stop at the page boundary without starting a fetch we would only
+    // cancel. NOT the only place the signal is read — it is also inside `list()`
+    // (#312), which is what makes an in-flight page cancellable. Rethrowing
+    // `signal.reason` keeps one error identity across both paths.
+    if (signal?.aborted === true) {
+      throw signal.reason;
     }
 
     result = await result.next();
