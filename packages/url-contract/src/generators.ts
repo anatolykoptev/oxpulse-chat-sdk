@@ -15,9 +15,7 @@
  * web/roomcode.ts to avoid a circular dependency. The circular dep is broken
  * now that the canonical source lives in this package.
  *
- * Spec: docs/superpowers/specs/2026-05-20-heterogeneous-urls-design.md
- * ADR:  docs/adr/0005-heterogeneous-room-urls.md
- * Plan: docs/superpowers/plans/2026-05-22-url-contract-extract-plan.md W5.5
+ * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
 import {
@@ -29,7 +27,7 @@ import {
   DIGIT_THRESHOLD,
 } from './constants.js';
 import { appendChecksum } from './checksum.js';
-import { asRoomId } from './brands.js';
+import { asRoomId, asShortId, asShortLinkAlias, type ShortId, type ShortLinkAlias } from './brands.js';
 import type { RealKind } from './parse.js';
 
 /**
@@ -54,15 +52,38 @@ function pickFromAlphabet(alphabet: string, threshold: number): string {
 /**
  * Convert a Uint8Array to a URL-safe base64 string (no padding).
  * Replaces + with -, / with _, strips trailing =.
+ *
+ * Uses Array.join (O(N)) instead of string concatenation (O(N²)), matching
+ * the canonical pattern in `packages/crypto-primitives/src/base64url.ts`.
+ * Cross-platform: `btoa` is available in browsers, Node 16+, Deno, Bun.
  */
 function bytesToBase64Url(bytes: Uint8Array): string {
-  // Use btoa with a binary string
-  let binary = '';
+  const chars: string[] = [];
   for (let i = 0; i < bytes.length; i++) {
     // bytes[i] is always defined: i < bytes.length guarantees in-bounds access.
-    binary += String.fromCharCode(bytes[i]!);
+    chars.push(String.fromCharCode(bytes[i]!));
   }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return btoa(chars.join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Decode a base64url string (no padding) to raw bytes.
+ *
+ * Inverse of {@link bytesToBase64Url}. Throws `DOMException` (via `atob`) on
+ * invalid base64 — callers handling untrusted input should pre-validate the
+ * charset or wrap in try/catch.
+ *
+ * Cross-platform: `atob` is available in browsers, Node 16+, Deno, Bun.
+ */
+export function base64urlToBytes(s: string): Uint8Array {
+  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+  const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
 }
 
 /**
@@ -94,7 +115,8 @@ function bytesToBase64Url(bytes: Uint8Array): string {
  *     check protects against a future change to the byte count or the
  *     encoder.
  *
- * Regenerate (up to 8 tries) until clean.
+ * Regenerate (up to 8 tries) until clean. After 8 unsafe draws (≈8.5e-12),
+ * THROWS — fail-closed, never silently returns an unsafe value (issue #327).
  *
  * P(needing >1 draw):
  *   adjacency  — 21 positions × 2 patterns × (1/64)² ≈ 1.025%
@@ -114,9 +136,16 @@ export function messengerSafeBase64Url16(): string {
     if (!isMessengerSafe(s)) continue;
     return s;
   }
-  // Extremely unlikely (≈8.5e-12) all 8 draws were unsafe; return last anyway.
-  // A non-messenger-safe value is preferable to an error in room creation / join.
-  return bytesToBase64Url(bytes);
+  // Fail-closed (issue #327): all 8 draws were messenger-unsafe (≈8.5e-12
+  // probability). A non-messenger-safe URL would break when shared via
+  // Telegram/WhatsApp (underscore stripping) — a silent, user-visible failure
+  // worse than a retry. Throw so the caller can surface a clear error and the
+  // user retries, instead of receiving a link that silently breaks.
+  // This also satisfies the must-log rule: the throw IS the observable signal.
+  throw new Error(
+    'messengerSafeBase64Url16: CSPRNG produced 8 consecutive unsafe draws ' +
+      '(probability ≈8.5e-12) — possible CSPRNG failure or extremely bad luck',
+  );
 }
 
 /**
@@ -180,4 +209,65 @@ export function generateRoomCode(kind: RealKind): string {
   const bare = `${firstLetter}${restLetters}-${digits}`;
   // appendChecksum validates the 9-char payload and appends the checksum char.
   return appendChecksum(asRoomId(bare));
+}
+
+// ── ShortId / ShortLinkAlias generators (#326) ──────────────────────────────
+
+/**
+ * Alphanumeric alphabet for ShortId and ShortLinkAlias generation.
+ * 62 chars: A-Z, a-z, 0-9 — matches the ShortId and ShortLinkAlias regex.
+ */
+const ALPHANUMERIC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; // 62 chars
+
+/**
+ * Rejection-sampling threshold for the 62-char alphanumeric alphabet.
+ * Largest multiple of 62 that fits in a single byte: floor(256/62)*62 = 248.
+ */
+const ALPHANUMERIC_THRESHOLD = Math.floor(256 / ALPHANUMERIC.length) * ALPHANUMERIC.length; // 248
+
+/**
+ * Generate a CSPRNG-based opaque alphanumeric ShortId.
+ *
+ * Uses rejection sampling to avoid modulo bias (same pattern as
+ * {@link pickFromAlphabet}). All entropy comes from `crypto.getRandomValues`.
+ *
+ * @param length - Number of characters to generate (default 12, minimum 4
+ *   to satisfy the ShortId brand shape `^[A-Za-z0-9]{4,}$`).
+ * @returns A branded `ShortId` — valid session IDs, invite tokens, etc.
+ * @throws RangeError if `length` is less than 4.
+ */
+export function generateShortId(length: number = 12): ShortId {
+  if (length < 4) {
+    throw new RangeError(`generateShortId: length must be >= 4 (ShortId minimum), got ${length}`);
+  }
+  let s = '';
+  for (let i = 0; i < length; i++) {
+    s += pickFromAlphabet(ALPHANUMERIC, ALPHANUMERIC_THRESHOLD);
+  }
+  return asShortId(s);
+}
+
+/**
+ * Generate a CSPRNG-based opaque ShortLinkAlias for the `/s/<alias>` URL space.
+ *
+ * Generates a 4-6 character alphanumeric alias matching the server-side
+ * authority (`crates/server/src/alias_resolver/alphabet.rs`,
+ * `ALIAS_LEN_MIN..ALIAS_LEN_MAX = 4..6`). Uses rejection sampling.
+ *
+ * @param length - Number of characters (default 5, must be 4-6 to satisfy
+ *   the ShortLinkAlias brand shape `^[A-Za-z0-9]{4,6}$`).
+ * @returns A branded `ShortLinkAlias`.
+ * @throws RangeError if `length` is outside [4, 6].
+ */
+export function generateShortLinkAlias(length: number = 5): ShortLinkAlias {
+  if (length < 4 || length > 6) {
+    throw new RangeError(
+      `generateShortLinkAlias: length must be in [4, 6] (ShortLinkAlias range), got ${length}`,
+    );
+  }
+  let s = '';
+  for (let i = 0; i < length; i++) {
+    s += pickFromAlphabet(ALPHANUMERIC, ALPHANUMERIC_THRESHOLD);
+  }
+  return asShortLinkAlias(s);
 }
