@@ -254,6 +254,30 @@ export interface ListArgs {
   beforeSeq?: number;
   /** Maximum rows returned. Defaults to 50, server-capped at 200. */
   limit?: number;
+  /**
+   * #312: cancel this call. Reaches BOTH of its legs — the HTTP fetch (handed
+   * straight to `fetch`) and the per-row unseal, which runs on the room's serial
+   * decrypt chain.
+   *
+   * On abort `list()` rejects with `signal.reason` — a `DOMException` named
+   * `'AbortError'` for a plain `AbortController.abort()` — AS SOON AS the abort
+   * fires. It does not wait for the page's remaining rows.
+   *
+   * A row whose unseal had not yet STARTED is never handed to `provider.unseal`,
+   * so no ratchet or replay state advances for it. A row already in flight has
+   * its provider signalled; a provider that ignores the signal is still bounded
+   * by the chain's force-drain, and that drain runs in the BACKGROUND — the
+   * caller has already been rejected, and the drain is what keeps the room's
+   * chain entry from leaking, so the next list()/subscribe() is unaffected.
+   *
+   * The force-drain bound is PER ROW and the chain is serial, so without this
+   * signal a caller waited that bound once per row on the page. That is the cost
+   * this exists to remove; it is not a single flat timeout.
+   *
+   * The pagination thunk ({@link ListResult.next}) inherits this signal, so one
+   * signal cancels a whole paged walk.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -676,11 +700,12 @@ export interface ExportRoomOptions {
    */
   limit?: number;
   /**
-   * Checked BETWEEN PAGES only. It cannot interrupt a page already in flight:
-   * `ListArgs` carries no signal, so nothing reaches `list()`'s per-row unseal.
-   * For a room with no live subscription — the usual export case — that loop is
-   * unbounded, so a hanging crypto provider hangs the export and aborting will
-   * not free it. See #312.
+   * Cancels the export, both BETWEEN pages and DURING one. Forwarded to `list()`
+   * as {@link ListArgs.signal} (#312), so it reaches the HTTP fetch and the
+   * per-row unseal; the cheap between-pages check remains as the fast path.
+   *
+   * Rejects with `signal.reason` — a `DOMException` named `'AbortError'` unless
+   * the caller supplied its own reason to `abort()`.
    */
   signal?: AbortSignal;
 }

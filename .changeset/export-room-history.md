@@ -9,6 +9,7 @@ serialises the decrypted rows as JSON (canonical) or text. Rows that failed to
 unseal are exported as explicit error entries carrying `seq`, `msgId` and
 `unsealError` — never skipped. `ExportResult` reports `totalRows`,
 `exportedRows` and `failedRows` so a caller can tell a clean export from a
-lossy one without diffing the output. An `AbortSignal` is honoured between
-pages. New module `export.ts` (does not grow `client.ts`); thin delegating
-method on `SDKChatClient`.
+lossy one without diffing the output. An `AbortSignal` cancels the export
+(see the `ListArgs.signal` entry — both land in this release, and cancellation
+is not limited to page boundaries). New module `export.ts` (does not grow
+`client.ts`); thin delegating method on `SDKChatClient`.

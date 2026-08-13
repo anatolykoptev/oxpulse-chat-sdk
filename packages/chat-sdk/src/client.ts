@@ -250,6 +250,21 @@ const DECRYPT_DEADLINE_MS = 5000;
  * provider (e.g. a KMS round-trip) deliver its real plaintext rather than being dropped.
  */
 const DECRYPT_FORCE_DRAIN_GRACE_MS = 5000;
+/**
+ * #312: true when `err` is the CANCELLATION of `signal` rather than a transport
+ * failure. Identity against `signal.reason` first, so a caller-supplied reason of
+ * any shape is recognised; the DOM name is the fallback for a fetch implementation
+ * that mints its own AbortError. Wrapping an abort as SDKChatError('network') would
+ * make a cancelled call indistinguishable from a dropped connection.
+ */
+function isAbortError(err: unknown, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted === true && err === signal.reason) return true;
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'AbortError'
+  );
+}
 
 // ─── Phase 2: crypto_mode helpers ────────────────────────────────────────────
 
@@ -914,8 +929,13 @@ export class SDKChatClient {
     try {
       resp = await fetch(`${this.#baseUrl}/api/sdk/messages?${params}`, {
         headers: { Authorization: `Bearer ${this.#jwt}` },
+        signal: args.signal,
       });
     } catch (err) {
+      // #312: an abort must surface AS an abort. Swallowing it into
+      // SDKChatError('network') would break the AbortError contract that
+      // exportRoomHistory documents and that a caller races on.
+      if (isAbortError(err, args.signal)) throw err;
       throw new SDKChatError('network', String(err));
     }
 
@@ -972,7 +992,7 @@ export class SDKChatClient {
     // shared helper so list() resolves plaintext/E2EE/on-chain-vs-off-chain
     // identically to getThread() and searchByProductRef() — see
     // #unsealFetchedRows for the plaintext/E2EE/decrypt-chain rationale.
-    const items = await this.#unsealFetchedRows(roomId, rawItems);
+    const items = await this.#unsealFetchedRows(roomId, rawItems, args.signal);
 
     const result: ListResult = { items, hasNext: hasMore };
     if (hasMore && nextCursor != null) {
@@ -995,10 +1015,9 @@ export class SDKChatClient {
    *
    * Walks `list()` forward from the beginning of the room to exhaustion. Rows
    * that failed to unseal are exported as explicit error entries (never
-   * skipped). An `AbortSignal` is checked BETWEEN PAGES only — it cannot
-   * interrupt a page already in flight, and for a room with no live
-   * subscription `list()`'s unseal loop is unbounded, so a hanging provider
-   * hangs the export. See #312.
+   * skipped). An `AbortSignal` cancels the export both between pages and DURING
+   * one: it is forwarded to `list()` (#312), so it reaches the HTTP fetch and the
+   * per-row unseal rather than only the page boundary.
    *
    * @param roomId  The room to export.
    * @param opts    Format (`'json'` default / `'text'`), page size, AbortSignal.
@@ -1062,12 +1081,33 @@ export class SDKChatClient {
     mappedRow: MessageRow,
     onMessage: (row: MessageRow) => void,
     source = 'decrypt task',
+    signal?: AbortSignal,
   ): void {
     const provider = this.#cryptoProvider;
     if (provider === null) return;
     const deadlineMs = DECRYPT_DEADLINE_MS;
     const forceDrainMs = deadlineMs + DECRYPT_FORCE_DRAIN_GRACE_MS;
+    // Deliver a row exactly once, absorbing a throwing caller callback so it can
+    // neither re-deliver the row as an unseal error nor reject the chain link
+    // (which would wedge the room's serial chain).
+    const deliver = (row: MessageRow): void => {
+      try {
+        onMessage(row);
+      } catch (cbErr) {
+        console.warn(`[chat-sdk] ${source}: onMessage threw for seq`, mappedRow.seq, cbErr);
+      }
+    };
     this.#decryptChain.append(roomId, async () => {
+      // #312: the caller cancelled before this row's turn came up. Deliver it
+      // UNTOUCHED — sealed intact, no plaintext, no unsealError — the honest "no
+      // unseal was attempted" state (ExportMessageRow names it 'not-decrypted'),
+      // never a synthesised failure. provider.unseal is not called, so no ratchet
+      // or replay state advances for a row the caller cancelled. The chain
+      // contract holds: onMessage still fires exactly once.
+      if (signal?.aborted === true) {
+        deliver(mappedRow);
+        return;
+      }
       const ctx: SealContext = { roomId, senderUid: mappedRow.senderUid };
 
       // The row is delivered exactly once, by whichever fires first: the real unseal
@@ -1088,6 +1128,14 @@ export class SDKChatClient {
       // honors it at its await boundaries. Manual AbortController (not
       // AbortSignal.timeout) so the test harness's fake timers can drive it.
       const controller = new AbortController();
+      // #312: forward a CALLER abort to the provider so a signal-honoring one bails
+      // now instead of at the 5s deadline. A provider that ignores it is still
+      // bounded by the force-drain below — the bound is unchanged, only its
+      // best-case latency improves.
+      const forwardAbort = (): void => {
+        controller.abort(signal?.reason);
+      };
+      signal?.addEventListener('abort', forwardAbort, { once: true });
       const deadlineTimer = setTimeout(() => {
         controller.abort(new DOMException(`unseal deadline exceeded (${deadlineMs}ms)`, 'TimeoutError'));
         console.warn(
@@ -1143,17 +1191,14 @@ export class SDKChatClient {
         // safe no-op.
         clearTimeout(deadlineTimer);
         clearTimeout(forceDrainTimer);
+        signal?.removeEventListener('abort', forwardAbort);
       }
 
       // Deliver exactly once, AFTER the race, so a throwing caller callback neither
       // re-delivers the row as an unseal error nor rejects the link (which would wedge
       // the room's serial chain). `out` is always set — the race resolves only via a
       // settleWith() call.
-      try {
-        onMessage(out!);
-      } catch (cbErr) {
-        console.warn(`[chat-sdk] ${source}: onMessage threw for seq`, mappedRow.seq, cbErr);
-      }
+      deliver(out!);
     });
   }
 
@@ -1178,15 +1223,41 @@ export class SDKChatClient {
    * still drain even if the subscription tears down afterward — release() defers
    * entry removal until the chain drains — so the returned promise always settles.
    */
-  #unsealRowsOnChain(roomId: string, rawItems: MessageRow[]): Promise<MessageRow[]> {
-    return Promise.all(
+  #unsealRowsOnChain(
+    roomId: string,
+    rawItems: MessageRow[],
+    signal?: AbortSignal,
+  ): Promise<MessageRow[]> {
+    // #312: already cancelled — append nothing. The caller's acquire/release still
+    // balances, and no unseal is attempted for a page the caller no longer wants.
+    if (signal?.aborted === true) return Promise.reject(signal.reason);
+    const page = Promise.all(
       rawItems.map(
         (row) =>
           new Promise<MessageRow>((resolve) => {
-            this.#appendDecryptTask(roomId, row, resolve, 'list() scrollback');
+            this.#appendDecryptTask(roomId, row, resolve, 'list() scrollback', signal);
           }),
       ),
     );
+    if (signal === undefined) return page;
+    // #312: reject the CALLER the moment the abort fires, rather than after the
+    // page's remaining rows drain (serial × per-row force-drain, which for a full
+    // page is minutes). The appended tasks are NOT cancelled — a pending JS promise
+    // cannot be — they DRAIN in the background: a task that has not started
+    // short-circuits without calling provider.unseal, and an in-flight one is
+    // signalled and, failing that, force-drained. That drain is load-bearing:
+    // RoomDecryptChain.release defers its entry delete until the tail settles, so
+    // abandoning the page here still leaves the room clean for the next
+    // list()/subscribe() instead of leaking a chain entry.
+    return new Promise<MessageRow[]>((resolve, reject) => {
+      const onAbort = (): void => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+      page.then(resolve, reject).finally(() => {
+        // Removed on EVERY outcome: exportRoomHistory walks N pages with ONE
+        // long-lived signal, so a listener left per page would accumulate.
+        signal.removeEventListener('abort', onAbort);
+      });
+    });
   }
 
   async #fetchSubscribeTicket(roomId: string, afterSeq: number): Promise<string> {
@@ -2189,7 +2260,11 @@ export class SDKChatClient {
    * list() previously kept a divergent inline copy that skipped the
    * #cryptoMode fallback below).
    */
-  async #unsealFetchedRows(roomId: string, rawItems: MessageRow[]): Promise<MessageRow[]> {
+  async #unsealFetchedRows(
+    roomId: string,
+    rawItems: MessageRow[],
+    signal?: AbortSignal,
+  ): Promise<MessageRow[]> {
     // Prefer the per-room discovered mode, then the configured expectation.
     // This matches the fallback used by send() / sendText() (#effectiveMode) —
     // a room whose crypto_mode has not yet been discovered (server omitted the
@@ -2234,7 +2309,7 @@ export class SDKChatClient {
         this.#decryptChain.acquire(roomId);
       }
       try {
-        return await this.#unsealRowsOnChain(roomId, rawItems);
+        return await this.#unsealRowsOnChain(roomId, rawItems, signal);
       } finally {
         if (!hadLiveSubscriber) {
           this.#decryptChain.release(roomId);

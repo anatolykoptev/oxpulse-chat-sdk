@@ -169,29 +169,56 @@ describe('exportRoomHistory — contract', () => {
     expect(result.content).toContain('[unseal error: replay]');
   });
 
+  /**
+   * Abort as soon as the first page returns, i.e. before the loop calls next().
+   * (The original had a tautological if/else on `res.hasNext` with the same call
+   * in both arms; collapsed while rewriting this block.)
+   */
+  function abortAfterFirstPage(
+    client: ExportClient,
+    controller: AbortController,
+    reason?: unknown,
+  ): void {
+    const originalList = client.list;
+    client.list = vi.fn(async (roomId: string, args?: ListArgs) => {
+      const res = await originalList(roomId, args);
+      controller.abort(reason);
+      return res;
+    }) as ExportClient['list'];
+  }
+
   it('honours AbortSignal between pages', async () => {
     const client = mockClient([
       [decryptedRow(1, 'page-1')],
       [decryptedRow(2, 'page-2')],
     ]);
-
     const controller = new AbortController();
-    // Abort after the first page is fetched (before the second page call).
-    const originalList = client.list;
-    client.list = vi.fn(async (roomId: string, args?: ListArgs) => {
-      const res = await originalList(roomId, args);
-      // Abort right after the first page returns, before the loop calls next().
-      if (!res.hasNext) {
-        controller.abort();
-      } else {
-        controller.abort();
-      }
-      return res;
-    }) as ExportClient['list'];
+    abortAfterFirstPage(client, controller);
 
     await expect(
       exportRoomHistory(client, 'room-abort', { signal: controller.signal }),
-    ).rejects.toThrow('export aborted');
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('rethrows the CALLER\'s abort reason, not a message of its own (#312)', async () => {
+    // MUTATION GATE — must go RED:
+    //   export.ts — replace `throw signal.reason` with
+    //     `throw new DOMException('export aborted', 'AbortError');`
+    //   which is what this path did before #312. The caller's reason is then
+    //   discarded, and the page-boundary path stops matching what `list()` throws
+    //   from INSIDE a page — one cancellation, two error identities, depending on
+    //   timing the caller does not control.
+    const client = mockClient([
+      [decryptedRow(1, 'page-1')],
+      [decryptedRow(2, 'page-2')],
+    ]);
+    const reason = new Error('user closed the export dialog');
+    const controller = new AbortController();
+    abortAfterFirstPage(client, controller, reason);
+
+    await expect(
+      exportRoomHistory(client, 'room-abort-reason', { signal: controller.signal }),
+    ).rejects.toBe(reason);
   });
 
   it('passes afterSeq=0 and limit to the first list() call', async () => {
