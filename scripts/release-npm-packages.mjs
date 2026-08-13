@@ -244,6 +244,12 @@ async function publishPackageOidc(pkg, localVersion) {
 		//   - --provenance: emits a signed attestation — only works with a PUBLIC repo.
 		const res = spawnSync('npm', publishArgs, { stdio: 'inherit', encoding: 'utf8' });
 		if (res.status !== 0) {
+			// Soft-skip: package exists on npm but trusted publisher is not
+			// configured (E404 on PUT). Log + continue instead of failing.
+			if (SOFT_PACKAGES_OIDC.has(pkg.name)) {
+				log(`[release-npm] SOFT-SKIP: ${pkg.name} OIDC publish failed (exit=${res.status}) — trusted publisher not configured. Configure on npmjs.com → Settings → Publishing access, then remove from SOFT_PACKAGES_OIDC. SKIPPING (non-fatal).`);
+				return;
+			}
 			fail(1, `npm publish (OIDC) failed for ${pkg.name} (exit=${res.status}) — aborting release`);
 		}
 
