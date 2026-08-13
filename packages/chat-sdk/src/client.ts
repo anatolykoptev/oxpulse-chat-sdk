@@ -2037,16 +2037,28 @@ export class SDKChatClient {
    *
    * Scope: rooms:write:*.
    *
-   * Status mapping — note the server's split, which is deliberate and not the obvious one:
-   *   404→not_found     the alias is MALFORMED only (fails the [A-Za-z0-9]{4,6} shape check).
-   *   403→forbidden     the alias is well-formed but absent, EXPIRED, for another room, or
-   *                     not a group-chat alias. The server returns 403 rather than 404 so the
-   *                     joiner learns the link is invalid for THIS room without learning
-   *                     whether it exists for some other room.
-   *   500/503→server_error  DB error during alias lookup or membership insert.
+   * Status mapping. The server's split is deliberate and not the obvious one, so this lists
+   * every return path in the order the handler evaluates them:
    *
-   * So an EXPIRED link surfaces as `forbidden`, not `not_found` — a caller that branches on
-   * `not_found` to show "this link has expired" will never reach that branch.
+   *   403→forbidden       caller lacks the `rooms:write:*` scope. Checked FIRST, before the
+   *                       alias is looked at.
+   *   404→not_found       the alias is MALFORMED — fails the [A-Za-z0-9]{4,6} shape check.
+   *                       Shape only; nothing about whether it exists.
+   *   503→server_error    DB error during the alias lookup.
+   *   403→forbidden       the alias is well-formed but absent, EXPIRED, for another room, or
+   *                       not a group-chat alias. The server returns 403 rather than 404 so
+   *                       the joiner learns the link is invalid for THIS room without
+   *                       learning whether it exists for some other room.
+   *   500→server_error    DB error on the membership check, or on the member insert.
+   *   200                 joined, or already a member (see `joined` below).
+   *
+   * Two consequences worth stating outright, because both mislead a caller writing error
+   * handling:
+   *   - An EXPIRED link arrives as `forbidden`, NOT `not_found`. A branch on `not_found`
+   *     meaning "this link has expired" is never reached.
+   *   - `forbidden` is NOT sufficient to conclude "bad link" — a mis-scoped token produces the
+   *     same code from an earlier check. Distinguish by whether other scoped calls also fail;
+   *     the status alone cannot separate the two.
    *
    * `joined: false` in the response means the caller was ALREADY a member — this is
    * the idempotent success path, NOT an error. The method returns it as-is.
