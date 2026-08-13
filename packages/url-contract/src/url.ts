@@ -169,7 +169,7 @@ export function buildShortLinkUrl(origin: string, alias: ShortLinkAlias): string
   const validated = tryAsShortLinkAlias(alias);
   if (!validated) throw new TypeError(`buildShortLinkUrl: invalid ShortLinkAlias: ${alias}`);
   const base = origin.replace(/\/$/, '');
-  return `${base}/s/${encodeURIComponent(alias)}`;
+  return `${base}/s/${encodeURIComponent(validated)}`;
 }
 
 // ── Parsing ──────────────────────────────────────────────────────────────────
@@ -205,17 +205,19 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
   const pathParts = parsed.pathname.split('/').filter(Boolean);
 
   // Route prefix detection: /r/, /c/, /m/ have a prefix; bare-root has none.
+  // Reject URLs with extra path segments (e.g. /r/<roomId>/extra) — a room URL
+  // has exactly one path segment after the optional prefix.
   let routePrefix = '';
   let roomIdStr: string | null = null;
 
-  if (pathParts.length >= 2) {
+  if (pathParts.length === 2) {
     const prefix = pathParts[0]!;
     if (prefix === 'r' || prefix === 'c' || prefix === 'm') {
       routePrefix = `/${prefix}/`;
       roomIdStr = decodeURIComponent(pathParts[1]!);
     }
   }
-  if (roomIdStr === null && pathParts.length >= 1) {
+  if (roomIdStr === null && pathParts.length === 1) {
     // Bare-root: /<roomId> (1:1 call)
     routePrefix = '';
     roomIdStr = decodeURIComponent(pathParts[0]!);

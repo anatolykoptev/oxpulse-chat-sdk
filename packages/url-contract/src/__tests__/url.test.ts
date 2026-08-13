@@ -224,6 +224,26 @@ describe('parseRoomUrl', () => {
     expect(parseRoomUrl('')).toBeNull();
   });
 
+  it('rejects URLs with extra path segments after /r/<roomId>', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/r/${roomId}/extra`)).toBeNull();
+  });
+
+  it('rejects URLs with extra path segments after /c/<roomId>', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/c/${roomId}/extra`)).toBeNull();
+  });
+
+  it('rejects URLs with extra path segments after /m/<roomId>', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/m/${roomId}/extra`)).toBeNull();
+  });
+
+  it('rejects URLs with extra path segments after bare-root /<roomId>', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/${roomId}/extra`)).toBeNull();
+  });
+
   it('legacy bare codes round-trip through bare-root', () => {
     const bare = 'GHJK-1234';
     const roomId = asRoomId(bare);
