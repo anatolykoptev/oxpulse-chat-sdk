@@ -6,6 +6,7 @@ import { aesGcmSeal, aesGcmOpen } from './aead.ts';
 import { encodeMessageEnvelope, decodeMessageEnvelope, type MessageEnvelopeV1 } from './envelope.ts';
 import { derivePeerIdTarget } from './peer-id.ts';
 import { zeroize } from './zeroize.ts';
+import { timingSafeEqual } from './timing-safe.ts';
 
 const AAD_PREFIX = new TextEncoder().encode('oxp/pw/v1'); // 9 bytes
 const HKDF_INFO = new TextEncoder().encode('oxp/pairwise/v1'); // 15 bytes
@@ -82,11 +83,32 @@ export async function sealMessage(args: SealMessageArgs): Promise<Uint8Array> {
 	return encodeMessageEnvelope(env);
 }
 
+/**
+ * Replay window interface — caller provides the storage backing.
+ *
+ * Per e2ee-invariants §5: replay defense must be DURABLE (survive reload).
+ * `crypto-primitives` does not implement storage — the caller (`chat-sdk`)
+ * provides a concrete implementation (in-memory Set for tests, IndexedDB
+ * for production). The interface is minimal so any backend can adapt.
+ *
+ * INVARIANT: `add` is called ONLY after a successful unseal — never on
+ * AEAD failure or sig failure. This prevents an attacker from poisoning
+ * the window with invalid msgIds that would block legitimate future messages.
+ */
+export interface ReplayWindow {
+	/** Returns true if msgId has been seen before. Constant-time comparison. */
+	has(msgId: Uint8Array): boolean;
+	/** Record msgId as seen. Called ONLY after successful AEAD open. */
+	add(msgId: Uint8Array): void;
+}
+
 export interface OpenMessageArgs {
 	envelopeBytes: Uint8Array;
 	recipientX25519Priv: Uint8Array; // 32 bytes
 	recipientX25519Pub: Uint8Array; // 32 bytes — for HKDF salt + sig verify
 	expectedSenderEd25519Pub: Uint8Array; // caller looks up from contact cache
+	/** Optional replay window — if provided, replayed msgIds are rejected. */
+	replayWindow?: ReplayWindow;
 }
 
 export interface OpenMessageResult {
@@ -107,7 +129,13 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	const nonce = env.innerCiphertext.subarray(32, 44);
 	const ctAndTag = env.innerCiphertext.subarray(44);
 
-	// 3. Verify sender signature BEFORE AEAD (fail-fast, decision #11).
+	// 3. Replay check — BEFORE sig verify (fail-fast, avoids wasted sig work).
+	//    Uses the caller-provided ReplayWindow (durable storage in production).
+	if (args.replayWindow && args.replayWindow.has(env.msgId)) {
+		throw new Error('crypto-primitives/pairwise: replayed message (msgId already seen)');
+	}
+
+	// 4. Verify sender signature BEFORE AEAD (fail-fast, decision #11).
 	//    Sig covers: SHA-256(IC) ‖ msg_id ‖ recipient_x25519_pub
 	//    zip215:false aligns with server dalek::verify_strict (RFC 8032 strict).
 	if (
@@ -121,20 +149,20 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 		throw new Error('crypto-primitives/pairwise: sender signature invalid');
 	}
 
-	// 4. DH + HKDF
+	// 5. DH + HKDF
 	const ss = deriveSharedSecret(args.recipientX25519Priv, ephPub);
 	const salt = new Uint8Array(64);
 	salt.set(args.recipientX25519Pub, 0);
 	salt.set(ephPub, 32);
 	const kdfKey = deriveKey(ss, salt, HKDF_INFO, 32);
 
-	// 5. AAD = "oxp/pw/v1" ‖ sender_ed25519_pub(32) ‖ msg_id(16)
+	// 6. AAD = "oxp/pw/v1" ‖ sender_ed25519_pub(32) ‖ msg_id(16)
 	const aad = new Uint8Array(AAD_PREFIX.length + 32 + 16);
 	aad.set(AAD_PREFIX, 0);
 	aad.set(args.expectedSenderEd25519Pub, AAD_PREFIX.length);
 	aad.set(env.msgId, AAD_PREFIX.length + 32);
 
-	// 6. AEAD open
+	// 7. AEAD open
 	let plaintext: Uint8Array;
 	try {
 		plaintext = await aesGcmOpen(kdfKey, nonce, aad, ctAndTag);
@@ -147,6 +175,12 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	// Zeroize shared secret + KDF key — no longer needed after successful open (#282).
 	zeroize(ss);
 	zeroize(kdfKey);
+
+	// 8. Record msgId in replay window — ONLY after successful AEAD open
+	//    (e2ee-invariants §5: advance window only after successful unseal).
+	if (args.replayWindow) {
+		args.replayWindow.add(env.msgId);
+	}
 
 	return { plaintext, msgId: env.msgId, flags: env.flags };
 }

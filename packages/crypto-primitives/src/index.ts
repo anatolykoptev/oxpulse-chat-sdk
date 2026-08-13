@@ -30,6 +30,7 @@ export {
 	type SealMessageArgs,
 	type OpenMessageArgs,
 	type OpenMessageResult,
+	type ReplayWindow,
 } from './pairwise-seal.ts';
 
 // Timing-safe comparison (ADR-008: public exports)

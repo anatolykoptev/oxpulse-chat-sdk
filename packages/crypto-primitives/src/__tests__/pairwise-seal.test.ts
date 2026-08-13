@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { x25519, ed25519 } from '@noble/curves/ed25519.js';
-import { sealMessage, openMessage } from '../pairwise-seal.ts';
+import { sealMessage, openMessage, type ReplayWindow } from '../pairwise-seal.ts';
 import { decodeMessageEnvelope } from '../envelope.ts';
 
 function makeSender() {
@@ -224,5 +224,136 @@ describe('pairwise-seal', () => {
 				expectedSenderEd25519Pub: smallOrderPub,
 			}),
 		).rejects.toThrow(/sender signature invalid/i);
+	});
+});
+
+describe('pairwise-seal: replay protection (#283)', () => {
+	/** In-memory ReplayWindow for testing — production uses IndexedDB-backed. */
+	class InMemoryReplayWindow implements ReplayWindow {
+		private seen = new Map<string, Uint8Array>();
+
+		has(msgId: Uint8Array): boolean {
+			for (const [, existing] of this.seen) {
+				if (existing.byteLength === msgId.byteLength) {
+					let diff = 0;
+					for (let i = 0; i < existing.byteLength; i++) {
+						diff |= existing[i] ^ msgId[i];
+					}
+					if (diff === 0) return true;
+				}
+			}
+			return false;
+		}
+
+		add(msgId: Uint8Array): void {
+			const copy = new Uint8Array(msgId);
+			this.seen.set(Buffer.from(copy).toString('hex'), copy);
+		}
+	}
+
+	it('first open succeeds, second open (replay) is rejected', async () => {
+		const sender = makeSender();
+		const recipient = makeRecipient();
+		const plaintext = new TextEncoder().encode('replay me');
+		const window = new InMemoryReplayWindow();
+
+		const { env } = await seal(sender, recipient, plaintext);
+
+		// First open — succeeds
+		const result1 = await openMessage({
+			envelopeBytes: env,
+			recipientX25519Priv: recipient.x.secretKey,
+			recipientX25519Pub: recipient.x.publicKey,
+			expectedSenderEd25519Pub: sender.e.publicKey,
+			replayWindow: window,
+		});
+		expect(result1.plaintext).toEqual(plaintext);
+
+		// Second open (same envelope) — rejected as replay
+		await expect(
+			openMessage({
+				envelopeBytes: env,
+				recipientX25519Priv: recipient.x.secretKey,
+				recipientX25519Pub: recipient.x.publicKey,
+				expectedSenderEd25519Pub: sender.e.publicKey,
+				replayWindow: window,
+			}),
+		).rejects.toThrow(/replayed message/i);
+	});
+
+	it('without replayWindow: same envelope opens twice (backward compat)', async () => {
+		const sender = makeSender();
+		const recipient = makeRecipient();
+		const plaintext = new TextEncoder().encode('no replay window');
+		const { env } = await seal(sender, recipient, plaintext);
+
+		const result1 = await open(env, recipient, sender);
+		const result2 = await open(env, recipient, sender);
+		expect(result1.plaintext).toEqual(plaintext);
+		expect(result2.plaintext).toEqual(plaintext);
+	});
+
+	it('AEAD failure does NOT add msgId to replay window', async () => {
+		const sender = makeSender();
+		const recipient = makeRecipient();
+		const wrongRecipient = makeRecipient();
+		const plaintext = new TextEncoder().encode('wrong key test');
+		const window = new InMemoryReplayWindow();
+
+		const { env } = await seal(sender, recipient, plaintext);
+
+		// Open with wrong recipient — AEAD will fail, msgId must NOT be added to window
+		await expect(
+			openMessage({
+				envelopeBytes: env,
+				recipientX25519Priv: wrongRecipient.x.secretKey,
+				recipientX25519Pub: wrongRecipient.x.publicKey,
+				expectedSenderEd25519Pub: sender.e.publicKey,
+				replayWindow: window,
+			}),
+		).rejects.toThrow();
+
+		// Window must be empty — AEAD failure did not add msgId
+		expect(window.has(new Uint8Array(16))).toBe(false);
+
+		// Now open with correct recipient — must succeed (not blocked by poisoned window)
+		const result = await openMessage({
+			envelopeBytes: env,
+			recipientX25519Priv: recipient.x.secretKey,
+			recipientX25519Pub: recipient.x.publicKey,
+			expectedSenderEd25519Pub: sender.e.publicKey,
+			replayWindow: window,
+		});
+		expect(result.plaintext).toEqual(plaintext);
+	});
+
+	it('different msgIds: both open successfully', async () => {
+		const sender = makeSender();
+		const recipient = makeRecipient();
+		const window = new InMemoryReplayWindow();
+
+		const msgId1 = crypto.getRandomValues(new Uint8Array(16));
+		const msgId2 = crypto.getRandomValues(new Uint8Array(16));
+
+		const { env: env1 } = await seal(sender, recipient, new TextEncoder().encode('msg1'), msgId1);
+		const { env: env2 } = await seal(sender, recipient, new TextEncoder().encode('msg2'), msgId2);
+
+		const r1 = await openMessage({
+			envelopeBytes: env1,
+			recipientX25519Priv: recipient.x.secretKey,
+			recipientX25519Pub: recipient.x.publicKey,
+			expectedSenderEd25519Pub: sender.e.publicKey,
+			replayWindow: window,
+		});
+		expect(new TextDecoder().decode(r1.plaintext)).toBe('msg1');
+
+		const r2 = await openMessage({
+			envelopeBytes: env2,
+			recipientX25519Priv: recipient.x.secretKey,
+			recipientX25519Pub: recipient.x.publicKey,
+			expectedSenderEd25519Pub: sender.e.publicKey,
+			replayWindow: window,
+		});
+		expect(new TextDecoder().decode(r2.plaintext)).toBe('msg2');
 	});
 });
