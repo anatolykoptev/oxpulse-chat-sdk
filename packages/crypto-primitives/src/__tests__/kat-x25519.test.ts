@@ -1,16 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { hexToBytes } from '@noble/hashes/utils.js';
 import { generateEphemeralKeypair, deriveSharedSecret } from '../x25519.ts';
 
 // RFC 7748 §6.1 — X25519 test vectors.
 // https://datatracker.ietf.org/doc/html/rfc7748#section-6.1
 
-function hexToBytes(hex: string): Uint8Array {
-	const out = new Uint8Array(hex.length / 2);
-	for (let i = 0; i < hex.length; i += 2) {
-		out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-	}
-	return out;
-}
 
 describe('KAT: RFC 7748 §6.1 X25519', () => {
 	// Vector 1 — Alice and Bob's keys + shared secret

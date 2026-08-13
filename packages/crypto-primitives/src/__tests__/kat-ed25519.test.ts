@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { hexToBytes } from '@noble/hashes/utils.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 
 // RFC 8032 §7.1 — Ed25519 test vectors.
@@ -8,13 +9,6 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 // matches the standard. This is a KAT for the underlying Ed25519
 // implementation that pairwise-seal.ts relies on for signatures.
 
-function hexToBytes(hex: string): Uint8Array {
-	const out = new Uint8Array(hex.length / 2);
-	for (let i = 0; i < hex.length; i += 2) {
-		out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-	}
-	return out;
-}
 
 describe('KAT: RFC 8032 §7.1 Ed25519', () => {
 	// -----TEST 1: empty message

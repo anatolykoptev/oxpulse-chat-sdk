@@ -21,6 +21,7 @@
  */
 
 import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
+import { concatBytes } from '@noble/hashes/utils.js';
 import { generateEphemeralKeypair, deriveSharedSecret } from './x25519.ts';
 import { hkdfExtract, hkdfExpand } from './hkdf.ts';
 import { zeroize } from './zeroize.ts';
@@ -108,14 +109,8 @@ export function hybridKemEncaps(
 	// 3. Hybrid KDF: concat both secrets → HKDF
 	//    IKM = x25519_secret ‖ ml_kem_secret (64 bytes)
 	//    salt = recipient_x25519_pub ‖ eph_pub ‖ ml_kem_ct (32 + 32 + 1088 = 1152 bytes)
-	const ikm = new Uint8Array(32 + 32);
-	ikm.set(x25519Secret, 0);
-	ikm.set(mlKemSecret, 32);
-
-	const salt = new Uint8Array(32 + 32 + mlKemCiphertext.length);
-	salt.set(recipientX25519Pub, 0);
-	salt.set(ephPub, 32);
-	salt.set(mlKemCiphertext, 64);
+	const ikm = concatBytes(x25519Secret, mlKemSecret);
+	const salt = concatBytes(recipientX25519Pub, ephPub, mlKemCiphertext);
 
 	const prk = hkdfExtract(ikm, salt);
 	const sharedSecret = hkdfExpand(prk, PQXDH_INFO, 32);
@@ -159,14 +154,8 @@ export function hybridKemDecaps(
 	const mlKemSecret = ml_kem768.decapsulate(mlKemCiphertext, recipientMlKemPriv);
 
 	// 3. Hybrid KDF — must match encapsulate exactly
-	const ikm = new Uint8Array(32 + 32);
-	ikm.set(x25519Secret, 0);
-	ikm.set(mlKemSecret, 32);
-
-	const salt = new Uint8Array(32 + 32 + mlKemCiphertext.length);
-	salt.set(recipientX25519Pub, 0);
-	salt.set(ephX25519Pub, 32);
-	salt.set(mlKemCiphertext, 64);
+	const ikm = concatBytes(x25519Secret, mlKemSecret);
+	const salt = concatBytes(recipientX25519Pub, ephX25519Pub, mlKemCiphertext);
 
 	const prk = hkdfExtract(ikm, salt);
 	const sharedSecret = hkdfExpand(prk, PQXDH_INFO, 32);

@@ -1,16 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { hexToBytes } from '@noble/hashes/utils.js';
 import { deriveKey, hkdfExtract, hkdfExpand } from '../hkdf.ts';
 
 // RFC 5869 §A — HKDF-SHA256 test vectors.
 // https://datatracker.ietf.org/doc/html/rfc5869#appendix-A
 
-function hexToBytes(hex: string): Uint8Array {
-	const out = new Uint8Array(hex.length / 2);
-	for (let i = 0; i < hex.length; i += 2) {
-		out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-	}
-	return out;
-}
 
 describe('KAT: RFC 5869 §A HKDF-SHA256', () => {
 	// Test Case 1 — Basic test with SHA-256

@@ -22,6 +22,7 @@
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { concatBytes } from '@noble/hashes/utils.js';
 import { zeroize } from './zeroize.ts';
 
 const COMMIT_LABEL = new TextEncoder().encode('oxp/commit/v1');
@@ -60,11 +61,7 @@ export function xchachaSeal(
 	const ctAndTag = cipher.encrypt(plaintext);
 
 	// Wire: commit[8] ‖ nonce[24] ‖ ct_and_tag[...]
-	const out = new Uint8Array(COMMIT_LEN + NONCE_LEN + ctAndTag.length);
-	out.set(commit, 0);
-	out.set(nonce, COMMIT_LEN);
-	out.set(ctAndTag, COMMIT_LEN + NONCE_LEN);
-	return out;
+	return concatBytes(commit, nonce, ctAndTag);
 }
 
 /**
@@ -89,8 +86,10 @@ export function xchachaOpen(key: Uint8Array, aad: Uint8Array, sealed: Uint8Array
 	const expectedCommit = computeCommitment(key);
 	const actualCommit = sealed.subarray(0, COMMIT_LEN);
 
-	// Constant-time commitment check — prevents partition oracle timing leak.
+	// Best-effort constant-time commitment check — prevents partition oracle.
 	// XOR-reduce: if any byte differs, the OR accumulates to non-zero.
+	// NOTE: JS provides no constant-time guarantees (JIT may short-circuit).
+	// For true constant-time, use WASM-based crypto (e.g. libsodium).
 	let diff = 0;
 	for (let i = 0; i < COMMIT_LEN; i++) {
 		diff |= expectedCommit[i]! ^ actualCommit[i]!;

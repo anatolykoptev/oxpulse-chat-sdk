@@ -129,13 +129,7 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	const nonce = env.innerCiphertext.subarray(32, 44);
 	const ctAndTag = env.innerCiphertext.subarray(44);
 
-	// 3. Replay check — BEFORE sig verify (fail-fast, avoids wasted sig work).
-	//    Uses the caller-provided ReplayWindow (durable storage in production).
-	if (args.replayWindow && args.replayWindow.has(env.msgId)) {
-		throw new Error('crypto-primitives/pairwise: replayed message (msgId already seen)');
-	}
-
-	// 4. Verify sender signature BEFORE AEAD (fail-fast, decision #11).
+	// 3. Verify sender signature BEFORE AEAD (fail-fast, decision #11).
 	//    Sig covers: SHA-256(IC) ‖ msg_id ‖ recipient_x25519_pub
 	//    zip215:false aligns with server dalek::verify_strict (RFC 8032 strict).
 	if (
@@ -147,6 +141,14 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 		)
 	) {
 		throw new Error('crypto-primitives/pairwise: sender signature invalid');
+	}
+
+	// 4. Replay check — AFTER sig verify, BEFORE AEAD.
+	//    Checked after sig to avoid timing oracle on replay state (an attacker
+	//    could distinguish "replayed" from "not replayed" by response time if
+	//    the check preceded the expensive sig verify).
+	if (args.replayWindow && args.replayWindow.has(env.msgId)) {
+		throw new Error('crypto-primitives/pairwise: replayed message (msgId already seen)');
 	}
 
 	// 5. DH + HKDF

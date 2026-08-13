@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { hexToBytes } from '@noble/hashes/utils.js';
 import { aesGcmSeal, aesGcmOpen } from '../aead.ts';
 
 // NIST GCM test vectors — AES-256-GCM
@@ -10,13 +11,6 @@ import { aesGcmSeal, aesGcmOpen } from '../aead.ts';
 // AES-256, all-zero key, all-zero IV, empty plaintext, empty AAD.
 // Expected tag: 530f8afbc74536b9a963b4f1c4cb738b
 
-function hexToBytes(hex: string): Uint8Array {
-	const out = new Uint8Array(hex.length / 2);
-	for (let i = 0; i < hex.length; i += 2) {
-		out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-	}
-	return out;
-}
 
 describe('KAT: NIST AES-256-GCM', () => {
 	// Test Case 14: AES-256, empty plaintext, empty AAD
