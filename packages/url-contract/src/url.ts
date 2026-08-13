@@ -103,7 +103,7 @@ export function buildCall1to1Url(
     url += '?audio=1';
   }
   if (opts.fragment) {
-    url += `#${encodeURIComponent(opts.fragment.joinSecret)}.${encodeURIComponent(opts.fragment.expectedHostPubkey)}`;
+    url += `#${opts.fragment.joinSecret}.${opts.fragment.expectedHostPubkey}`;
   }
   return url;
 }
@@ -139,7 +139,7 @@ export function buildBurnerChatUrl(
   fragB64Url: string,
 ): string {
   const base = origin.replace(/\/$/, '');
-  return `${base}/c/${encodeURIComponent(roomId)}#k=${encodeURIComponent(fragB64Url)}`;
+  return `${base}/c/${encodeURIComponent(roomId)}#k=${fragB64Url}`;
 }
 
 // ── Sealed 1:1 chat URL ──────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
   if (hash) {
     if (hash.startsWith('k=')) {
       // Burner: #k=<base64url>
-      const fragB64 = decodeURIComponent(hash.slice(2));
+      const fragB64 = hash.slice(2);
       if (fragB64.length > 0) {
         burnerFragment = { fragB64 };
       }
@@ -267,8 +267,8 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
       const dot = hash.indexOf('.');
       if (dot > 0 && dot < hash.length - 1) {
         callFragment = {
-          joinSecret: decodeURIComponent(hash.slice(0, dot)),
-          expectedHostPubkey: decodeURIComponent(hash.slice(dot + 1)),
+          joinSecret: hash.slice(0, dot),
+          expectedHostPubkey: hash.slice(dot + 1),
         };
       }
     }
@@ -312,6 +312,13 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
  * don't need full URL parsing. Mirrors `parseCallShareFragment` from
  * `web/src/lib/routes/parse.ts`.
  *
+ * Returns the LITERAL fragment payload — no percent-decoding. The builders
+ * (`buildRoomFragment`, `buildCall1to1Url`'s fragment, `buildBurnerChatUrl`'s
+ * fragment) do not percent-encode the secret/pubkey values — they are
+ * base64url/hex, which contain no `%`. Decoding would normalise distinct
+ * inputs onto the same parsed value (#354). `parseRoomUrl` also returns
+ * literal fragment payloads for the same reason.
+ *
  * @param fragment - The fragment string (with or without leading '#').
  * @returns `{ joinSecret, expectedHostPubkey }` or null if malformed.
  */
@@ -320,14 +327,10 @@ export function parseCallFragment(fragment: string): Call1to1Fragment | null {
   const clean = fragment.startsWith('#') ? fragment.slice(1) : fragment;
   const dot = clean.indexOf('.');
   if (dot <= 0 || dot === clean.length - 1) return null;
-  try {
-    return {
-      joinSecret: decodeURIComponent(clean.slice(0, dot)),
-      expectedHostPubkey: decodeURIComponent(clean.slice(dot + 1)),
-    };
-  } catch {
-    return null;
-  }
+  return {
+    joinSecret: clean.slice(0, dot),
+    expectedHostPubkey: clean.slice(dot + 1),
+  };
 }
 
 /**
@@ -335,6 +338,9 @@ export function parseCallFragment(fragment: string): Call1to1Fragment | null {
  *
  * Standalone parser for callers that already have the fragment string.
  * Mirrors `parseBurnerFragment` from `web/src/lib/routes/parse.ts`.
+ *
+ * Returns the LITERAL fragment payload — no percent-decoding. See
+ * {@link parseCallFragment} for the rationale (#354).
  *
  * @param fragment - The fragment string (with or without leading '#').
  * @returns `{ fragB64 }` or null if malformed.
@@ -345,11 +351,7 @@ export function parseBurnerFragment(fragment: string): BurnerFragment | null {
   if (!clean.startsWith('k=')) return null;
   const payload = clean.slice(2);
   if (payload.length === 0) return null;
-  try {
-    return { fragB64: decodeURIComponent(payload) };
-  } catch {
-    return null;
-  }
+  return { fragB64: payload };
 }
 
 /**
@@ -366,6 +368,9 @@ export function buildRoomFragment(secretB64: string, pubkeyB64: string): string 
  *
  * Mirrors `parseRoomFragment` from `web/src/lib/room-link.ts`.
  *
+ * Returns the LITERAL fragment payload — no percent-decoding. See
+ * {@link parseCallFragment} for the rationale (#354).
+ *
  * @param fragment - The fragment string (with or without leading '#').
  * @returns `{ secret, hostPubkey }` or null if malformed.
  */
@@ -376,12 +381,8 @@ export function parseRoomFragment(
   const clean = fragment.startsWith('#') ? fragment.slice(1) : fragment;
   const dotIndex = clean.indexOf('.');
   if (dotIndex <= 0 || dotIndex === clean.length - 1) return null;
-  try {
-    return {
-      secret: decodeURIComponent(clean.slice(0, dotIndex)),
-      hostPubkey: decodeURIComponent(clean.slice(dotIndex + 1)),
-    };
-  } catch {
-    return null;
-  }
+  return {
+    secret: clean.slice(0, dotIndex),
+    hostPubkey: clean.slice(dotIndex + 1),
+  };
 }

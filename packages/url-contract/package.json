@@ -36,7 +36,9 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "src/__fixtures__",
+    "fixtures"
   ],
   "publishConfig": {
     "access": "public"
