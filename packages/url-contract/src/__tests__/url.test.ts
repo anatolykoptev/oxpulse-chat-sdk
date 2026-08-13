@@ -244,6 +244,92 @@ describe('parseRoomUrl', () => {
     expect(parseRoomUrl(`${ORIGIN}/${roomId}/extra`)).toBeNull();
   });
 
+  // ── #342: /s/ short-link prefix support ────────────────────────────────────
+
+  it('parses /s/<alias> short-link URLs (#342)', () => {
+    const parsed = parseRoomUrl(`${ORIGIN}/s/xA3kP`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.routePrefix).toBe('/s/');
+    expect(parsed!.alias).toBe('xA3kP');
+  });
+
+  it('rejects /s/ with invalid alias (too short)', () => {
+    expect(parseRoomUrl(`${ORIGIN}/s/ab`)).toBeNull();
+  });
+
+  it('rejects /s/ with invalid alias (too long)', () => {
+    expect(parseRoomUrl(`${ORIGIN}/s/abcdefgh`)).toBeNull();
+  });
+
+  it('rejects /s/ with non-alphanumeric alias', () => {
+    expect(parseRoomUrl(`${ORIGIN}/s/ab_c!`)).toBeNull();
+  });
+
+  it('rejects /s/ with fragment', () => {
+    expect(parseRoomUrl(`${ORIGIN}/s/xA3kP#k=key`)).toBeNull();
+  });
+
+  it('rejects /s/ with query', () => {
+    expect(parseRoomUrl(`${ORIGIN}/s/xA3kP?audio=1`)).toBeNull();
+  });
+
+  it('buildShortLinkUrl ↔ parseRoomUrl round-trips (#342)', () => {
+    const alias = generateShortLinkAlias();
+    const url = buildShortLinkUrl(ORIGIN, alias);
+    const parsed = parseRoomUrl(url);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.routePrefix).toBe('/s/');
+    expect(parsed!.alias).toBe(alias);
+  });
+
+  // ── #343: fragment-route validation ────────────────────────────────────────
+
+  it('rejects call fragment on /c/ route (#343)', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/c/${roomId}#secret.pubkey`)).toBeNull();
+  });
+
+  it('rejects call fragment on /r/ route (#343)', () => {
+    const code = generateRoomCode('group');
+    const roomId = asRoomId(code);
+    expect(parseRoomUrl(`${ORIGIN}/r/${roomId}#secret.pubkey`)).toBeNull();
+  });
+
+  it('rejects call fragment on /m/ route (#343)', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/m/${roomId}#secret.pubkey`)).toBeNull();
+  });
+
+  it('rejects burner fragment on bare-root route (#343)', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/${roomId}#k=key`)).toBeNull();
+  });
+
+  it('rejects burner fragment on /r/ route (#343)', () => {
+    const code = generateRoomCode('group');
+    const roomId = asRoomId(code);
+    expect(parseRoomUrl(`${ORIGIN}/r/${roomId}#k=key`)).toBeNull();
+  });
+
+  it('rejects burner fragment on /m/ route (#343)', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    expect(parseRoomUrl(`${ORIGIN}/m/${roomId}#k=key`)).toBeNull();
+  });
+
+  it('accepts call fragment on bare-root (valid combination)', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    const parsed = parseRoomUrl(`${ORIGIN}/${roomId}#secret.pubkey`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.callFragment).toEqual({ joinSecret: 'secret', expectedHostPubkey: 'pubkey' });
+  });
+
+  it('accepts burner fragment on /c/ (valid combination)', () => {
+    const roomId = asRoomId(generateOpaqueRoomId());
+    const parsed = parseRoomUrl(`${ORIGIN}/c/${roomId}#k=keyB64`);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.burnerFragment).toEqual({ fragB64: 'keyB64' });
+  });
+
   it('legacy bare codes round-trip through bare-root', () => {
     const bare = 'GHJK-1234';
     const roomId = asRoomId(bare);
@@ -283,6 +369,15 @@ describe('parseCallFragment', () => {
   it('returns null for dot at end', () => {
     expect(parseCallFragment('secret.')).toBeNull();
   });
+
+  it('decodes percent-encoded values (#341)', () => {
+    const result = parseCallFragment('secret%20value.pubkey%2Ftest');
+    expect(result).toEqual({ joinSecret: 'secret value', expectedHostPubkey: 'pubkey/test' });
+  });
+
+  it('returns null for invalid percent-encoding', () => {
+    expect(parseCallFragment('secret%ZZ.pubkey')).toBeNull();
+  });
 });
 
 // ── parseBurnerFragment ──────────────────────────────────────────────────────
@@ -308,6 +403,15 @@ describe('parseBurnerFragment', () => {
 
   it('returns null for k= with empty payload', () => {
     expect(parseBurnerFragment('k=')).toBeNull();
+  });
+
+  it('decodes percent-encoded values (#341)', () => {
+    const result = parseBurnerFragment('#k=key%20with%20spaces');
+    expect(result).toEqual({ fragB64: 'key with spaces' });
+  });
+
+  it('returns null for invalid percent-encoding', () => {
+    expect(parseBurnerFragment('k=%ZZ')).toBeNull();
   });
 });
 
@@ -337,6 +441,11 @@ describe('buildRoomFragment + parseRoomFragment', () => {
 
   it('parseRoomFragment returns null for no dot', () => {
     expect(parseRoomFragment('noseparator')).toBeNull();
+  });
+
+  it('parseRoomFragment decodes percent-encoded values (#341)', () => {
+    const result = parseRoomFragment('secret%20value.pubkey%2Ftest');
+    expect(result).toEqual({ secret: 'secret value', hostPubkey: 'pubkey/test' });
   });
 });
 

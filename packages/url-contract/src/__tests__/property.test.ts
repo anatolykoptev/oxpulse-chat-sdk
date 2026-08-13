@@ -43,9 +43,9 @@ const ORIGIN = 'https://app.oxpulse.chat';
 
 // Fragment-safe strings: exclude chars that break URL fragment parsing.
 // '#' = fragment delimiter, '.' = secret.pubkey separator, '=' = k= prefix,
-// '?' = query delimiter, '/' = path delimiter.
+// '?' = query delimiter, '/' = path delimiter, '%' = percent-encoding trigger.
 const fragmentSafeString = fc.string({ minLength: 1, maxLength: 50 }).filter(
-  (s) => !s.includes('#') && !s.includes('.') && !s.includes('=') && !s.includes('?') && !s.includes('/'),
+  (s) => !s.includes('#') && !s.includes('.') && !s.includes('=') && !s.includes('?') && !s.includes('/') && !s.includes('%'),
 );
 
 // ── Generator ↔ Parser round-trips ──────────────────────────────────────────
