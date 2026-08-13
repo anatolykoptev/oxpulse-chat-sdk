@@ -47,6 +47,8 @@ import type {
   OptimisticHandle,
   BatchAppendItem,
   RoomVisibility,
+  ShareLink,
+  JoinResult,
 } from './types.js';
 import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
@@ -86,6 +88,21 @@ interface MemberDTO {
   joined_at: string;
   last_read_seq: number;
   active: boolean;
+}
+
+// #292: Share-link + join-by-link wire DTOs (snake_case)
+interface ShareLinkDTO {
+  alias: string;
+  room_id: string;
+  expires_at: string;
+  url: string;
+}
+
+interface JoinResultDTO {
+  room_id: string;
+  user_id: string;
+  role: string;
+  joined: boolean;
 }
 
 function dtoToRoom(dto: RoomDTO): Room {
@@ -1958,6 +1975,110 @@ export class SDKChatClient {
         resp.status,
       );
     }
+  }
+
+  // ── #292: Share-link mint + join-by-link ────────────────────────────────────
+
+  /**
+   * Mint a short share link for a room.
+   * Wire-contract: POST /api/sdk/rooms/:room_id/shortlink
+   * Body: { ttl_seconds?: number } — server clamps to [60, 604800]; omitted = server default.
+   *
+   * Scope: rooms:write:*. Caller must be an active member.
+   * Status mapping: 403→forbidden, 429→rate_limited (max links per room), 500/503→server_error.
+   *
+   * @returns ShareLink with `url` as a RELATIVE path (e.g. "/s/xA3kP").
+   */
+  async mintShareLink(roomId: string, args?: { ttlSeconds?: number }): Promise<ShareLink> {
+    const body: Record<string, unknown> = {};
+    if (args?.ttlSeconds !== undefined) body['ttl_seconds'] = args.ttlSeconds;
+
+    let resp: Response;
+    try {
+      resp = await fetch(
+        `${this.#baseUrl}/api/sdk/rooms/${encodeURIComponent(roomId)}/shortlink`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.#jwt}`,
+          },
+          body: JSON.stringify(body),
+        },
+      );
+    } catch (err) {
+      throw new SDKChatError('network', `mintShareLink failed: ${String(err)}`);
+    }
+
+    if (!resp.ok) {
+      throw new SDKChatError(
+        httpStatusToCode(resp.status),
+        `mintShareLink failed: HTTP ${resp.status}`,
+        resp.status,
+      );
+    }
+
+    const dto = (await resp.json()) as ShareLinkDTO;
+    if (!Object.prototype.hasOwnProperty.call(dto, 'alias')) {
+      throw new SDKChatError('server_error', 'mintShareLink: response missing alias');
+    }
+    return {
+      alias: dto.alias,
+      roomId: dto.room_id,
+      expiresAt: dto.expires_at,
+      url: dto.url,
+    };
+  }
+
+  /**
+   * Join a room by share-link alias.
+   * Wire-contract: POST /api/sdk/rooms/:room_id/join
+   * Body: { alias: string } — the alias IS the capability; no prior membership required.
+   *
+   * Scope: rooms:write:*.
+   * Status mapping: 403→forbidden, 404→not_found (alias malformed/absent/expired/wrong room).
+   *
+   * `joined: false` in the response means the caller was ALREADY a member — this is
+   * the idempotent success path, NOT an error. The method returns it as-is.
+   */
+  async joinByLink(roomId: string, alias: string): Promise<JoinResult> {
+    const body = { alias };
+
+    let resp: Response;
+    try {
+      resp = await fetch(
+        `${this.#baseUrl}/api/sdk/rooms/${encodeURIComponent(roomId)}/join`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.#jwt}`,
+          },
+          body: JSON.stringify(body),
+        },
+      );
+    } catch (err) {
+      throw new SDKChatError('network', `joinByLink failed: ${String(err)}`);
+    }
+
+    if (!resp.ok) {
+      throw new SDKChatError(
+        httpStatusToCode(resp.status),
+        `joinByLink failed: HTTP ${resp.status}`,
+        resp.status,
+      );
+    }
+
+    const dto = (await resp.json()) as JoinResultDTO;
+    if (!Object.prototype.hasOwnProperty.call(dto, 'room_id')) {
+      throw new SDKChatError('server_error', 'joinByLink: response missing room_id');
+    }
+    return {
+      roomId: dto.room_id,
+      userId: dto.user_id,
+      role: dto.role,
+      joined: dto.joined,
+    };
   }
 
   // ── W7: Thread view ────────────────────────────────────────────────────────
