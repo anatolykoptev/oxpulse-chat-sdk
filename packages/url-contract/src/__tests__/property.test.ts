@@ -41,12 +41,18 @@ import {
 
 const ORIGIN = 'https://app.oxpulse.chat';
 
-// Fragment-safe strings: exclude chars that break URL fragment parsing.
-// '#' = fragment delimiter, '.' = secret.pubkey separator, '=' = k= prefix,
-// '?' = query delimiter, '/' = path delimiter.
-// '%' is NOT excluded — standalone parsers return literal payload (#354).
+// Fragment-safe strings: exclude chars that break URL fragment parsing or
+// that `new URL()` percent-encodes (which would break literal round-trip).
+// Excluded: '#' (delimiter), '.' (separator), '=' (k= prefix), '?' (query),
+// '/' (path), and chars that new URL() encodes in fragments: " < > ` space.
+// The builders don't encode and the parsers don't decode (literal contract, #354).
+const FRAGMENT_UNSAFE = /["#./<=>?`]/;
 const fragmentSafeString = fc.string({ minLength: 1, maxLength: 50 }).filter(
-  (s) => !s.includes('#') && !s.includes('.') && !s.includes('=') && !s.includes('?') && !s.includes('/'),
+  (s) => s.length > 0
+    && !FRAGMENT_UNSAFE.test(s)
+    && !s.includes(' ')
+    && !s.includes('\x00')
+    && /^[\x21-\x7E]+$/.test(s),
 );
 
 // ── Generator ↔ Parser round-trips ──────────────────────────────────────────

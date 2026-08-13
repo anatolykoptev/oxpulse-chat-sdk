@@ -103,7 +103,7 @@ export function buildCall1to1Url(
     url += '?audio=1';
   }
   if (opts.fragment) {
-    url += `#${encodeURIComponent(opts.fragment.joinSecret)}.${encodeURIComponent(opts.fragment.expectedHostPubkey)}`;
+    url += `#${opts.fragment.joinSecret}.${opts.fragment.expectedHostPubkey}`;
   }
   return url;
 }
@@ -139,7 +139,7 @@ export function buildBurnerChatUrl(
   fragB64Url: string,
 ): string {
   const base = origin.replace(/\/$/, '');
-  return `${base}/c/${encodeURIComponent(roomId)}#k=${encodeURIComponent(fragB64Url)}`;
+  return `${base}/c/${encodeURIComponent(roomId)}#k=${fragB64Url}`;
 }
 
 // ── Sealed 1:1 chat URL ──────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
   if (hash) {
     if (hash.startsWith('k=')) {
       // Burner: #k=<base64url>
-      const fragB64 = decodeURIComponent(hash.slice(2));
+      const fragB64 = hash.slice(2);
       if (fragB64.length > 0) {
         burnerFragment = { fragB64 };
       }
@@ -267,8 +267,8 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
       const dot = hash.indexOf('.');
       if (dot > 0 && dot < hash.length - 1) {
         callFragment = {
-          joinSecret: decodeURIComponent(hash.slice(0, dot)),
-          expectedHostPubkey: decodeURIComponent(hash.slice(dot + 1)),
+          joinSecret: hash.slice(0, dot),
+          expectedHostPubkey: hash.slice(dot + 1),
         };
       }
     }
@@ -313,11 +313,11 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
  * `web/src/lib/routes/parse.ts`.
  *
  * Returns the LITERAL fragment payload — no percent-decoding. The builders
- * (`buildRoomFragment`, `buildCall1to1Url`'s fragment) do not percent-encode
- * the secret/pubkey values (they are base64url/hex, which contain no `%`),
- * so decoding would normalise distinct inputs onto the same parsed value
- * (#354). `parseRoomUrl` handles encoding/decoding for the full-URL path;
- * these standalone parsers are raw fragment string → struct.
+ * (`buildRoomFragment`, `buildCall1to1Url`'s fragment, `buildBurnerChatUrl`'s
+ * fragment) do not percent-encode the secret/pubkey values — they are
+ * base64url/hex, which contain no `%`. Decoding would normalise distinct
+ * inputs onto the same parsed value (#354). `parseRoomUrl` also returns
+ * literal fragment payloads for the same reason.
  *
  * @param fragment - The fragment string (with or without leading '#').
  * @returns `{ joinSecret, expectedHostPubkey }` or null if malformed.
