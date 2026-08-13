@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { appendChecksum, verifyChecksum } from '../checksum.js';
+import { appendChecksum, verifyChecksum, stripChecksum } from '../checksum.js';
 
 // ── Seeded PRNG (mulberry32) — deterministic fixture generation ───────────────
 // https://gist.github.com/tommyettinger/46a874533244883189143505d203312c
@@ -275,5 +275,38 @@ describe('deterministic fixture cases (W5.3)', () => {
       const result = verifyChecksum(mutated);
       expect(result.ok, `fixture ${i}: mutated=${mutated} from typed=${typed10}`).toBe(false);
     }
+  });
+});
+
+// ── stripChecksum (#344) ─────────────────────────────────────────────────────
+
+describe('stripChecksum', () => {
+  it('strips the checksum char from a 10-char code', () => {
+    const payload = 'GHJK-1234';
+    const withCheck = appendChecksum(payload);
+    expect(withCheck).toHaveLength(10);
+    expect(stripChecksum(withCheck)).toBe(payload);
+  });
+
+  it('is the inverse of appendChecksum', () => {
+    for (let i = 0; i < 100; i++) {
+      const payload = 'TEST-0000';
+      const withCheck = appendChecksum(payload);
+      expect(stripChecksum(withCheck)).toBe(payload);
+    }
+  });
+
+  it('does NOT verify the checksum (returns payload even for bad checksum)', () => {
+    // 'GHJK-1234X' has a wrong checksum char 'X' but stripChecksum still works
+    expect(stripChecksum('GHJK-1234X')).toBe('GHJK-1234');
+  });
+
+  it('throws TypeError for wrong length', () => {
+    expect(() => stripChecksum('GHJK-123')).toThrow(TypeError);
+    expect(() => stripChecksum('GHJK-123456')).toThrow(TypeError);
+  });
+
+  it('throws TypeError for missing dash at index 4', () => {
+    expect(() => stripChecksum('GHJK12345')).toThrow(TypeError);
   });
 });

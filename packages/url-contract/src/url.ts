@@ -69,8 +69,10 @@ export interface ParsedRoomUrl {
   roomId: RoomId;
   /** The room kind resolved by `parseRoomCode`. */
   kind: RoomKind;
-  /** The route prefix: '' for 1:1, '/r/' for group, '/c/' for burner, '/m/' for sealed. */
+  /** The route prefix: '' for 1:1, '/r/' for group, '/c/' for burner, '/m/' for sealed, '/s/' for short-link. */
   routePrefix: string;
+  /** Short-link alias, present only when routePrefix is '/s/'. */
+  alias?: ShortLinkAlias;
   /** 1:1 call fragment (joinSecret.hostPubkey), if present. */
   callFragment?: Call1to1Fragment;
   /** Burner chat fragment (#k=<base64url>), if present. */
@@ -177,22 +179,24 @@ export function buildShortLinkUrl(origin: string, alias: ShortLinkAlias): string
 /**
  * Parse a room URL into its components.
  *
- * Recognises the four route prefixes:
+ * Recognises five route prefixes:
  *   - `/<roomId>`      → 1:1 call (bare-root)
  *   - `/r/<roomId>`    → group call
  *   - `/c/<roomId>`    → burner chat
  *   - `/m/<roomId>`    → sealed 1:1 chat
+ *   - `/s/<alias>`     → short-link redirect
  *
- * Extracts fragments:
- *   - `#<secret>.<pubkey>` → 1:1 call fragment
- *   - `#k=<base64url>`     → burner chat fragment
+ * Extracts fragments (validated against route prefix per ADR-0005):
+ *   - `#<secret>.<pubkey>` → 1:1 call fragment (bare-root only)
+ *   - `#k=<base64url>`     → burner chat fragment (/c/ only)
  *
  * Extracts query:
  *   - `?audio=1` → audioOnly
  *
  * @param url - The URL string or URL object to parse.
  * @returns `{ roomId, kind, routePrefix, ... }` on success, or `null` if the
- *   URL does not match a room-URL shape or the room ID is invalid.
+ *   URL does not match a room-URL shape, the room ID is invalid, or the
+ *   fragment type doesn't match the route prefix.
  */
 export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
   let parsed: URL;
@@ -204,23 +208,41 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
 
   const pathParts = parsed.pathname.split('/').filter(Boolean);
 
-  // Route prefix detection: /r/, /c/, /m/ have a prefix; bare-root has none.
+  // Route prefix detection: /r/, /c/, /m/, /s/ have a prefix; bare-root has none.
   // Reject URLs with extra path segments (e.g. /r/<roomId>/extra) — a room URL
   // has exactly one path segment after the optional prefix.
   let routePrefix = '';
   let roomIdStr: string | null = null;
+  let aliasStr: string | null = null;
 
   if (pathParts.length === 2) {
     const prefix = pathParts[0]!;
     if (prefix === 'r' || prefix === 'c' || prefix === 'm') {
       routePrefix = `/${prefix}/`;
       roomIdStr = decodeURIComponent(pathParts[1]!);
+    } else if (prefix === 's') {
+      routePrefix = '/s/';
+      aliasStr = decodeURIComponent(pathParts[1]!);
     }
   }
-  if (roomIdStr === null && pathParts.length === 1) {
+  if (roomIdStr === null && aliasStr === null && pathParts.length === 1) {
     // Bare-root: /<roomId> (1:1 call)
     routePrefix = '';
     roomIdStr = decodeURIComponent(pathParts[0]!);
+  }
+
+  // Short-link path: validate alias, return early (no fragment/query expected)
+  if (aliasStr !== null) {
+    const alias = tryAsShortLinkAlias(aliasStr);
+    if (!alias) return null;
+    // Short links don't carry fragments or query params
+    if (parsed.hash || parsed.search) return null;
+    return {
+      roomId: alias as unknown as RoomId, // alias IS the path identifier for /s/
+      kind: 'opaque', // short-link aliases don't have a room kind
+      routePrefix: '/s/',
+      alias,
+    };
   }
 
   if (!roomIdStr) return null;
@@ -250,6 +272,20 @@ export function parseRoomUrl(url: string | URL): ParsedRoomUrl | null {
         };
       }
     }
+  }
+
+  // Validate fragment type matches route prefix (ADR-0005)
+  // bare-root ('') → only callFragment allowed
+  // /c/            → only burnerFragment allowed
+  // /r/, /m/       → no fragment allowed
+  if (callFragment && routePrefix !== '') {
+    return null; // call fragment on non-bare-root route
+  }
+  if (burnerFragment && routePrefix !== '/c/') {
+    return null; // burner fragment on non-burner route
+  }
+  if ((routePrefix === '/r/' || routePrefix === '/m/') && (callFragment || burnerFragment)) {
+    return null; // no fragments allowed on group/sealed routes
   }
 
   // Parse query
@@ -284,10 +320,14 @@ export function parseCallFragment(fragment: string): Call1to1Fragment | null {
   const clean = fragment.startsWith('#') ? fragment.slice(1) : fragment;
   const dot = clean.indexOf('.');
   if (dot <= 0 || dot === clean.length - 1) return null;
-  return {
-    joinSecret: clean.slice(0, dot),
-    expectedHostPubkey: clean.slice(dot + 1),
-  };
+  try {
+    return {
+      joinSecret: decodeURIComponent(clean.slice(0, dot)),
+      expectedHostPubkey: decodeURIComponent(clean.slice(dot + 1)),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -305,7 +345,11 @@ export function parseBurnerFragment(fragment: string): BurnerFragment | null {
   if (!clean.startsWith('k=')) return null;
   const payload = clean.slice(2);
   if (payload.length === 0) return null;
-  return { fragB64: payload };
+  try {
+    return { fragB64: decodeURIComponent(payload) };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -332,8 +376,12 @@ export function parseRoomFragment(
   const clean = fragment.startsWith('#') ? fragment.slice(1) : fragment;
   const dotIndex = clean.indexOf('.');
   if (dotIndex <= 0 || dotIndex === clean.length - 1) return null;
-  return {
-    secret: clean.slice(0, dotIndex),
-    hostPubkey: clean.slice(dotIndex + 1),
-  };
+  try {
+    return {
+      secret: decodeURIComponent(clean.slice(0, dotIndex)),
+      hostPubkey: decodeURIComponent(clean.slice(dotIndex + 1)),
+    };
+  } catch {
+    return null;
+  }
 }

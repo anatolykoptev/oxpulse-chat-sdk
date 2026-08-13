@@ -163,3 +163,20 @@ export function verifyChecksum(s: string): { ok: true; payload: string } | { ok:
 
   return { ok: true, payload };
 }
+
+/**
+ * Strip the checksum char from a 10-char room code, returning the 9-char payload.
+ *
+ * Inverse of {@link appendChecksum}. Does NOT verify the checksum — use
+ * {@link verifyChecksum} first if validity matters.
+ *
+ * @param s - A 10-char string `AAAA-0000C` (room code + checksum).
+ * @returns The 9-char payload `AAAA-0000`.
+ * @throws TypeError if `s` is not exactly 10 chars with `-` at index 4.
+ */
+export function stripChecksum(s: string): string {
+  if (s.length !== 10 || s.charAt(4) !== '-') {
+    throw new TypeError(`stripChecksum: expected 'AAAA-0000C' shape, got: ${s}`);
+  }
+  return s.substring(0, 9);
+}
