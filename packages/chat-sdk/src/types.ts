@@ -657,4 +657,69 @@ interface BatchAppendItemDTO {
   product_meta?: unknown;
 }
 
+// ── #294: Room history export types ───────────────────────────────────────────
+
+/**
+ * #294: Options for {@link SDKChatClient.exportRoom} / {@link exportRoomHistory}.
+ *
+ * Export is client-side by construction: the server cannot read `sframe-static`
+ * content, so export walks `list()` (which already decrypts every row) and
+ * serialises the decrypted rows. No server endpoint is involved.
+ */
+export interface ExportRoomOptions {
+  /** Output format. `'json'` (default) is canonical; `'text'` is human-readable. */
+  format?: 'json' | 'text';
+  /** Page size passed to each `list()` call. Defaults to 200 (server max). */
+  limit?: number;
+  /** Honoured between pages — a large room's export is cancellable. */
+  signal?: AbortSignal;
+}
+
+/**
+ * #294: A single row in the export output.
+ *
+ * A row that failed to unseal is exported as an explicit error entry carrying
+ * its `seq`, `msgId` and `unsealError` — `body` is `null`. It is NEVER skipped:
+ * silent omission makes a lossy export indistinguishable from a complete one.
+ */
+export interface ExportMessageRow {
+  seq: number;
+  msgId: string;
+  senderUid: string;
+  /** RFC 3339 timestamp (MessageRow.createdAt). */
+  ts: string;
+  /** Decrypted plaintext body as a UTF-8 string. `null` when `unsealError` is set. */
+  body: string | null;
+  /** Present when the row was received but unseal() failed. */
+  unsealError?: 'replay' | 'auth' | 'unknown';
+  /** UUID of the root message for thread replies. `null` for top-level messages. */
+  threadRootMsgId?: string | null;
+  /** RFC 3339 timestamp of the last edit, when present. */
+  editedAt?: string;
+  /** RFC 3339 timestamp of soft-delete, when present. */
+  deletedAt?: string;
+  /** Number of times the message was edited. */
+  editCount?: number;
+}
+
+/**
+ * #294: Result of {@link SDKChatClient.exportRoom} / {@link exportRoomHistory}.
+ *
+ * Counts let a caller tell a clean export from a lossy one without diffing the
+ * output: `failedRows > 0` means some rows could not be decrypted and appear as
+ * error entries in the content.
+ */
+export interface ExportResult {
+  /** The format used for `content`. */
+  format: 'json' | 'text';
+  /** Serialised export output. */
+  content: string;
+  /** Total rows walked from `list()`. */
+  totalRows: number;
+  /** Rows successfully decrypted and serialised with a body. */
+  exportedRows: number;
+  /** Rows that failed to unseal and appear as error entries. */
+  failedRows: number;
+}
+
 

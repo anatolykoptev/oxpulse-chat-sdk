@@ -27,7 +27,7 @@
 // ─── Public API surface ───────────────────────────────────────────────────────
 
 export { SDKChatClient, BATCH_ADD_MEMBERS_CHUNK } from './client.js';
-export type { SDKChatClientOptions, SendArgs, ListArgs, ListResult, SubscribeArgs, MessageRow, SDKChatErrorCode, UpdateMessageArgs, PinnedMessage, MutationEvent, ReactionEvent, ReactionsResponse, OptimisticHandle, CryptoProvider, E2EEOptions, SealContext, BatchAppendItem, CryptoMode } from './types.js';
+export type { SDKChatClientOptions, SendArgs, ListArgs, ListResult, SubscribeArgs, MessageRow, SDKChatErrorCode, UpdateMessageArgs, PinnedMessage, MutationEvent, ReactionEvent, ReactionsResponse, OptimisticHandle, CryptoProvider, E2EEOptions, SealContext, BatchAppendItem, CryptoMode, ExportRoomOptions, ExportMessageRow, ExportResult } from './types.js';
 // ─── W5: Room management types ───────────────────────────────────────────────
 export type { Room, RoomSummary, Member, RoomVisibility } from './types.js';
 // ─── #292: Share-link mint + join-by-link types ──────────────────────────────
@@ -71,3 +71,7 @@ export type { SDKCatalogErrorCode, CatalogProduct, CatalogProductList } from './
 // _resetLoaderForTesting) are intentionally excluded.
 export { setDictLoader, setDictBaseUrl, ensureWireCodecReady } from '@oxpulse/wire-codec';
 export type { DictLoader, DictName } from '@oxpulse/wire-codec';
+
+// ─── #294: Room history export ───────────────────────────────────────────────
+export { exportRoomHistory } from './export.js';
+export type { ExportClient } from './export.js';
