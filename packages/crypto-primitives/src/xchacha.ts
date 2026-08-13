@@ -117,5 +117,9 @@ export function xchachaOpen(key: Uint8Array, aad: Uint8Array, sealed: Uint8Array
  * Safe to use with random nonces up to 2^80 messages per key.
  */
 export function xchachaRandomNonce(): Uint8Array {
-	return crypto.getRandomValues(new Uint8Array(NONCE_LEN));
+	try {
+		return crypto.getRandomValues(new Uint8Array(NONCE_LEN));
+	} catch {
+		throw new Error('crypto-primitives/xchacha: CSPRNG failure — cannot generate nonce');
+	}
 }

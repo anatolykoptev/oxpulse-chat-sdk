@@ -11,9 +11,13 @@
 
 /** Encode raw bytes to a base64url string (no padding). */
 export function b64uEncodeBytes(bytes: Uint8Array): string {
-	let s = '';
-	for (const b of bytes) s += String.fromCharCode(b);
-	return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+	// O(N) — build binary string via Array.join instead of O(N²) string concat.
+	const chars: string[] = [];
+	for (let i = 0; i < bytes.length; i++) {
+		const b = bytes[i]!;
+		chars.push(String.fromCharCode(b));
+	}
+	return btoa(chars.join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 /** Decode a base64url string (no padding) to raw bytes.

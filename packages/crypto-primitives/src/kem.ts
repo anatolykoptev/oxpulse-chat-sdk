@@ -121,34 +121,42 @@ export function hybridKemEncaps(
 ): HybridKemEncapsulation {
 	// 1. X25519 ephemeral DH
 	const { privateKey: ephPriv, publicKey: ephPub } = generateEphemeralKeypair();
-	const x25519Secret = deriveSharedSecret(ephPriv, recipientX25519Pub);
+	let x25519Secret: Uint8Array | undefined;
+	let mlKemSecret: Uint8Array | undefined;
+	let mlKemCiphertext: Uint8Array | undefined;
+	let ikm: Uint8Array | undefined;
+	let prk: Uint8Array | undefined;
 
-	// 2. ML-KEM-768 encapsulation
-	const mlKemResult = ml_kem768.encapsulate(recipientMlKemPub);
-	const mlKemSecret = mlKemResult.sharedSecret;
-	const mlKemCiphertext = mlKemResult.cipherText;
+	try {
+		x25519Secret = deriveSharedSecret(ephPriv, recipientX25519Pub);
 
-	// 3. Hybrid KDF: F prefix + both secrets → HKDF
-	//    IKM = F(32×0xFF) ‖ x25519_secret ‖ ml_kem_secret (96 bytes)
-	//    salt = recipient_x25519_pub ‖ eph_pub ‖ ml_kem_ct (transcript, 1152 bytes)
-	const ikm = concatBytes(F_PREFIX, x25519Secret, mlKemSecret);
-	const salt = concatBytes(recipientX25519Pub, ephPub, mlKemCiphertext);
+		// 2. ML-KEM-768 encapsulation
+		const mlKemResult = ml_kem768.encapsulate(recipientMlKemPub);
+		mlKemSecret = mlKemResult.sharedSecret;
+		mlKemCiphertext = mlKemResult.cipherText;
 
-	const prk = hkdfExtract(ikm, salt);
-	const sharedSecret = hkdfExpand(prk, PQXDH_INFO, 32);
+		// 3. Hybrid KDF: F prefix + both secrets → HKDF
+		//    IKM = F(32×0xFF) ‖ x25519_secret ‖ ml_kem_secret (96 bytes)
+		//    salt = recipient_x25519_pub ‖ eph_pub ‖ ml_kem_ct (transcript, 1152 bytes)
+		ikm = concatBytes(F_PREFIX, x25519Secret, mlKemSecret);
+		const salt = concatBytes(recipientX25519Pub, ephPub, mlKemCiphertext);
 
-	// Zeroize intermediate secrets
-	zeroize(ephPriv);
-	zeroize(x25519Secret);
-	zeroize(mlKemSecret);
-	zeroize(ikm);
-	zeroize(prk);
+		prk = hkdfExtract(ikm, salt);
+		const sharedSecret = hkdfExpand(prk, PQXDH_INFO, 32);
 
-	return {
-		ephemeralX25519Pub: ephPub,
-		mlKemCiphertext,
-		sharedSecret,
-	};
+		return {
+			ephemeralX25519Pub: ephPub,
+			mlKemCiphertext,
+			sharedSecret,
+		};
+	} finally {
+		// Zeroize intermediate secrets on ALL paths (success + error).
+		zeroize(ephPriv);
+		if (x25519Secret) zeroize(x25519Secret);
+		if (mlKemSecret) zeroize(mlKemSecret);
+		if (ikm) zeroize(ikm);
+		if (prk) zeroize(prk);
+	}
 }
 
 /**
@@ -169,25 +177,32 @@ export function hybridKemDecaps(
 	recipientX25519Pub: Uint8Array,
 	recipientMlKemPriv: Uint8Array,
 ): Uint8Array {
-	// 1. X25519 DH
-	const x25519Secret = deriveSharedSecret(recipientX25519Priv, ephX25519Pub);
+	let x25519Secret: Uint8Array | undefined;
+	let mlKemSecret: Uint8Array | undefined;
+	let ikm: Uint8Array | undefined;
+	let prk: Uint8Array | undefined;
 
-	// 2. ML-KEM-768 decapsulation
-	const mlKemSecret = ml_kem768.decapsulate(mlKemCiphertext, recipientMlKemPriv);
+	try {
+		// 1. X25519 DH
+		x25519Secret = deriveSharedSecret(recipientX25519Priv, ephX25519Pub);
 
-	// 3. Hybrid KDF — must match encapsulate exactly
-	//    IKM = F(32×0xFF) ‖ x25519_secret ‖ ml_kem_secret (96 bytes)
-	const ikm = concatBytes(F_PREFIX, x25519Secret, mlKemSecret);
-	const salt = concatBytes(recipientX25519Pub, ephX25519Pub, mlKemCiphertext);
+		// 2. ML-KEM-768 decapsulation
+		mlKemSecret = ml_kem768.decapsulate(mlKemCiphertext, recipientMlKemPriv);
 
-	const prk = hkdfExtract(ikm, salt);
-	const sharedSecret = hkdfExpand(prk, PQXDH_INFO, 32);
+		// 3. Hybrid KDF — must match encapsulate exactly
+		//    IKM = F(32×0xFF) ‖ x25519_secret ‖ ml_kem_secret (96 bytes)
+		ikm = concatBytes(F_PREFIX, x25519Secret, mlKemSecret);
+		const salt = concatBytes(recipientX25519Pub, ephX25519Pub, mlKemCiphertext);
 
-	// Zeroize intermediate secrets
-	zeroize(x25519Secret);
-	zeroize(mlKemSecret);
-	zeroize(ikm);
-	zeroize(prk);
+		prk = hkdfExtract(ikm, salt);
+		const sharedSecret = hkdfExpand(prk, PQXDH_INFO, 32);
 
-	return sharedSecret;
+		return sharedSecret;
+	} finally {
+		// Zeroize intermediate secrets on ALL paths (success + error).
+		if (x25519Secret) zeroize(x25519Secret);
+		if (mlKemSecret) zeroize(mlKemSecret);
+		if (ikm) zeroize(ikm);
+		if (prk) zeroize(prk);
+	}
 }
