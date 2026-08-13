@@ -442,6 +442,88 @@ describe('MlsProvider', () => {
     alice.dispose();
   });
 
+  it('a REMAINING member never seals under the epoch the removed member can compute', async () => {
+    const cs = await getCiphersuiteImpl();
+    const tsMls = await import('ts-mls');
+    const { deriveMlsEpochMaterial } = await import('sframe-ratchet/mls');
+    const { createMlsChatProvider } = await import('sframe-ratchet/chat/mls');
+    const roomId = 'room-window';
+    const uidToPeerId = (uid: string): string =>
+      tsMls.bytesToBase64(new TextEncoder().encode(uid));
+
+    // Alice AND Bob are real providers. Bob is the point: the committer skips
+    // the pathless epoch by construction, a receiver only does so if the
+    // receive path knows to.
+    const mk = async (uid: string): Promise<MlsProvider> => createMlsProvider({
+      identityKey: await makeIdentityKey(),
+      credential: 'basic',
+      uid,
+      keyPackageDirectoryUrl: KP_URL,
+      jwt: `mock-jwt-${uid}`,
+      stateStore: new InMemoryMlsStateStore(),
+    });
+    const alice = await mk('alice');
+    const bob = await mk('bob');
+    await alice.manager.publishKeyPackage();
+    await bob.manager.publishKeyPackage();
+    const mallory = await publishRawKeyPackage(ds, 'mallory', cs, tsMls);
+
+    await alice.manager.createGroup(roomId, ['bob']);
+    const bobWelcome = ds.welcomeQueue.get('bob')![0]!;
+    await bob.manager.processWelcome(roomId, base64ToBytes(bobWelcome.welcome_b64));
+    let cursor = ds.mlsMessages.get(roomId)!.length;
+
+    await alice.manager.addMember(roomId, 'mallory');
+    const msgsAfterAdd = ds.mlsMessages.get(roomId)!;
+    for (let i = cursor; i < msgsAfterAdd.length; i++) {
+      await bob.manager.processMessage(roomId, base64ToBytes(msgsAfterAdd[i]!));
+    }
+    cursor = msgsAfterAdd.length;
+    let malloryState = await joinFromWelcome(ds, 'mallory', mallory, cs, tsMls);
+
+    // Alice removes Mallory. Two commits land: the pathless Remove, then the
+    // rotation that actually revokes.
+    await alice.manager.removeMember(roomId, 'mallory');
+    const msgs = ds.mlsMessages.get(roomId)!;
+    expect(msgs.length - cursor).toBe(2);
+
+    // Bob receives ONLY the first — exactly what SSE delivery looks like
+    // between the two relays.
+    await bob.manager.processMessage(roomId, base64ToBytes(msgs[cursor]!));
+
+    // Mallory processes THE SAME single commit — not the rotation, which she
+    // never gets to see before Bob has already sealed. Any failure here is a
+    // broken test, not a security property, so it is not swallowed.
+    const mDecoded = tsMls.decodeMlsMessage(base64ToBytes(msgs[cursor]!), 0)!;
+    const mResult = await tsMls.processMessage(
+      mDecoded[0] as unknown as import('ts-mls').MlsPublicMessage,
+      malloryState, tsMls.emptyPskIndex, tsMls.acceptAll, cs,
+    );
+    if (mResult.kind !== 'newState') throw new Error('mallory: expected newState');
+    malloryState = mResult.newState;
+
+    const sealed = await bob.seal(textBytes('bob mid-removal').buffer as ArrayBuffer, {
+      roomId, senderUid: 'bob',
+    });
+
+    let malloryRead: string | null = null;
+    try {
+      const m = await deriveMlsEpochMaterial(
+        malloryState, cs, 'AES_128_GCM_SHA256', malloryState.groupContext.groupId);
+      const aead = createMlsChatProvider({ uidToPeerId });
+      await aead.setEpoch(roomId, { epoch: m.epoch, peerIndexMap: m.peerIndexMap, chainKey: m.chainKey });
+      malloryRead = new TextDecoder().decode(
+        await aead.unseal(new Uint8Array(sealed), { roomId, senderUid: 'bob' }));
+      aead.dispose();
+    } catch {
+      malloryRead = null;
+    }
+    expect(malloryRead).toBeNull();
+
+    alice.dispose();
+    bob.dispose();
+  }, 30_000);
+
   it('rejects a KeyPackage whose credential identity is not the uid requested', async () => {
     const cs = await getCiphersuiteImpl();
     const tsMls = await import('ts-mls');

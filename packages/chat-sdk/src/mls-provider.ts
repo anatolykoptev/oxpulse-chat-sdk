@@ -458,6 +458,26 @@ export class MLSGroupManager {
     // If this was a commit, the state advances — apply the new epoch.
     if (result.kind === 'newState' && result.newState !== state) {
       this.#roomStates.set(roomId, result.newState);
+
+      // ...unless this is the epoch a removed member can still compute.
+      //
+      // The MLS state must advance regardless — the tree and the epoch counter
+      // are consensus. What must NOT happen is installing this epoch's key in
+      // the AEAD, because a pathless Remove leaves the removed member holding
+      // the same chainKey (see removeMember). The sender skips this epoch by
+      // construction; without this branch every RECEIVER walks straight into
+      // it and seals messages the person just removed can read.
+      //
+      // Deferring means the AEAD stays on the previous epoch until the
+      // rotation commit arrives. Nothing is sealed under the exposed epoch,
+      // and a peer that never receives the rotation fails closed — it cannot
+      // decrypt later traffic rather than transmitting under a key the removed
+      // member holds.
+      if (commitRevokesWithoutPath(msg)) {
+        await this.#persistRoom(roomId);
+        return;
+      }
+
       await this.#applyEpoch(roomId, result.newState);
       await this.#persistRoom(roomId);
     }
@@ -856,6 +876,41 @@ function bytesToBase64(bytes: Uint8Array): string {
 /** Standard base64 string → Uint8Array (delegates to utils.base64ToArrayBuffer). */
 function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(base64ToArrayBuffer(b64));
+}
+
+/**
+ * Does this inbound message advance the epoch WITHOUT rotating the key material
+ * away from a member it just removed?
+ *
+ * True for a commit that carries a Remove proposal and no UpdatePath. RFC 9420
+ * §12.4 says that combination should not exist; ts-mls 1.6.2 produces it for a
+ * single Remove, and the resulting epoch is derivable by the removed member.
+ *
+ * Returns false for anything it cannot read, which is the right default for the
+ * cases that reach it: a commit with only Adds legitimately omits the path (the
+ * new member is served by the Welcome and nobody is being revoked), and a
+ * private-message commit is opaque before processing. Our own sender always
+ * frames commits as public messages, so the inspectable path is the one that
+ * carries our removals.
+ *
+ * Proposals sent by reference cannot be classified from the wire, so a pathless
+ * commit carrying any of them is treated as revoking — deferring an epoch is
+ * recoverable, installing an exposed one is not.
+ */
+function commitRevokesWithoutPath(msg: MLSMessage): boolean {
+  if (msg.wireformat !== 'mls_public_message') return false;
+  const framed = (msg as { publicMessage?: { content?: unknown } }).publicMessage?.content as
+    | { contentType?: string; commit?: { path?: unknown; proposals?: unknown[] } }
+    | undefined;
+  if (framed?.contentType !== 'commit' || !framed.commit) return false;
+  if (framed.commit.path !== undefined) return false;
+
+  const proposals = framed.commit.proposals ?? [];
+  return proposals.some((entry) => {
+    const p = entry as { proposalOrRefType?: string; proposal?: { proposalType?: string } };
+    if (p.proposalOrRefType !== 'proposal') return true; // by-reference: unclassifiable
+    return p.proposal?.proposalType === 'remove';
+  });
 }
 
 /** Constant-time array equality (avoids timing side-channels on identity match). */

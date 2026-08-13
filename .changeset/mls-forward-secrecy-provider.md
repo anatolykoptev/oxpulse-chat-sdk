@@ -19,9 +19,15 @@ one is load-bearing, not redundant: ts-mls 1.6.2 omits the UpdatePath on
 a commit that removes exactly one member, contrary to RFC 9420 §12.4, and
 without a path the removed member derives the next epoch's key material
 and keeps reading the room. The empty follow-up commit does carry a path,
-so revocation actually takes effect. The AEAD epoch is applied only after
-both commits, so nothing is sealed under the epoch the removed member can
-still compute.
+so revocation actually takes effect.
+
+Both sides of that need handling. The committer applies the AEAD epoch only
+after both commits. Receivers get the two commits separately over SSE, so
+`processMessage` now advances the MLS state but withholds the AEAD epoch for
+a commit that carries a Remove and no UpdatePath, installing it when the
+rotation arrives. Without the receive-side half, every member other than the
+committer seals one message under a key the person just removed can derive.
+A peer that never receives the rotation fails closed.
 
 `#fetchKeyPackage` binds the returned KeyPackage to the uid that was
 requested, so an untrusted directory cannot answer a request for Bob with
