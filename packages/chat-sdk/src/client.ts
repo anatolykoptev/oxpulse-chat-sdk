@@ -49,6 +49,8 @@ import type {
   RoomVisibility,
   ShareLink,
   JoinResult,
+  ExportRoomOptions,
+  ExportResult,
 } from './types.js';
 import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
@@ -56,6 +58,7 @@ import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
 import { enqueue, dequeue, pending, updateEntry, pruneFailedEntries, type PendingMessage } from './outbox.js';
 import { sendFile as sendFileHelper, type SendFileArgs } from './attachments.js';
+import { exportRoomHistory } from './export.js';
 import {
   arrayBufferToBase64,
   base64ToArrayBuffer,
@@ -982,6 +985,27 @@ export class SDKChatClient {
           : () => this.list(roomId, { ...args, afterSeq: cursor });
     }
     return result;
+  }
+
+  /**
+   * #294: Export a room's full history as a serialised string (JSON or text).
+   *
+   * Thin delegator to {@link exportRoomHistory} in `export.ts` — kept out of
+   * `client.ts` to avoid growing this file (cyclomatic 54, tracked in #133).
+   *
+   * Walks `list()` forward from the beginning of the room to exhaustion. Rows
+   * that failed to unseal are exported as explicit error entries (never
+   * skipped). An `AbortSignal` is checked BETWEEN PAGES only — it cannot
+   * interrupt a page already in flight, and for a room with no live
+   * subscription `list()`'s unseal loop is unbounded, so a hanging provider
+   * hangs the export. See #312.
+   *
+   * @param roomId  The room to export.
+   * @param opts    Format (`'json'` default / `'text'`), page size, AbortSignal.
+   * @returns       {@link ExportResult} with serialised content and row counts.
+   */
+  async exportRoom(roomId: string, opts?: ExportRoomOptions): Promise<ExportResult> {
+    return exportRoomHistory(this, roomId, opts);
   }
 
   /**
