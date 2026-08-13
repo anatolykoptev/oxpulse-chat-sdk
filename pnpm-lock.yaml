@@ -128,7 +128,6 @@ importers:
       vitest:
         specifier: ^4.1.5
         version: 4.1.8(@types/node@22.19.21)(jsdom@25.0.1)(vite@8.0.16(@types/node@22.19.21)(esbuild@0.25.12))
-    publishDirectory: dist
 
   packages/intro-protocol:
     dependencies:
@@ -143,7 +142,7 @@ importers:
         version: 2.2.0
       '@oxpulse/crypto-primitives':
         specifier: workspace:*
-        version: link:../crypto-primitives/dist
+        version: link:../crypto-primitives
       cborg:
         specifier: ^5.1.1
         version: 5.1.7
