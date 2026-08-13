@@ -29,6 +29,10 @@ rotation arrives. Without the receive-side half, every member other than the
 committer seals one message under a key the person just removed can derive.
 A peer that never receives the rotation fails closed.
 
+Upstream fixed the same defect in ts-mls 2.0.0-rc.11 (PR #436) and did not
+backport it; npm `latest` is 1.6.2, which predates the fix. Both halves of
+this workaround come out on the ts-mls 2.0 upgrade, which is breaking.
+
 `#fetchKeyPackage` binds the returned KeyPackage to the uid that was
 requested, so an untrusted directory cannot answer a request for Bob with
 Mallory's package. New error code `mls_keypackage_identity_mismatch`.

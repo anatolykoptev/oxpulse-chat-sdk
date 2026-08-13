@@ -581,9 +581,24 @@ export class MLSGroupManager {
     // commit at all. The AEAD epoch is applied ONLY after both commits land, so
     // nothing is ever sealed under the intermediate epoch she can still read.
     //
-    // Remove this once ts-mls emits a path for a single Remove — the test
-    // "forward secrecy: a removed member cannot decrypt epoch N+1 from her own
-    // state" is what keeps the guarantee honest either way.
+    // Upstream status, so this does not become permanent: the maintainer found
+    // the same defect independently and fixed it in
+    // https://github.com/LukaJCB/ts-mls/pull/436 ("Fix needsUpdatePath off by
+    // one bug", merged 2026-04-23), first published in 2.0.0-rc.11. Verified by
+    // bisecting the published tarballs — rc.10 buggy, rc.11 correct.
+    //
+    // It was never backported. npm `latest` is still 1.6.2 (2026-03-07), which
+    // predates the fix and is what we and every other stable consumer install;
+    // there is no advisory, it shipped listed as an off-by-one between
+    // performance PRs. So the trigger for deleting this workaround is not "once
+    // upstream fixes it" — that already happened — but our upgrade to ts-mls
+    // 2.0, which is a breaking API change (getCiphersuiteFromName and
+    // nobleCryptoProvider are gone, generateKeyPackage's signature changed) and
+    // has sat in RC for seventeen candidates.
+    //
+    // Delete this together with the receive-side deferral in processMessage.
+    // The test "forward secrecy: a removed member cannot decrypt epoch N+1 from
+    // her own state" keeps the guarantee honest either way.
     const rotateCommit = await createCommit(
       { state: removeCommit.newState, cipherSuite: cs },
       { extraProposals: [], ratchetTreeExtension: true, wireAsPublicMessage: true },
@@ -885,6 +900,8 @@ function base64ToBytes(b64: string): Uint8Array {
  * True for a commit that carries a Remove proposal and no UpdatePath. RFC 9420
  * §12.4 says that combination should not exist; ts-mls 1.6.2 produces it for a
  * single Remove, and the resulting epoch is derivable by the removed member.
+ * Fixed upstream in 2.0.0-rc.11 and not backported to the 1.6.x line we pin —
+ * see the note in removeMember, and delete both halves together.
  *
  * Returns false for anything it cannot read, which is the right default for the
  * cases that reach it: a commit with only Adds legitimately omits the path (the
