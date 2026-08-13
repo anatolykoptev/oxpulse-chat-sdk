@@ -270,6 +270,10 @@ export interface ListArgs {
    * caller has already been rejected, and the drain is what keeps the room's
    * chain entry from leaking, so the next list()/subscribe() is unaffected.
    *
+   * The force-drain bound is PER ROW and the chain is serial, so without this
+   * signal a caller waited that bound once per row on the page. That is the cost
+   * this exists to remove; it is not a single flat timeout.
+   *
    * The pagination thunk ({@link ListResult.next}) inherits this signal, so one
    * signal cancels a whole paged walk.
    */
