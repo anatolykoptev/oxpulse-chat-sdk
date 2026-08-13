@@ -25,6 +25,13 @@ export type SDKChatErrorCode =
   | 'mls_welcome_decrypt_failed'
   /** MLS: No KeyPackage found for the requested user. */
   | 'mls_keypackage_not_found'
+  /**
+   * MLS: the directory returned a KeyPackage whose credential identity is not
+   * the user that was asked for. The Delivery Service is untrusted in the MLS
+   * threat model; substituting a KeyPackage is how it would insert its own
+   * member into a group while the UI reports the intended one.
+   */
+  | 'mls_keypackage_identity_mismatch'
   /** MLS: Commit validation failed (invalid proposal, conflicting epoch, etc.). */
   | 'mls_commit_validation_failed'
   /** MLS: Local epoch does not match the expected epoch (desync). */

@@ -23,6 +23,15 @@ so revocation actually takes effect. The AEAD epoch is applied only after
 both commits, so nothing is sealed under the epoch the removed member can
 still compute.
 
+`#fetchKeyPackage` binds the returned KeyPackage to the uid that was
+requested, so an untrusted directory cannot answer a request for Bob with
+Mallory's package. New error code `mls_keypackage_identity_mismatch`.
+
+**KNOWN LIMITATION:** member authentication is closed on the outbound
+KeyPackage fetch only. Inbound commits go through ts-mls `acceptAll` and
+joins run with a credential validator that returns `true` unconditionally,
+so group membership is server-asserted — tracked in #355.
+
 **KNOWN LIMITATION:** `MLSStateStore` does NOT persist state yet
 (ts-mls lacks a complete serialize/deserialize API — tracked in #353).
 MLS group state does NOT survive a page reload. The store is exported

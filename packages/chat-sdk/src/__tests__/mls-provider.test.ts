@@ -442,6 +442,43 @@ describe('MlsProvider', () => {
     alice.dispose();
   });
 
+  it('rejects a KeyPackage whose credential identity is not the uid requested', async () => {
+    const cs = await getCiphersuiteImpl();
+    const tsMls = await import('ts-mls');
+    const roomId = 'room-substitution';
+
+    const alice = await createMlsProvider({
+      identityKey: await makeIdentityKey(),
+      credential: 'basic',
+      uid: 'alice',
+      keyPackageDirectoryUrl: KP_URL,
+      jwt: 'mock-jwt-alice',
+      stateStore: new InMemoryMlsStateStore(),
+    });
+    await alice.manager.publishKeyPackage();
+
+    // A hostile directory: asked for Bob, it serves Mallory's KeyPackage. Every
+    // signature on it is valid — it is a real KeyPackage, just not Bob's. The
+    // self-signature proves possession of a key, never possession of an identity.
+    const mallory = await publishRawKeyPackage(ds, 'mallory', cs, tsMls);
+    const substituted = tsMls.encodeMlsMessage({
+      version: 'mls10',
+      wireformat: 'mls_key_package',
+      keyPackage: mallory.publicPackage,
+    });
+    ds.keyPackages.set('bob', [tsMls.bytesToBase64(substituted)]);
+
+    await expect(alice.manager.createGroup(roomId, ['bob'])).rejects.toThrow(
+      /different identity than bob/,
+    );
+
+    // And the substitution must not have half-created a group either.
+    expect(ds.mlsMessages.get(roomId) ?? []).toHaveLength(0);
+    expect(ds.welcomeQueue.get('bob') ?? []).toHaveLength(0);
+
+    alice.dispose();
+  });
+
   it('forward secrecy: a removed member cannot decrypt epoch N+1 from her own state', async () => {
     const cs = await getCiphersuiteImpl();
     const tsMls = await import('ts-mls');

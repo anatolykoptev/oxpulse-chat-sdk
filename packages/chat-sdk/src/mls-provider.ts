@@ -32,9 +32,26 @@
  *   forward secrecy + post-compromise security (via MLS TreeKEM — ChainKey
  *   rotates on every epoch advance).
  * - Does NOT defend: traffic analysis.
- * - MLS credential verification is the CALLER's responsibility (via ts-mls
- *   AuthenticationService). The provider surfaces the epoch authenticator
- *   for optional out-of-band verification.
+ *
+ * ### Member authentication — one of three surfaces is closed
+ *
+ * The Delivery Service is untrusted. Three places let it influence who is in a
+ * group, and only the first is guarded here:
+ *
+ * 1. **Outbound (guarded).** `#fetchKeyPackage` verifies the returned
+ *    KeyPackage's basic-credential identity equals the uid that was requested,
+ *    so the directory cannot answer a request for Bob with Mallory's package.
+ * 2. **Inbound commits (OPEN).** `processMessage` passes ts-mls `acceptAll`, so
+ *    an Add relayed over SSE is accepted without asking whether that identity
+ *    belongs in this room. The SDK has no room roster to check against; this
+ *    needs an application-supplied authorization callback.
+ * 3. **Join (OPEN).** `joinGroup` runs with ts-mls's `defaultClientConfig`,
+ *    whose `defaultAuthenticationService.validateCredential` returns `true`
+ *    unconditionally, so a joiner validates no credential in the tree it joins.
+ *
+ * Surfaces 2 and 3 are tracked in #355. Until they are closed, treat group
+ * membership as server-asserted and use the epoch authenticator for
+ * out-of-band verification.
  *
  * ## Bundle size
  *
@@ -638,7 +655,32 @@ export class MLSGroupManager {
       throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: expected key_package, got ${kpMsg.wireformat}`);
     }
     // Extract the KeyPackage from the MlsKeyPackage message.
-    return (kpMsg as unknown as { keyPackage: KeyPackage }).keyPackage;
+    const keyPackage = (kpMsg as unknown as { keyPackage: KeyPackage }).keyPackage;
+
+    // Bind the KeyPackage to the uid we asked for.
+    //
+    // The Delivery Service is untrusted — that is the whole premise of MLS.
+    // Nothing above this line ties the bytes it returned to `uid`: ts-mls
+    // validates the KeyPackage's self-signature, which only proves whoever
+    // minted it held the matching key, not that they are the person requested.
+    // Without this check a hostile or compromised directory answers "give me
+    // bob's KeyPackage" with mallory's, the caller commits an Add, and the room
+    // shows Bob joining while Mallory holds the keys.
+    const cred = keyPackage.leafNode.credential;
+    if (cred.credentialType !== 'basic') {
+      throw new SDKChatError(
+        'mls_keypackage_identity_mismatch',
+        `MLSGroupManager: KeyPackage for ${uid} uses unsupported credential type ${cred.credentialType}`,
+      );
+    }
+    if (!arrayEquals((cred as { identity: Uint8Array }).identity, new TextEncoder().encode(uid))) {
+      throw new SDKChatError(
+        'mls_keypackage_identity_mismatch',
+        `MLSGroupManager: directory returned a KeyPackage for a different identity than ${uid}`,
+      );
+    }
+
+    return keyPackage;
   }
 
   /** Send a Welcome message to a specific user via the server. */
