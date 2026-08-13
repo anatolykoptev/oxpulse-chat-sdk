@@ -44,6 +44,28 @@ timingSafeEqual(macA, macB);                 // Uint8Array vs Uint8Array
 timingSafePubkeyEqualB64u(pubA_b64u, pubB_b64u); // base64url strings
 ```
 
+## Replay protection (caller's responsibility)
+
+`crypto-primitives` is a **stateless** library — it does NOT track seen
+`msgId`s and cannot reject replayed envelopes by itself. The crypto layer
+authenticates `msgId` (bound into the binding transcript digest in v2),
+which **enables** caller-side replay detection, but does not perform it.
+
+An attacker (the relay/server in the E2EE threat model) can replay a
+previously captured envelope to the recipient — signature verifies, AEAD
+decrypts, message returned. The caller MUST track seen `msgId`s per sender
+and reject duplicates.
+
+`openMessage` accepts an optional `replayWindow: ReplayWindow` parameter.
+When provided, `openMessage` rejects replayed `msgId`s after signature
+verification but before AEAD decryption. The caller provides the storage
+backing (in-memory `Set` for tests, IndexedDB for production). See the
+`ReplayWindow` interface JSDoc for the timing and poisoning invariants.
+
+**Without** `replayWindow`, the same envelope opens twice — this is by
+design (stateless library, backward compat, test convenience). Production
+callers MUST pass a `replayWindow`.
+
 ## Dep arrow
 
 ```
@@ -92,5 +114,6 @@ const { plaintext, msgId, flags } = await openMessage({
   recipientX25519Priv,
   recipientX25519Pub,
   expectedSenderEd25519Pub,
+  replayWindow, // REQUIRED in production — caller-provided ReplayWindow
 });
 ```
