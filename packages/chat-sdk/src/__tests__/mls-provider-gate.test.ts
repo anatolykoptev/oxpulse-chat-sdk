@@ -32,6 +32,8 @@
 //         message still decodes, just with version 0. Asserting the version
 //         byte is what makes it detectable, which is why that test checks the
 //         field rather than only that createGroup succeeded.
+//   G5  delete the identity comparison in #fetchKeyPackage
+//         → "a substituted KeyPackage from the directory is rejected"
 
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -302,6 +304,38 @@ describe('MLSGroupManager — lifecycle gate', () => {
 
     alice.dispose();
     bob.dispose();
+  });
+
+  it('a substituted KeyPackage from the directory is rejected', async () => {
+    // The Delivery Service is untrusted — that is the premise of MLS, and the
+    // server is specified as a relay that never parses what it stores. ts-mls
+    // validates a KeyPackage's self-signature, which proves possession of a key
+    // and says nothing about identity. Without the uid binding in
+    // #fetchKeyPackage the directory answers "give me bob's KeyPackage" with
+    // mallory's, the commit is well-formed, every peer accepts it, and the room
+    // shows Bob joining while Mallory holds the keys.
+    const t = await tsmls();
+    const ctx = await makeContext();
+    const alice = await makeProvider('alice');
+    await alice.manager.publishKeyPackage();
+
+    // A genuine, correctly signed KeyPackage — just not Bob's.
+    const mallory = await seedKeyPackage(ds, 'mallory', ctx);
+    ds.keyPackages.set('bob', [t.bytesToBase64(t.encode(t.mlsMessageEncoder, {
+      version: t.protocolVersions.mls10,
+      wireformat: t.wireformats.mls_key_package,
+      keyPackage: mallory.publicPackage,
+    }))]);
+
+    await expect(alice.manager.createGroup('room-substitution', ['bob'])).rejects.toThrow();
+
+    // And the rejection must happen before anything is relayed — a half-created
+    // group leaves peers holding Welcomes for a group the creator has no state
+    // for.
+    expect(ds.mlsMessages.get('room-substitution') ?? []).toHaveLength(0);
+    expect(ds.welcomeQueue.get('bob') ?? []).toHaveLength(0);
+
+    alice.dispose();
   });
 
   it('removeMember targets the correct leaf across two sequential removals', async () => {
