@@ -650,7 +650,22 @@ export class MLSGroupManager {
       throw new SDKChatError('mls_keypackage_not_found', `MLSGroupManager: expected key_package, got ${decoded.wireformat}`);
     }
     // Extract the KeyPackage from the MlsKeyPackage message.
-    return (decoded as unknown as { keyPackage: KeyPackage }).keyPackage;
+    const keyPackage = (decoded as unknown as { keyPackage: KeyPackage }).keyPackage;
+
+    // Verify the KeyPackage's credential identity matches the requested UID.
+    // The Delivery Service is untrusted in the MLS threat model — substituting
+    // a KeyPackage is how a malicious DS would insert its own member into a
+    // group while the UI reports the intended one.
+    const cred = keyPackage.leafNode.credential as { credentialType: number; identity: Uint8Array };
+    const expectedIdentity = new TextEncoder().encode(uid);
+    if (cred.credentialType !== tsMls.defaultCredentialTypes.basic ||
+        !arrayEquals(cred.identity, expectedIdentity)) {
+      throw new SDKChatError(
+        'mls_keypackage_identity_mismatch',
+        `MLSGroupManager: KeyPackage identity mismatch for ${uid} — the Delivery Service returned a KeyPackage for a different user.`,
+      );
+    }
+    return keyPackage;
   }
 
   /** Send a Welcome message to a specific user via the server. */

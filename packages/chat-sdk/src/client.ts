@@ -631,6 +631,8 @@ export class SDKChatClient {
       });
       this.#cryptoProvider = mlsProvider;
       this.#mlsManager = mlsProvider.manager;
+      // Restore persisted MLS state from IndexedDB before first use.
+      await mlsProvider.manager.restoreAll();
     })();
     try {
       await this.#mlsInitPromise;
@@ -3564,4 +3566,17 @@ export class SDKChatClient {
     }
   }
 
+  /**
+   * Dispose the client, releasing resources and persisting MLS state.
+   *
+   * For MLS provider: persists all room ClientStates to IndexedDB so they
+   * survive page reloads. For SFrame/custom: disposes the crypto provider.
+   * Call this before page unload or when the client is no longer needed.
+   */
+  async dispose(): Promise<void> {
+    if (this.#mlsManager) {
+      await this.#mlsManager.persistAll();
+    }
+    this.#cryptoProvider?.dispose?.();
+  }
 }
