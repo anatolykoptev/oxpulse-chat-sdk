@@ -119,6 +119,12 @@ async function makeIdentityKey(): Promise<CryptoKey> {
   return crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
 }
 
+/** Test-only AuthenticationService — accepts all credentials. */
+async function makeTestAuthService(): Promise<import('ts-mls').AuthenticationService> {
+  const tsMls = await import('ts-mls');
+  return tsMls.unsafeTestingAuthenticationService;
+}
+
 // ---- Tests -----------------------------------------------------------------
 
 describe('MlsProvider', () => {
@@ -135,6 +141,7 @@ describe('MlsProvider', () => {
 
   it('constructs and exposes a manager', async () => {
     const identityKey = await makeIdentityKey();
+    const authService = await makeTestAuthService();
     const provider = await createMlsProvider({
       identityKey,
       credential: 'basic',
@@ -142,6 +149,7 @@ describe('MlsProvider', () => {
       keyPackageDirectoryUrl: 'http://mock/api/sdk/keys',
       jwt: 'mock-jwt',
       stateStore: new InMemoryMlsStateStore(),
+      authService,
     });
     expect(provider).toBeDefined();
     expect(provider.manager).toBeDefined();
@@ -153,6 +161,7 @@ describe('MlsProvider', () => {
 
   it('publishKeyPackage stores a KeyPackage on the server', async () => {
     const identityKey = await makeIdentityKey();
+    const authService = await makeTestAuthService();
     const provider = await createMlsProvider({
       identityKey,
       credential: 'basic',
@@ -160,6 +169,7 @@ describe('MlsProvider', () => {
       keyPackageDirectoryUrl: 'http://mock/api/sdk/keys',
       jwt: 'mock-jwt-alice',
       stateStore: new InMemoryMlsStateStore(),
+      authService,
     });
 
     await provider.manager.publishKeyPackage();

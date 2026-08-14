@@ -39,7 +39,9 @@ export type SDKChatErrorCode =
   /** MLS: Persisted ClientState is corrupted or incompatible. */
   | 'mls_state_corruption'
   /** MLS: IndexedDB is unavailable for state persistence (private browsing, SSR). */
-  | 'mls_idb_unavailable';
+  | 'mls_idb_unavailable'
+  /** MLS: No AuthenticationService provided (KCI protection required). */
+  | 'mls_auth_service_required';
 
 /**
  * Typed error thrown by SDKChatClient for all API failures.

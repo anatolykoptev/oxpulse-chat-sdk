@@ -411,6 +411,7 @@ export class SDKChatClient {
     keyPackageDirectoryUrl: string;
     onEpochAuthenticator?: (roomId: string, authenticator: Uint8Array) => void;
     stateStore?: import('./mls-state-store.js').MLSStateStore;
+    authService: import('ts-mls').AuthenticationService;
   } | null = null;
   /**
    * MLS group manager — set when the MLS provider is lazily initialized.
@@ -626,6 +627,7 @@ export class SDKChatClient {
           ? { onEpochAuthenticator: mlsOpts.onEpochAuthenticator }
           : {}),
         ...(mlsOpts.stateStore !== undefined ? { stateStore: mlsOpts.stateStore } : {}),
+        authService: mlsOpts.authService,
       });
       this.#cryptoProvider = mlsProvider;
       this.#mlsManager = mlsProvider.manager;

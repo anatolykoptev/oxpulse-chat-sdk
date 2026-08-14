@@ -176,6 +176,13 @@ export type E2EEOptions =
          * and persisted to IndexedDB — group state survives page reloads.
          */
         stateStore?: import('./mls-state-store.js').MLSStateStore;
+        /**
+         * AuthenticationService for credential validation (KCI protection).
+         * REQUIRED — the MLS provider throws if this is not provided.
+         * Implement this to validate basic credentials against a known
+         * UID → identity-public-key mapping (e.g. fetched from the server DS).
+         */
+        authService: import('ts-mls').AuthenticationService;
       };
     }
   | {

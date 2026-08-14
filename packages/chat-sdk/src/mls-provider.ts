@@ -144,13 +144,12 @@ export interface MlsProviderOptions {
   durableReplayNamespace?: string;
 
   /**
-   * Custom AuthenticationService for credential validation.
-   * If not provided, a default implementation is used that accepts all
-   * basic credentials whose identity matches a known UID.
-   * Override this to implement KCI protection (verify credentials against
-   * known identity keys).
+   * AuthenticationService for credential validation (KCI protection).
+   * REQUIRED — the provider throws if this is not provided.
+   * Implement this to validate basic credentials against a known
+   * UID → identity-public-key mapping (e.g. fetched from the server DS).
    */
-  authService?: import('ts-mls').AuthenticationService;
+  authService: import('ts-mls').AuthenticationService;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,9 +234,14 @@ export class MLSGroupManager {
   async #getContext(): Promise<MlsContext> {
     if (this.#ctx) return this.#ctx;
     const cs = await this.#getCiphersuite();
-    const tsMls = await this.#loadTsMls();
-    const authService = this.#opts.authService ?? tsMls.unsafeTestingAuthenticationService;
-    this.#ctx = { cipherSuite: cs, authService };
+    if (!this.#opts.authService) {
+      throw new SDKChatError(
+        'mls_auth_service_required',
+        'MLS requires an AuthenticationService for credential validation (KCI protection). ' +
+        'Pass options.authService to createMlsProvider — do not use unsafeTestingAuthenticationService in production.',
+      );
+    }
+    this.#ctx = { cipherSuite: cs, authService: this.#opts.authService };
     return this.#ctx;
   }
 
@@ -356,7 +360,7 @@ export class MLSGroupManager {
       state = commitResult.newState;
 
       // Send the Welcome message to the new member via the server.
-      if (commitResult.welcome) {
+      if (commitResult.welcome?.welcome) {
         await this.#sendWelcome(roomId, uid, commitResult.welcome.welcome, tsMls);
       }
 
@@ -493,7 +497,7 @@ export class MLSGroupManager {
 
     this.#roomStates.set(roomId, commitResult.newState);
 
-    if (commitResult.welcome) {
+    if (commitResult.welcome?.welcome) {
       await this.#sendWelcome(roomId, uid, commitResult.welcome.welcome, tsMls);
     }
     await this.#sendMlsMessage(roomId, commitResult.commit, 'commit', tsMls);
@@ -578,6 +582,12 @@ export class MLSGroupManager {
   /**
    * Restore all room states from IndexedDB. Called on client init.
    * Uses ts-mls 2.0 clientStateDecoder to deserialize ClientState.
+   *
+   * Integrity: MLS provides cryptographic integrity via the epoch authenticator
+   * chain — a tampered ClientState will produce keys that fail AEAD verification
+   * on the next seal/unseal. This method adds structural validation as
+   * defence-in-depth: a corrupted state that fails to decode or has missing
+   * fields is rejected before any crypto operation.
    */
   async restoreAll(): Promise<void> {
     const tsMls = await this.#loadTsMls();
@@ -586,12 +596,22 @@ export class MLSGroupManager {
     for (const roomId of roomIds) {
       const stateBytes = await this.#stateStore.loadClientState(roomId);
       if (stateBytes && stateBytes.length > 0) {
-        const state = decode(clientStateDecoder, stateBytes);
-        if (state) {
-          this.#roomStates.set(roomId, state);
-          this.#roomGroupIds.set(roomId, state.groupContext.groupId);
-          await this.#applyEpoch(roomId, state);
+        let state: ClientState | undefined;
+        try {
+          state = decode(clientStateDecoder, stateBytes);
+        } catch (err) {
+          console.warn(`[chat-sdk] MLS: corrupted ClientState for room ${roomId}, dropping — ${err}`);
+          await this.#stateStore.deleteClientState(roomId);
+          continue;
         }
+        if (!state?.groupContext?.groupId) {
+          console.warn(`[chat-sdk] MLS: malformed ClientState for room ${roomId} (missing groupContext), dropping`);
+          await this.#stateStore.deleteClientState(roomId);
+          continue;
+        }
+        this.#roomStates.set(roomId, state);
+        this.#roomGroupIds.set(roomId, state.groupContext.groupId);
+        await this.#applyEpoch(roomId, state);
       }
     }
   }
