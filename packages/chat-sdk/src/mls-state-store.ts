@@ -65,9 +65,15 @@ export class IdbMlsStateStore implements MLSStateStore {
       const record: StateRecord = { roomId, state, epoch: 0, version: 1 };
       await set(roomId, record, this.#store);
     } catch (err) {
-      this.#switchToFallback();
-      if (!this.#fallback.has(roomId)) this.#fallbackKeys.push(roomId);
-      this.#fallback.set(roomId, state);
+      if (isPermanentIdbError(err)) {
+        this.#switchToFallback();
+        if (!this.#fallback.has(roomId)) this.#fallbackKeys.push(roomId);
+        this.#fallback.set(roomId, state);
+      } else {
+        // Transient error (QuotaExceeded, transient IDB lock) — don't
+        // switch to fallback; surface so the caller can retry or report.
+        throw err;
+      }
     }
   }
 
@@ -80,13 +86,12 @@ export class IdbMlsStateStore implements MLSStateStore {
       if (!record) return null;
       return record.state;
     } catch (err) {
-      // Distinguish IndexedDB unavailability (fallback to in-memory) from
-      // data corruption (surface the error). A thrown get() is almost always
-      // a transient/unavailability error, not corruption — but we log it
-      // so the caller can investigate.
-      console.warn(`MLSStateStore: IndexedDB read failed for room ${roomId}:`, err);
-      this.#switchToFallback();
-      return this.#fallback.get(roomId) ?? null;
+      if (isPermanentIdbError(err)) {
+        console.warn(`MLSStateStore: IndexedDB read failed for room ${roomId}:`, err);
+        this.#switchToFallback();
+        return this.#fallback.get(roomId) ?? null;
+      }
+      throw err;
     }
   }
 
@@ -99,11 +104,16 @@ export class IdbMlsStateStore implements MLSStateStore {
     }
     try {
       await del(roomId, this.#store);
-    } catch {
-      this.#switchToFallback();
-      this.#fallback.delete(roomId);
-      const idx = this.#fallbackKeys.indexOf(roomId);
-      if (idx !== -1) this.#fallbackKeys.splice(idx, 1);
+    } catch (err) {
+      if (isPermanentIdbError(err)) {
+        this.#switchToFallback();
+        this.#fallback.delete(roomId);
+        const idx = this.#fallbackKeys.indexOf(roomId);
+        if (idx !== -1) this.#fallbackKeys.splice(idx, 1);
+      } else {
+        // Transient error — surface to caller for retry (IDB still viable).
+        throw err;
+      }
     }
   }
 
@@ -114,9 +124,12 @@ export class IdbMlsStateStore implements MLSStateStore {
     try {
       const allKeys = await keys(this.#store);
       return allKeys.map((k) => String(k));
-    } catch {
-      this.#switchToFallback();
-      return [...this.#fallbackKeys];
+    } catch (err) {
+      if (isPermanentIdbError(err)) {
+        this.#switchToFallback();
+        return [...this.#fallbackKeys];
+      }
+      throw err;
     }
   }
 
@@ -166,4 +179,34 @@ export class InMemoryMlsStateStore implements MLSStateStore {
  */
 export function createIdbMlsStateStore(): MLSStateStore {
   return new IdbMlsStateStore();
+}
+
+/**
+ * Classify an IndexedDB error as permanent (IDB unavailable — switch to
+ * in-memory fallback) or transient (quota exceeded, lock contention —
+ * surface to caller for retry).
+ *
+ * Permanent: SecurityError (private browsing blocks IDB), ReferenceError
+ * (SSR / no `indexedDB` global), TypeError (no IDB factory).
+ * Transient: QuotaExceededError, AbortError, ConstraintError, DataError,
+ * NotFoundError, TransactionInactiveError, VersionError, InvalidStateError
+ * (connection closing — recoverable by reopening), and any unknown
+ * DOMException (safer to retry than to abandon IDB).
+ */
+function isPermanentIdbError(err: unknown): boolean {
+  if (err instanceof DOMException) {
+    // SecurityError: private browsing blocks IDB entirely — permanent
+    if (err.name === 'SecurityError') return true;
+    // All other DOMException names are transient (quota, abort, constraint,
+    // data error, not found, inactive tx, version, invalid state, unknown).
+    // Defaulting to transient is safer: a retry may succeed, and a truly
+    // permanent failure will recur and eventually trigger fallback.
+    return false;
+  }
+  // ReferenceError: `indexedDB` is not defined (SSR, legacy browser)
+  if (err instanceof ReferenceError) return true;
+  // TypeError: null/undefined access (no IDB factory)
+  if (err instanceof TypeError) return true;
+  // Unknown error type — treat as transient (retry-friendly)
+  return false;
 }

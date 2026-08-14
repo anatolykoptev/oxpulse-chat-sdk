@@ -23,6 +23,12 @@ import { TEST_BASE_URL as BASE_URL, TEST_JWT as JWT, makeListResponse as sharedM
 const ROOM_ID = 'room-mls-mode-test';
 const makeListResponse = (b64: string, cryptoMode?: string) => sharedMakeListResponse(b64, { cryptoMode });
 
+/** Test-only authService — accepts all credentials (test-only, NOT for production). */
+async function makeTestAuthService(): Promise<import('ts-mls').AuthenticationService> {
+  const tsMls = await import('ts-mls');
+  return tsMls.unsafeTestingAuthenticationService;
+}
+
 function mlsClient(extra: Record<string, unknown> = {}) {
   return new SDKChatClient({
     baseUrl: BASE_URL,
@@ -34,10 +40,11 @@ function mlsClient(extra: Record<string, unknown> = {}) {
         credential: 'basic',
         uid: 'u-mls-test',
         keyPackageDirectoryUrl: `${BASE_URL}/keypackages`,
+        authService: undefined as unknown as import('ts-mls').AuthenticationService,
       },
     },
     ...extra,
-  } as never);
+  });
 }
 
 describe('mls client vs mls room', () => {
@@ -70,10 +77,50 @@ describe('mls client vs mls room', () => {
       baseUrl: BASE_URL,
       jwt: JWT,
       e2ee: { provider: 'sframe', getKey: async () => new Uint8Array(32) },
-    } as never);
+    });
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeListResponse(btoa('payload'), 'mls'));
     await expect(client.list(ROOM_ID)).rejects.toSatisfy(
       (err: unknown) => err instanceof SDKChatError && err.code === 'crypto_mode_mismatch',
+    );
+  });
+});
+
+describe('getMlsManager() lazy init through SDKChatClient', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('returns a working MLSGroupManager via lazy init', async () => {
+    const authService = await makeTestAuthService();
+    const identityKey = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const client = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      e2ee: {
+        provider: 'mls',
+        mls: {
+          identityKey,
+          credential: 'basic',
+          uid: 'u-mgr-test',
+          keyPackageDirectoryUrl: `${BASE_URL}/keypackages`,
+          authService,
+        },
+      },
+    });
+    const manager = await client.getMlsManager();
+    expect(manager).toBeDefined();
+    expect(typeof manager.publishKeyPackage).toBe('function');
+    expect(typeof manager.createGroup).toBe('function');
+    expect(typeof manager.processWelcome).toBe('function');
+    await client.dispose();
+  });
+
+  it('throws if e2ee.provider is not "mls"', async () => {
+    const client = new SDKChatClient({
+      baseUrl: BASE_URL,
+      jwt: JWT,
+      e2ee: { provider: 'sframe', getKey: async () => new Uint8Array(32) },
+    });
+    await expect(client.getMlsManager()).rejects.toSatisfy(
+      (err: unknown) => err instanceof SDKChatError && err.code === 'invalid_args',
     );
   });
 });
