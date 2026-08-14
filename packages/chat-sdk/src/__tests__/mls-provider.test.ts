@@ -506,6 +506,62 @@ describe('MlsProvider', () => {
     // This assertion proves the leaf index calculation is correct.
     expect(findLeafIndex(states.carol, 'carol')).not.toBe(-1); // Carol still has her own state
   });
+
+  it('addMember rejects a KeyPackage whose identity does not match the requested uid (DS substitution attack)', async () => {
+    // The Delivery Service is untrusted. A malicious DS answers a request for
+    // Bob's KeyPackage with Mallory's. Without the identity binding check in
+    // #fetchKeyPackage, the caller commits an Add and the room shows "Bob
+    // joined" while Mallory holds the keys. This test simulates the attack by
+    // publishing Mallory's KeyPackage under Bob's uid in the mock DS, then
+    // verifying addMember throws mls_keypackage_identity_mismatch.
+    const ctx = await makeContext();
+    const tsMls = await import('ts-mls');
+    const { generateKeyPackage, defaultCapabilities, defaultLifetime, defaultCredentialTypes } = tsMls;
+    const makeCred = (uid: string) => ({
+      credentialType: defaultCredentialTypes.basic,
+      identity: new TextEncoder().encode(uid),
+    });
+
+    // Mallory publishes her own KeyPackage (legitimately, under her uid).
+    const malloryKp = await generateKeyPackage({
+      credential: makeCred('mallory'),
+      capabilities: defaultCapabilities(),
+      lifetime: defaultLifetime(),
+      cipherSuite: ctx.cipherSuite,
+    });
+    const malloryKpMsg = {
+      wireformat: tsMls.wireformats.mls_key_package,
+      keyPackage: malloryKp.publicPackage,
+      version: tsMls.protocolVersions.mls10,
+    };
+    const malloryKpB64 = tsMls.bytesToBase64(tsMls.encode(tsMls.mlsMessageEncoder, malloryKpMsg));
+
+    // The malicious DS stores Mallory's KeyPackage under Bob's uid.
+    ds.keyPackages.set('bob', [malloryKpB64]);
+
+    // Alice creates a provider and a group.
+    const aliceIdentityKey = await makeIdentityKey();
+    const authService = await makeTestAuthService();
+    const provider = await createMlsProvider({
+      identityKey: aliceIdentityKey,
+      credential: 'basic',
+      uid: 'alice',
+      keyPackageDirectoryUrl: 'http://mock/api/sdk/keys',
+      jwt: 'mock-jwt-alice',
+      stateStore: new InMemoryMlsStateStore(),
+      authService,
+    });
+    await provider.manager.publishKeyPackage();
+
+    // Alice creates a group and tries to add Bob. The DS returns Mallory's KP.
+    const groupId = new TextEncoder().encode('substitution-test');
+    await provider.manager.createGroup('room-sub', []);
+
+    await expect(provider.manager.addMember('room-sub', 'bob'))
+      .rejects.toMatchObject({ code: 'mls_keypackage_identity_mismatch' });
+
+    provider.dispose();
+  });
 });
 
 // ---- MLSStateStore tests ---------------------------------------------------

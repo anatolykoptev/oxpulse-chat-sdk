@@ -604,8 +604,16 @@ export class MLSGroupManager {
           await this.#stateStore.deleteClientState(roomId);
           continue;
         }
-        if (!state?.groupContext?.groupId) {
-          console.warn(`[chat-sdk] MLS: malformed ClientState for room ${roomId} (missing groupContext), dropping`);
+        // Structural validation (defence-in-depth — the primary integrity
+        // mechanism is the epoch authenticator chain + AEAD verification on
+        // the next seal/unseal). Reject states missing fields that #applyEpoch
+        // and deriveMlsEpochMaterial dereference, so an obviously-corrupted
+        // state is dropped before any crypto operation rather than feeding
+        // bad keys into the AEAD layer.
+        if (!state?.groupContext?.groupId ||
+            !state?.ratchetTree ||
+            !state?.keySchedule) {
+          console.warn(`[chat-sdk] MLS: malformed ClientState for room ${roomId} (missing required fields), dropping`);
           await this.#stateStore.deleteClientState(roomId);
           continue;
         }
