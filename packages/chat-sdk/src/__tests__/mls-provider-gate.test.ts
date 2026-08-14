@@ -14,8 +14,13 @@
 //     processMessage) through a mock Delivery Service,
 //   - takes its oracle from ts-mls's own getGroupMembers, read as identities —
 //     no nodeIndex arithmetic anywhere in this file,
-//   - proves a removed member's exclusion from HER OWN state after she has
-//     honestly processed the commit, never from the test withholding a key,
+//   - proves a removed member's exclusion from HER OWN state, never from the
+//     test withholding a key. Read the two forward-secrecy tests as a pair and
+//     not as duplicates: test 4 permits either outcome — she processes her own
+//     removal and cannot derive epoch N+1, or she cannot process it at all —
+//     while test 5 REQUIRES her to process it successfully first. Test 5 is the
+//     one that carries the stronger "honestly processed, still locked out"
+//     claim; test 4 alone does not establish which of the two paths held,
 //   - pairs every negative with a surviving member reading the same ciphertext,
 //     so "she cannot decrypt" is distinguishable from "nobody can".
 //
