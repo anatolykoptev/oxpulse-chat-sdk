@@ -63,7 +63,7 @@
     "@noble/hashes": "^2.3.0",
     "@oxpulse/wire-codec": "workspace:^",
     "idb-keyval": "^6.2.1",
-    "sframe-ratchet": "link:../../../sframe-ratchet-mls-chat",
+    "sframe-ratchet": "^0.5.7",
     "thumbhash": "^0.1.1"
   },
   "peerDependencies": {
