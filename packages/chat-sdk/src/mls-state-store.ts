@@ -107,12 +107,13 @@ export class IdbMlsStateStore implements MLSStateStore {
     } catch (err) {
       if (isPermanentIdbError(err)) {
         this.#switchToFallback();
+        this.#fallback.delete(roomId);
+        const idx = this.#fallbackKeys.indexOf(roomId);
+        if (idx !== -1) this.#fallbackKeys.splice(idx, 1);
+      } else {
+        // Transient error — surface to caller for retry (IDB still viable).
+        throw err;
       }
-      // For both permanent (now in fallback) and transient, remove from
-      // whichever store has it.
-      this.#fallback.delete(roomId);
-      const idx = this.#fallbackKeys.indexOf(roomId);
-      if (idx !== -1) this.#fallbackKeys.splice(idx, 1);
     }
   }
 
@@ -185,22 +186,27 @@ export function createIdbMlsStateStore(): MLSStateStore {
  * in-memory fallback) or transient (quota exceeded, lock contention —
  * surface to caller for retry).
  *
- * Permanent: SecurityError (private browsing), ReferenceError (SSR/no IDB),
- * TypeError (no indexedDB object), UnknownError with "not available" message.
- * Transient: QuotaExceededError, transient lock errors, data errors.
+ * Permanent: SecurityError (private browsing blocks IDB), ReferenceError
+ * (SSR / no `indexedDB` global), TypeError (no IDB factory).
+ * Transient: QuotaExceededError, AbortError, ConstraintError, DataError,
+ * NotFoundError, TransactionInactiveError, VersionError, InvalidStateError
+ * (connection closing — recoverable by reopening), and any unknown
+ * DOMException (safer to retry than to abandon IDB).
  */
 function isPermanentIdbError(err: unknown): boolean {
   if (err instanceof DOMException) {
-    // SecurityError: private browsing blocks IDB
-    // InvalidStateError: IDB database deleted while operation in flight
-    if (err.name === 'SecurityError' || err.name === 'InvalidStateError') return true;
-    // QuotaExceededError: storage full — transient, don't abandon IDB
-    if (err.name === 'QuotaExceededError') return false;
+    // SecurityError: private browsing blocks IDB entirely — permanent
+    if (err.name === 'SecurityError') return true;
+    // All other DOMException names are transient (quota, abort, constraint,
+    // data error, not found, inactive tx, version, invalid state, unknown).
+    // Defaulting to transient is safer: a retry may succeed, and a truly
+    // permanent failure will recur and eventually trigger fallback.
+    return false;
   }
   // ReferenceError: `indexedDB` is not defined (SSR, legacy browser)
   if (err instanceof ReferenceError) return true;
   // TypeError: null/undefined access (no IDB factory)
   if (err instanceof TypeError) return true;
-  // Default: treat as permanent (safer to fall back than to loop)
-  return true;
+  // Unknown error type — treat as transient (retry-friendly)
+  return false;
 }
