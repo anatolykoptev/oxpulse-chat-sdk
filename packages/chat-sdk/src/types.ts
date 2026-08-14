@@ -17,7 +17,7 @@ import type { SDKChatError } from './errors.js';
  *   - GET /api/sdk/messages response envelope (crypto_mode field)
  *   - SSE `event: connected` prelude data (crypto_mode field)
  */
-export type CryptoMode = 'sframe-static' | 'plaintext';
+export type CryptoMode = 'sframe-static' | 'plaintext' | 'mls';
 
 // ── W6: E2EE types ────────────────────────────────────────────────────────────
 
@@ -73,6 +73,8 @@ export interface CryptoProvider {
  *
  * Two shapes (discriminated union):
  * - provider: 'sframe' — use the built-in sframe-ratchet v0.5 chat provider; requires getKey.
+ * - provider: 'mls' — use the built-in MLS provider (sframe-ratchet 0.5.6 + ts-mls);
+ *   requires ts-mls as an optional peer dependency. SDK-only (NOT in widget).
  * - provider: CryptoProvider — supply a custom CryptoProvider instance; getKey is not used.
  */
 export type E2EEOptions =
@@ -121,6 +123,67 @@ export type E2EEOptions =
       durableReplayNamespace?: string;
       /** Durable replay window size (distinct recent CTRs per sender per room). Default 1024; `0` disables it. */
       durableReplayWindow?: number;
+    }
+  | {
+      /**
+       * Built-in MLS provider (sframe-ratchet 0.5.6 + ts-mls).
+       *
+       * Provides forward secrecy + post-compromise security via MLS TreeKEM
+       * (RFC 9420). The ChainKey rotates on every epoch advance, so compromise
+       * of one epoch's key does NOT reveal past or future epoch keys.
+       *
+       * Requires `ts-mls` as an optional peer dependency:
+       * `npm install @oxpulse/chat-sdk ts-mls`
+       *
+       * SDK-only — NOT available in the CDN widget (ts-mls is ~672 KB).
+       *
+       * @example
+       * ```ts
+       * const client = new SDKChatClient({
+       *   baseUrl: 'https://api.oxpulse.chat',
+       *   jwt: token,
+       *   appId: 'my-app',
+       *   e2ee: {
+       *     provider: 'mls',
+       *     mls: {
+       *       identityKey: ed25519PrivateKey,
+       *       credential: 'basic',
+       *       uid: 'user-123',
+       *       keyPackageDirectoryUrl: 'https://api.oxpulse.chat/api/sdk/keys',
+       *     },
+       *   },
+       * });
+       * ```
+       */
+      provider: 'mls';
+      /** MLS configuration. */
+      mls: {
+        /** Ed25519 identity signature key (per-device). */
+        identityKey: CryptoKey;
+        /** MLS credential — 'basic' (identity = user UID) for v1. */
+        credential: 'basic';
+        /** User UID — used as MLS basic credential identity and senderUid. */
+        uid: string;
+        /** MLS cipher suite. Default 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519'. */
+        ciphersuite?: string;
+        /** KeyPackage directory base URL (server Delivery Service). */
+        keyPackageDirectoryUrl: string;
+        /** Called after each epoch advance with the 32-byte authenticator. */
+        onEpochAuthenticator?: (roomId: string, authenticator: Uint8Array) => void;
+        /**
+         * State store for MLS ClientState. Defaults to IndexedDB-backed.
+         * MLS group state is serialized via ts-mls 2.0 clientStateEncoder
+         * and persisted to IndexedDB — group state survives page reloads.
+         */
+        stateStore?: import('./mls-state-store.js').MLSStateStore;
+        /**
+         * AuthenticationService for credential validation (KCI protection).
+         * REQUIRED — the MLS provider throws if this is not provided.
+         * Implement this to validate basic credentials against a known
+         * UID → identity-public-key mapping (e.g. fetched from the server DS).
+         */
+        authService: import('ts-mls').AuthenticationService;
+      };
     }
   | {
       /**

@@ -293,7 +293,7 @@ function validateAndResolveCryptoMode(
     return activeCryptoMode;
   }
   // SEC-CR-1695-03: validated cast — only known enum values accepted.
-  if (received !== 'sframe-static' && received !== 'plaintext') {
+  if (received !== 'sframe-static' && received !== 'plaintext' && received !== 'mls') {
     onPoison();
     console.error('[chat-sdk] crypto_mode_unknown', { received });
     throw new SDKChatError(
@@ -391,10 +391,35 @@ export class SDKChatClient {
   #ready: Promise<void> | null = null;
   readonly #testNoSleep: boolean;
   /**
-   * W6 E2EE: crypto provider instance (null when e2ee not configured).
-   * Initialized eagerly in the constructor from opts.e2ee.
+   * W6 E2EE: crypto provider instance (null when e2ee not configured or MLS
+   * provider not yet lazily initialized).
+   *
+   * For sframe/custom providers: initialized eagerly in the constructor.
+   * For MLS provider: initialized lazily on first seal/unseal or getMlsManager()
+   * call (ts-mls is dynamically imported — avoids loading ~672 KB when unused).
    */
-  readonly #cryptoProvider: CryptoProvider | null;
+  #cryptoProvider: CryptoProvider | null;
+  /**
+   * MLS provider options — set when e2ee.provider === 'mls', consumed by
+   * #ensureMlsProvider() on first use. Null when MLS is not configured.
+   */
+  #mlsOpts: {
+    identityKey: CryptoKey;
+    credential: 'basic';
+    uid: string;
+    ciphersuite?: string;
+    keyPackageDirectoryUrl: string;
+    onEpochAuthenticator?: (roomId: string, authenticator: Uint8Array) => void;
+    stateStore?: import('./mls-state-store.js').MLSStateStore;
+    authService: import('ts-mls').AuthenticationService;
+  } | null = null;
+  /**
+   * MLS group manager — set when the MLS provider is lazily initialized.
+   * Exposed via getMlsManager() for SDKChatClient to call createGroup/etc.
+   */
+  #mlsManager: import('./mls-provider.js').MLSGroupManager | null = null;
+  /** Promise guarding #ensureMlsProvider() against concurrent calls. */
+  #mlsInitPromise: Promise<void> | null = null;
   /**
    * W6 E2EE: per-room serial decrypt queue for subscribe(). Each onmessage
    * decrypt is appended onto the room's chain to preserve in-order unseal within
@@ -516,7 +541,17 @@ export class SDKChatClient {
     // poison-mismatch (throw + tear down + refuse to send) instead of an accepted
     // silent downgrade. Without an e2ee provider, plaintext is a valid intended mode
     // (null = auto-detect from server, no validation).
-    this.#cryptoMode = opts.cryptoMode ?? (hasE2ee ? 'sframe-static' : null);
+    // The default has to follow the PROVIDER, not just the presence of one. An MLS
+    // client that defaults to 'sframe-static' declares an expectation the server's
+    // 'mls' can never equal, and validateAndResolveCryptoMode compares with `!==` —
+    // so the downgrade defense fires on the client's own correct mode, poisons the
+    // room and refuses every send. The feature could not work in the configuration
+    // its own docs describe unless the caller also passed cryptoMode: 'mls', which
+    // nothing in E2EEOptions asks for.
+    const providerDefaultMode: CryptoMode | null = hasE2ee
+      ? (opts.e2ee?.provider === 'mls' ? 'mls' : 'sframe-static')
+      : null;
+    this.#cryptoMode = opts.cryptoMode ?? providerDefaultMode;
 
     // W6 E2EE: initialize crypto provider from e2ee option.
     if (opts.e2ee !== undefined) {
@@ -536,13 +571,19 @@ export class SDKChatClient {
             : {}),
           durableReplayNamespace: e2ee.durableReplayNamespace ?? opts.appId,
         });
+      } else if (e2ee.provider === 'mls') {
+        // MLS provider — lazy initialization (ts-mls is dynamically imported on first use).
+        // The constructor is sync, so we store the MLS options and create the provider
+        // lazily on first seal/unseal or when the manager is accessed via getMlsManager().
+        this.#mlsOpts = e2ee.mls;
+        this.#cryptoProvider = null; // will be set by #ensureMlsProvider()
       } else if (typeof e2ee.provider === 'object' && 'seal' in e2ee.provider) {
         // Custom CryptoProvider instance supplied directly.
         this.#cryptoProvider = e2ee.provider;
       } else {
         throw new SDKChatError(
           'invalid_args',
-          'e2ee.provider must be "sframe" or a CryptoProvider instance',
+          'e2ee.provider must be "sframe", "mls", or a CryptoProvider instance',
         );
       }
     } else {
@@ -559,6 +600,67 @@ export class SDKChatClient {
       // Kick off zstd init + dict preload lazily. Awaited before first send.
       this.#ready = ensureWireCodecReady();
     }
+  }
+
+  /**
+   * Lazily initialize the MLS provider (ts-mls dynamic import + createMlsProvider).
+   * Called on first seal/unseal or getMlsManager() when e2ee.provider === 'mls'.
+   * Idempotent — concurrent callers share the same init promise.
+   */
+  async #ensureMlsProvider(): Promise<void> {
+    if (this.#cryptoProvider !== null || this.#mlsOpts === null) return;
+    if (this.#mlsInitPromise) {
+      await this.#mlsInitPromise;
+      return;
+    }
+    this.#mlsInitPromise = (async () => {
+      const { createMlsProvider } = await import('./mls-provider.js');
+      const mlsOpts = this.#mlsOpts!;
+      const mlsProvider = await createMlsProvider({
+        identityKey: mlsOpts.identityKey,
+        credential: mlsOpts.credential,
+        uid: mlsOpts.uid,
+        ...(mlsOpts.ciphersuite !== undefined ? { ciphersuite: mlsOpts.ciphersuite as import('./mls-provider.js').MlsCipherSuite } : {}),
+        keyPackageDirectoryUrl: mlsOpts.keyPackageDirectoryUrl,
+        jwt: this.#jwt,
+        ...(mlsOpts.onEpochAuthenticator !== undefined
+          ? { onEpochAuthenticator: mlsOpts.onEpochAuthenticator }
+          : {}),
+        ...(mlsOpts.stateStore !== undefined ? { stateStore: mlsOpts.stateStore } : {}),
+        authService: mlsOpts.authService,
+      });
+      this.#cryptoProvider = mlsProvider;
+      this.#mlsManager = mlsProvider.manager;
+      // Restore persisted MLS state from IndexedDB before first use.
+      await mlsProvider.manager.restoreAll();
+    })();
+    try {
+      await this.#mlsInitPromise;
+    } catch (err) {
+      // Clear the stale promise so transient failures (network, import) can retry.
+      this.#mlsInitPromise = null;
+      throw err;
+    }
+  }
+
+  /**
+   * Get the MLSGroupManager for MLS group lifecycle operations.
+   * Throws if e2ee.provider is not 'mls'. Lazily initializes the MLS provider
+   * on first call (ts-mls is dynamically imported).
+   *
+   * @example
+   * ```ts
+   * const manager = await client.getMlsManager();
+   * await manager.publishKeyPackage();
+   * await manager.createGroup('room-1', ['alice', 'bob']);
+   * ```
+   */
+  async getMlsManager(): Promise<import('./mls-provider.js').MLSGroupManager> {
+    if (this.#mlsOpts === null) {
+      throw new SDKChatError('invalid_args', 'getMlsManager: e2ee.provider is not "mls"');
+    }
+    await this.#ensureMlsProvider();
+    return this.#mlsManager!;
   }
 
   /** Encode payload bytes for POST /api/sdk/messages per the configured compression mode.
@@ -834,6 +936,9 @@ export class SDKChatClient {
       });
     }
 
+    // MLS provider is lazily initialized — ensure it's ready before seal.
+    await this.#ensureMlsProvider();
+
     if (this.#cryptoProvider === null) {
       throw new SDKChatError(
         'unsupported',
@@ -1083,8 +1188,6 @@ export class SDKChatClient {
     source = 'decrypt task',
     signal?: AbortSignal,
   ): void {
-    const provider = this.#cryptoProvider;
-    if (provider === null) return;
     const deadlineMs = DECRYPT_DEADLINE_MS;
     const forceDrainMs = deadlineMs + DECRYPT_FORCE_DRAIN_GRACE_MS;
     // Deliver a row exactly once, absorbing a throwing caller callback so it can
@@ -1098,6 +1201,15 @@ export class SDKChatClient {
       }
     };
     this.#decryptChain.append(roomId, async () => {
+      // MLS provider is lazily initialized — ensure it's ready before unseal.
+      // (No-op for sframe/custom providers which are already initialized.)
+      await this.#ensureMlsProvider();
+      const provider = this.#cryptoProvider;
+      if (provider === null) {
+        deliver(mappedRow);
+        return;
+      }
+
       // #312: the caller cancelled before this row's turn came up. Deliver it
       // UNTOUCHED — sealed intact, no plaintext, no unsealError — the honest "no
       // unseal was attempted" state (ExportMessageRow names it 'not-decrypted'),
@@ -2920,10 +3032,16 @@ export class SDKChatClient {
 
     // Seal the text first, then delegate to sendOptimistic with pre-sealed bytes.
     // This prevents plaintext from ever entering the outbox.
-    const sealedPromise = provider.seal(
-      new TextEncoder().encode(args.text).buffer as ArrayBuffer,
-      ctx,
-    );
+    // For MLS, the provider may not be initialized yet — wrap the seal in
+    // an async IIFE that ensures the provider is ready first.
+    const sealedPromise: Promise<ArrayBuffer> = provider
+      ? provider.seal(new TextEncoder().encode(args.text).buffer as ArrayBuffer, ctx)
+      : (async () => {
+          await this.#ensureMlsProvider();
+          const p = this.#cryptoProvider;
+          if (!p) throw new SDKChatError('unsupported', 'sendTextOptimistic: e2ee not configured');
+          return p.seal(new TextEncoder().encode(args.text).buffer as ArrayBuffer, ctx);
+        })();
 
     const pendingCbs: Array<() => void> = [];
     const okCbs: Array<(result: { seq: number; msgId: string }) => void> = [];
@@ -3066,6 +3184,11 @@ export class SDKChatClient {
     const done = (async () => {
       // Microtask gap: lets caller register callbacks before we fire.
       await Promise.resolve();
+
+      // MLS provider is lazily initialized — ensure it's ready before the
+      // uploadPromise resolves with sealed bytes (the caller seals using the
+      // crypto provider, which must be initialized first).
+      await this.#ensureMlsProvider();
 
       pendingCbs.forEach((cb) => cb());
 
@@ -3443,4 +3566,17 @@ export class SDKChatClient {
     }
   }
 
+  /**
+   * Dispose the client, releasing resources and persisting MLS state.
+   *
+   * For MLS provider: persists all room ClientStates to IndexedDB so they
+   * survive page reloads. For SFrame/custom: disposes the crypto provider.
+   * Call this before page unload or when the client is no longer needed.
+   */
+  async dispose(): Promise<void> {
+    if (this.#mlsManager) {
+      await this.#mlsManager.persistAll();
+    }
+    this.#cryptoProvider?.dispose?.();
+  }
 }

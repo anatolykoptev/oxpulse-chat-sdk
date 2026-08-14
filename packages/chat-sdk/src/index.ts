@@ -36,6 +36,14 @@ export { createSFrameProvider } from './sframe.js';
 // Re-export ReplayError from sframe-ratchet/chat so consumers can inspect unsealError: 'replay'.
 export { ReplayError } from 'sframe-ratchet/chat';
 export type { SFrameProviderOptions } from './sframe.js';
+// ─── MLS provider (forward secrecy, RFC 9420) ────────────────────────────────
+// ts-mls is an optional peer dependency — these exports are typed but the
+// implementation uses dynamic import('ts-mls') so it's only loaded when used.
+// MLS ClientState is persisted to IndexedDB via clientStateEncoder/Decoder.
+export { createMlsProvider } from './mls-provider.js';
+export type { MlsProvider, MlsProviderOptions, MlsCipherSuite, MLSGroupManager } from './mls-provider.js';
+export type { MLSStateStore } from './mls-state-store.js';
+export { IdbMlsStateStore, InMemoryMlsStateStore, createIdbMlsStateStore } from './mls-state-store.js';
 export type { PendingMessage, OutboxDegradation, OutboxOp } from './outbox.js';
 export { isOutboxDurable, onOutboxDegraded } from './outbox.js';
 export { SDKChatError, SDKChatBatchError } from './errors.js';
