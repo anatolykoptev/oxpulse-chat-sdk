@@ -526,6 +526,13 @@ describe('MLSGroupManager — lifecycle gate', () => {
       roomId, senderUid: 'bob',
     });
 
+    // CONTROL — Alice, still in the group, reads the very ciphertext Mallory
+    // will fail on. Bob sealing successfully only shows his own key is usable;
+    // it does not show the frame is readable by anyone else, so without this
+    // the assertion below would also hold if the epoch were broken for all.
+    expect(text(new Uint8Array(await alice.unseal(sealed, { roomId, senderUid: 'bob' }))))
+      .toBe('bob mid-removal');
+
     let malloryRead: string | null = null;
     try {
       const m = await deriveMlsEpochMaterial(
