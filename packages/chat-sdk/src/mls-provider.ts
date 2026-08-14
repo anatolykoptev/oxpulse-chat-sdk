@@ -74,6 +74,7 @@ import type { CryptoProvider, SealContext } from './types.js';
 import type { MLSStateStore } from './mls-state-store.js';
 import { SDKChatError } from './errors.js';
 import { arrayBufferToBase64, base64ToArrayBuffer } from './utils.js';
+import { equalBytes } from '@noble/curves/utils.js';
 
 // ---------------------------------------------------------------------------
 // Types (re-exported for the public API)
@@ -378,6 +379,18 @@ export class MLSGroupManager {
   /**
    * Process a Welcome message (received via SSE `mls-welcome` event).
    * Called on room join.
+   *
+   * ## SSE wiring contract (consumer responsibility)
+   *
+   * `SDKChatClient` does NOT auto-wire MLS SSE events. The SDK consumer
+   * MUST listen for `mls-welcome` events on the server SSE stream and
+   * call this method:
+   *
+   * ```ts
+   * const manager = await client.getMlsManager();
+   * // On SSE event "mls-welcome" with { room_id, welcome_b64 }:
+   * await manager.processWelcome(roomId, base64ToBytes(welcome_b64));
+   * ```
    */
   async processWelcome(roomId: string, welcome: Uint8Array): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
@@ -416,7 +429,7 @@ export class MLSGroupManager {
     // set by createGroup (creator) or here (joiner); if it's already set,
     // it must match.
     const existingGroupId = this.#roomGroupIds.get(roomId);
-    if (existingGroupId && !arrayEquals(existingGroupId, groupId)) {
+    if (existingGroupId && !equalBytes(existingGroupId, groupId)) {
       throw new SDKChatError(
         'mls_welcome_decrypt_failed',
         `MLSGroupManager.processWelcome: welcome groupId does not match existing binding for room ${roomId}`,
@@ -434,6 +447,18 @@ export class MLSGroupManager {
   /**
    * Process an inbound MLS protocol message (proposal/commit).
    * Called from the SSE handler on `mls-protocol` event.
+   *
+   * ## SSE wiring contract (consumer responsibility)
+   *
+   * `SDKChatClient` does NOT auto-wire MLS SSE events. The SDK consumer
+   * MUST listen for `mls-protocol` events on the server SSE stream and
+   * call this method:
+   *
+   * ```ts
+   * const manager = await client.getMlsManager();
+   * // On SSE event "mls-protocol" with { room_id, message_b64 }:
+   * await manager.processMessage(roomId, base64ToBytes(message_b64));
+   * ```
    */
   async processMessage(roomId: string, message: Uint8Array): Promise<void> {
     if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
@@ -534,7 +559,7 @@ export class MLSGroupManager {
       if (!node || node.nodeType !== nodeTypes.leaf || !node.leaf) continue;
       const cred = node.leaf.credential;
       if (cred.credentialType === defaultCredentialTypes.basic &&
-          arrayEquals((cred as { identity: Uint8Array }).identity, targetIdentity)) {
+          equalBytes((cred as { identity: Uint8Array }).identity, targetIdentity)) {
         leafIndex = Math.floor(nodeIndex / 2);
         break;
       }
@@ -659,7 +684,7 @@ export class MLSGroupManager {
     const cred = keyPackage.leafNode.credential as { credentialType: number; identity: Uint8Array };
     const expectedIdentity = new TextEncoder().encode(uid);
     if (cred.credentialType !== tsMls.defaultCredentialTypes.basic ||
-        !arrayEquals(cred.identity, expectedIdentity)) {
+        !equalBytes(cred.identity, expectedIdentity)) {
       throw new SDKChatError(
         'mls_keypackage_identity_mismatch',
         `MLSGroupManager: KeyPackage identity mismatch for ${uid} — the Delivery Service returned a KeyPackage for a different user.`,
@@ -836,12 +861,4 @@ function bytesToBase64(bytes: Uint8Array): string {
 /** Standard base64 string → Uint8Array (delegates to utils.base64ToArrayBuffer). */
 function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(base64ToArrayBuffer(b64));
-}
-
-/** Constant-time array equality (avoids timing side-channels on identity match). */
-function arrayEquals(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!;
-  return diff === 0;
 }

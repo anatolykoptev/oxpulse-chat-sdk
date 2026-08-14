@@ -65,9 +65,15 @@ export class IdbMlsStateStore implements MLSStateStore {
       const record: StateRecord = { roomId, state, epoch: 0, version: 1 };
       await set(roomId, record, this.#store);
     } catch (err) {
-      this.#switchToFallback();
-      if (!this.#fallback.has(roomId)) this.#fallbackKeys.push(roomId);
-      this.#fallback.set(roomId, state);
+      if (isPermanentIdbError(err)) {
+        this.#switchToFallback();
+        if (!this.#fallback.has(roomId)) this.#fallbackKeys.push(roomId);
+        this.#fallback.set(roomId, state);
+      } else {
+        // Transient error (QuotaExceeded, transient IDB lock) — don't
+        // switch to fallback; surface so the caller can retry or report.
+        throw err;
+      }
     }
   }
 
@@ -80,13 +86,12 @@ export class IdbMlsStateStore implements MLSStateStore {
       if (!record) return null;
       return record.state;
     } catch (err) {
-      // Distinguish IndexedDB unavailability (fallback to in-memory) from
-      // data corruption (surface the error). A thrown get() is almost always
-      // a transient/unavailability error, not corruption — but we log it
-      // so the caller can investigate.
-      console.warn(`MLSStateStore: IndexedDB read failed for room ${roomId}:`, err);
-      this.#switchToFallback();
-      return this.#fallback.get(roomId) ?? null;
+      if (isPermanentIdbError(err)) {
+        console.warn(`MLSStateStore: IndexedDB read failed for room ${roomId}:`, err);
+        this.#switchToFallback();
+        return this.#fallback.get(roomId) ?? null;
+      }
+      throw err;
     }
   }
 
@@ -99,8 +104,12 @@ export class IdbMlsStateStore implements MLSStateStore {
     }
     try {
       await del(roomId, this.#store);
-    } catch {
-      this.#switchToFallback();
+    } catch (err) {
+      if (isPermanentIdbError(err)) {
+        this.#switchToFallback();
+      }
+      // For both permanent (now in fallback) and transient, remove from
+      // whichever store has it.
       this.#fallback.delete(roomId);
       const idx = this.#fallbackKeys.indexOf(roomId);
       if (idx !== -1) this.#fallbackKeys.splice(idx, 1);
@@ -114,9 +123,12 @@ export class IdbMlsStateStore implements MLSStateStore {
     try {
       const allKeys = await keys(this.#store);
       return allKeys.map((k) => String(k));
-    } catch {
-      this.#switchToFallback();
-      return [...this.#fallbackKeys];
+    } catch (err) {
+      if (isPermanentIdbError(err)) {
+        this.#switchToFallback();
+        return [...this.#fallbackKeys];
+      }
+      throw err;
     }
   }
 
@@ -166,4 +178,29 @@ export class InMemoryMlsStateStore implements MLSStateStore {
  */
 export function createIdbMlsStateStore(): MLSStateStore {
   return new IdbMlsStateStore();
+}
+
+/**
+ * Classify an IndexedDB error as permanent (IDB unavailable — switch to
+ * in-memory fallback) or transient (quota exceeded, lock contention —
+ * surface to caller for retry).
+ *
+ * Permanent: SecurityError (private browsing), ReferenceError (SSR/no IDB),
+ * TypeError (no indexedDB object), UnknownError with "not available" message.
+ * Transient: QuotaExceededError, transient lock errors, data errors.
+ */
+function isPermanentIdbError(err: unknown): boolean {
+  if (err instanceof DOMException) {
+    // SecurityError: private browsing blocks IDB
+    // InvalidStateError: IDB database deleted while operation in flight
+    if (err.name === 'SecurityError' || err.name === 'InvalidStateError') return true;
+    // QuotaExceededError: storage full — transient, don't abandon IDB
+    if (err.name === 'QuotaExceededError') return false;
+  }
+  // ReferenceError: `indexedDB` is not defined (SSR, legacy browser)
+  if (err instanceof ReferenceError) return true;
+  // TypeError: null/undefined access (no IDB factory)
+  if (err instanceof TypeError) return true;
+  // Default: treat as permanent (safer to fall back than to loop)
+  return true;
 }
