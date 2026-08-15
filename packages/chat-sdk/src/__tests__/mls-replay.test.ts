@@ -24,9 +24,21 @@
  * createMlsProvider (mls-provider.ts, durableReplayNamespace line). Deleting
  * that line (M1) disables the durable guard and T3 must go red.
  *
- * Test environment: fake-indexeddb provides IndexedDB; Node 24 provides the
- * Web Locks API natively (navigator.locks.request). Both are required for the
- * durable guard to be `available` (sframe-ratchet checks both).
+ * Test environment: fake-indexeddb provides IndexedDB; the Web Locks API
+ * (navigator.locks.request) comes from the runtime. sframe-ratchet requires
+ * BOTH before it will arm the durable guard.
+ *
+ * Web Locks is absent below Node 24, and there T3 does not merely lose its
+ * subject — it FAILS, because the replay it expects to be rejected is accepted
+ * by a guard that never armed. Measured on krolik over a non-login shell
+ * (node v22.22.3): `1 failed | 3 passed`, and the failure reads exactly like a
+ * broken replay guard. So T3 is gated on the capability and states why it
+ * skipped, rather than reporting a runtime gap as a security regression.
+ *
+ * Skipping is safe here only because CI cannot take that branch: preflight.yml
+ * pins node 24 and fails the job outright if `navigator.locks.request` is
+ * missing, precisely so this coverage cannot go quiet. If that guard is ever
+ * removed, this skip becomes a hole — they are one mechanism, not two.
  */
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -245,7 +257,16 @@ describe('MLS replay protection', () => {
 
   // ---- T3: durable cross-reload replay guard ------------------------------
 
-  describe('T3 — durable cross-reload replay', () => {
+  // sframe-ratchet arms the durable guard only when IndexedDB AND Web Locks are
+  // both present. Read the capability the same way it does, rather than testing
+  // a version number — a runtime that gains Web Locks should light this up
+  // without an edit here.
+  const DURABLE_GUARD_AVAILABLE =
+    typeof indexedDB !== 'undefined' &&
+    typeof (globalThis as { navigator?: { locks?: { request?: unknown } } })
+      .navigator?.locks?.request === 'function';
+
+  describe.skipIf(!DURABLE_GUARD_AVAILABLE)('T3 — durable cross-reload replay', () => {
     const roomId = 'room-t3';
     const MLS_DB = 'test-mls-reload-state';
     // Unique durable namespace for T3 — avoids cross-test contamination with
