@@ -41,7 +41,7 @@ export type { SFrameProviderOptions } from './sframe.js';
 // implementation uses dynamic import('ts-mls') so it's only loaded when used.
 // MLS ClientState is persisted to IndexedDB via clientStateEncoder/Decoder.
 export { createMlsProvider } from './mls-provider.js';
-export type { MlsProvider, MlsProviderOptions, MlsCipherSuite, MLSGroupManager } from './mls-provider.js';
+export type { MlsProvider, MlsProviderOptions, MlsCipherSuite, MLSGroupManager, MlsWarning } from './mls-provider.js';
 export type { MLSStateStore } from './mls-state-store.js';
 export { IdbMlsStateStore, InMemoryMlsStateStore, createIdbMlsStateStore } from './mls-state-store.js';
 export type { PendingMessage, OutboxDegradation, OutboxOp } from './outbox.js';
