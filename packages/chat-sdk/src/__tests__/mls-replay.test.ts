@@ -16,9 +16,13 @@
  *      cross-reload replay detected (ctr=…)").
  *
  * T1 is a POSITIVE CONTROL for a DEPENDENCY guarantee, not a gate on our
- * logic. The in-memory window (guard 1) is created unconditionally inside
- * createMlsChatProvider and cannot be disabled from our code. If T1 goes red,
- * it means the guard is reachable from our configuration after all — report it.
+ * logic. The in-memory window (guard 1) is constructed on every unseal and is
+ * armed by the default window size, which we do not override. It is NOT beyond
+ * our reach, though: sframe-ratchet's sliding window accepts unconditionally
+ * when its size is 0, and createMlsProvider forwards opts.replayWindow
+ * verbatim, so a caller passing replayWindow: 0 switches guard 1 off. Measured,
+ * not read off the types. If T1 goes red under the default configuration, the
+ * dependency changed underneath us — report it.
  *
  * T3 IS a gate on our logic: the durable namespace is wired by
  * createMlsProvider (mls-provider.ts, durableReplayNamespace line). Deleting
