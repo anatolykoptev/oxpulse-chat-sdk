@@ -154,9 +154,10 @@ export interface MlsProviderOptions {
 
   /**
    * Called when a non-fatal MLS event occurs that the SDK consumer should
-   * surface to the user (e.g. a Welcome whose KeyPackage was already
-   * consumed — the user cannot join that room via that Welcome, but the
-   * error is acked server-side to stop re-notification).
+   * surface to the user (e.g. a Welcome that could not be processed). The
+   * error is also rethrown so the caller can react; the warning gives the
+   * user visibility. The Welcome is NOT acked — the server re-delivers it
+   * and the next attempt may succeed (e.g. after a KeyPackage restore).
    *
    * When omitted, warnings are emitted via `console.warn`.
    */
@@ -166,17 +167,17 @@ export interface MlsProviderOptions {
 /**
  * A non-fatal MLS warning surfaced through `onWarning`.
  *
- * Unlike thrown errors, these do not abort the calling operation — the
- * SDK has handled the situation (e.g. acked an unrecoverable Welcome),
- * but the user should be informed.
+ * Emitted before the error is rethrown, so the calling operation IS
+ * aborted — the warning gives the user visibility while the rethrow lets
+ * the caller react. The Welcome is left queued for server re-delivery.
  */
 export type MlsWarning =
   | {
-      /** The Welcome's KeyPackage was already consumed — the Welcome can never succeed. */
-      code: 'mls_welcome_no_matching_secret';
+      /** A Welcome could not be processed (wrong KeyPackage, decode failure, etc.). */
+      code: 'mls_welcome_processing_failed';
       /** Room ID the Welcome was for. */
       roomId: string;
-      /** Server-assigned Welcome ID that was acked. */
+      /** Server-assigned Welcome ID. */
       welcomeId: string;
       /** Human-readable detail. */
       message: string;
@@ -436,8 +437,6 @@ export class MLSGroupManager {
     if (this.#pendingKeyPackages.length === 0) {
       throw new SDKChatError('mls_keypackage_not_found', 'MLSGroupManager.processWelcome: no pending KeyPackage');
     }
-    // Peek without consuming — shift only after joinGroup succeeds.
-    const myKp = this.#pendingKeyPackages[0]!;
 
     const { decode, mlsMessageDecoder, joinGroup, wireformats } = tsMls;
     const decoded = decode(mlsMessageDecoder, welcome);
@@ -449,12 +448,37 @@ export class MLSGroupManager {
     }
 
     const welcomeMsg = decoded as import('ts-mls').MlsWelcomeMessage;
-    const state = await joinGroup({
-      context: ctx,
-      welcome: welcomeMsg.welcome,
-      keyPackage: myKp.publicPackage,
-      privateKeys: myKp.privatePackage,
-    });
+
+    // Try each pending KeyPackage until one decrypts the Welcome. The group
+    // creator picks key_packages[0] from the server's response, whose ordering
+    // is unspecified; if the directory returns newest-first while our local
+    // list is oldest-first, the creator seals to a key we never try. Trying
+    // only #pendingKeyPackages[0] (the previous behaviour) fails the join even
+    // when the client holds the right key. Remove only the KP that worked.
+    let state: ClientState | undefined;
+    let workedIndex = -1;
+    let lastErr: unknown = null;
+    for (let i = 0; i < this.#pendingKeyPackages.length; i++) {
+      const kp = this.#pendingKeyPackages[i]!;
+      try {
+        state = await joinGroup({
+          context: ctx,
+          welcome: welcomeMsg.welcome,
+          keyPackage: kp.publicPackage,
+          privateKeys: kp.privatePackage,
+        });
+        workedIndex = i;
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!state || workedIndex === -1) {
+      throw lastErr ?? new SDKChatError(
+        'mls_welcome_decrypt_failed',
+        'MLSGroupManager.processWelcome: no pending KeyPackage could decrypt the welcome',
+      );
+    }
 
     // Extract groupId from the welcome's group info.
     const groupId = state.groupContext.groupId;
@@ -474,8 +498,8 @@ export class MLSGroupManager {
 
     this.#roomGroupIds.set(roomId, groupId);
     this.#roomStates.set(roomId, state);
-    // Consume the KeyPackage only after joinGroup succeeds.
-    this.#pendingKeyPackages.shift();
+    // Consume only the KeyPackage that worked.
+    this.#pendingKeyPackages.splice(workedIndex, 1);
     await this.#applyEpoch(roomId, state);
     await this.#persistRoom(roomId);
   }
@@ -540,12 +564,12 @@ export class MLSGroupManager {
    * in order, returning how many were applied. For each Welcome:
    *
    * - On success → acks it (DELETE) so the server stops re-notifying.
-   * - On a "no matching secret" failure (the KeyPackage was already
-   *   consumed) → acks it too and reports a warning via `onWarning`/
-   *   `console.warn`. The Welcome can never succeed; leaving it queued
-   *   produces the same error on every reconnect until the 7-day TTL.
-   * - On any other failure → does NOT ack (the server will re-notify
-   *   and the next attempt can succeed).
+   * - On failure → reports a warning via `onWarning`/`console.warn` and
+   *   rethrows. The Welcome is NOT acked — the server re-delivers it and
+   *   the next attempt may succeed (e.g. the KeyPackage was sealed to a
+   *   different pending one, or the private half has not been restored
+   *   yet). A wrongly acked invite is silent and permanent; a stream of
+   *   warnings is visible and bounded by the 7-day TTL.
    *
    * @returns The number of Welcomes successfully applied.
    */
@@ -572,27 +596,22 @@ export class MLSGroupManager {
         // Ack on success — server stops re-notifying.
         await this.#ackWelcome(roomId, entry.welcome_id);
       } catch (err) {
-        if (this.#isNoMatchingSecretError(err)) {
-          // The KeyPackage this Welcome was sealed to is already consumed.
-          // The Welcome can never succeed; ack it to stop re-notification,
-          // and report the warning so the user can find out why they can't join.
-          await this.#ackWelcome(roomId, entry.welcome_id);
-          const warning: MlsWarning = {
-            code: 'mls_welcome_no_matching_secret',
-            roomId,
-            welcomeId: entry.welcome_id,
-            message: `Welcome ${entry.welcome_id} for room ${roomId} could not be processed: the KeyPackage was already consumed.`,
-          };
-          if (this.onWarning) {
-            this.onWarning(warning);
-          } else {
-            console.warn(`[chat-sdk] MLS: ${warning.message}`);
-          }
+        // Ack ONLY on success. A failure may be transient (the Welcome is
+        // sealed to a different pending KeyPackage, or the private half has
+        // not been restored yet) — acking would destroy a usable invite.
+        // Report the warning and rethrow; re-delivery is the recovery.
+        const warning: MlsWarning = {
+          code: 'mls_welcome_processing_failed',
+          roomId,
+          welcomeId: entry.welcome_id,
+          message: `Welcome ${entry.welcome_id} for room ${roomId} could not be processed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+        if (this.onWarning) {
+          this.onWarning(warning);
         } else {
-          // Any other failure — do NOT ack. The server will re-notify
-          // and the next attempt can succeed.
-          throw err;
+          console.warn(`[chat-sdk] MLS: ${warning.message}`);
         }
+        throw err;
       }
     }
     return applied;
@@ -797,19 +816,44 @@ export class MLSGroupManager {
   }
 
   /**
-   * Fetch with bounded exponential backoff on 429.
+   * Fetch with bounded exponential backoff on 429 and transient 5xx.
+   *
+   * Retries 429, 502, 503, 504 (transient server-side failures). Other 4xx
+   * are non-retryable — they indicate a permanent client-side problem.
+   *
+   * A transient 502/503/504 on `fetchAndProcessMessage` is a permanently
+   * lost commit if not retried: the row expires after an hour and there is
+   * no catch-up endpoint (oxpulse-chat#3090). Retrying 5xx with the same
+   * bounded schedule gives transient blips a chance to recover.
    *
    * Honours `Retry-After` when the header is present (seconds or HTTP date),
    * otherwise 250 ms doubling, at most 3 retries, with ±20% jitter.
-   * After the last attempt throws `SDKChatError('mls_rate_limited')` so a
-   * caller can tell "rate limited" from "not found".
+   * `Retry-After` is capped at 30 s — in this product's threat model the
+   * server is the adversary, and an unbounded server-supplied sleep
+   * (`Retry-After: 999999999`) would park the room's inbound path in a
+   * setTimeout for ~31 years with nothing to cancel it: a denial-of-service
+   * on the client, not a courtesy. When the header exceeds the cap we use
+   * the cap rather than abandoning the attempt.
+   *
+   * Schedule note: 250 ms doubling over 3 retries is ~1.75 s of total
+   * backoff. This gives up on any rate limit longer than ~2 s, but widening
+   * it would let a malicious server stall the client longer by sending 429s
+   * — the short schedule is defensive. `fetchAndProcessWelcomes` can be
+   * re-called by the consumer later; `fetchAndProcessMessage` cannot, but
+   * its 1-hour TTL is wider than any reasonable retry window, and the
+   * consumer's SSE reconnection covers longer outages.
+   *
+   * After the last attempt throws `SDKChatError` — `mls_rate_limited` for
+   * 429, `server_error` for 5xx — so a caller can tell the two apart.
    */
   async #fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     const MAX_RETRIES = 3;
+    const RETRY_AFTER_CAP_MS = 30_000;
+    const RETRYABLE = new Set([429, 502, 503, 504]);
     let lastResp: Response | null = null;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const resp = await fetch(url, init);
-      if (resp.status !== 429) return resp;
+      if (!RETRYABLE.has(resp.status)) return resp;
       lastResp = resp;
       if (attempt === MAX_RETRIES) break;
 
@@ -820,27 +864,31 @@ export class MLSGroupManager {
         // Retry-After can be seconds or an HTTP-date.
         const asSeconds = Number(retryAfter);
         if (Number.isFinite(asSeconds)) {
-          delayMs = asSeconds * 1000;
+          delayMs = Math.min(asSeconds * 1000, RETRY_AFTER_CAP_MS);
         } else {
           const asDate = Date.parse(retryAfter);
-          delayMs = Number.isFinite(asDate) ? Math.max(0, asDate - Date.now()) : 0;
+          delayMs = Number.isFinite(asDate)
+            ? Math.min(Math.max(0, asDate - Date.now()), RETRY_AFTER_CAP_MS)
+            : 0;
         }
       } else {
         // 250 ms doubling: 250, 500, 1000, ...
         delayMs = 250 * (2 ** attempt);
       }
 
-      // Add ±20% jitter.
+      // Add ±20% jitter, then enforce the cap again so jitter never pushes
+      // the delay above RETRY_AFTER_CAP_MS.
       const jitter = delayMs * 0.2 * (Math.random() * 2 - 1);
-      delayMs = Math.max(0, delayMs + jitter);
+      delayMs = Math.min(Math.max(0, delayMs + jitter), RETRY_AFTER_CAP_MS);
 
       if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
     }
-    // All retries exhausted — throw a distinct error code.
+    // All retries exhausted — throw an error that reflects the last status.
+    const code = lastResp?.status === 429 ? 'mls_rate_limited' : 'server_error';
     throw new SDKChatError(
-      'mls_rate_limited',
-      `MLSGroupManager: rate limited after ${MAX_RETRIES} retries (last status ${lastResp?.status ?? 'unknown'})`,
-      429,
+      code,
+      `MLSGroupManager: retries exhausted after ${MAX_RETRIES} attempts (last status ${lastResp?.status ?? 'unknown'})`,
+      lastResp?.status,
     );
   }
 
@@ -860,21 +908,6 @@ export class MLSGroupManager {
     }
   }
 
-  /**
-   * Detect a "no matching secret" error from ts-mls.
-   *
-   * This is thrown by `decryptGroupSecrets` as `ValidationError("No matching secret found")`
-   * when the Welcome's `secrets` array has no entry matching our KeyPackage reference —
-   * i.e. the KeyPackage was already consumed (or the Welcome was sealed to a different one).
-   * We detect it by error name + message prefix to avoid coupling to the ts-mls class
-   * (which is a dynamic import / optional peer dependency).
-   */
-  #isNoMatchingSecretError(err: unknown): boolean {
-    if (err === null || typeof err !== 'object') return false;
-    const name = (err as { name?: string }).name;
-    const message = (err as { message?: string }).message ?? '';
-    return name === 'ValidationError' && message.startsWith('No matching secret found');
-  }
   async #fetchKeyPackage(uid: string): Promise<KeyPackage> {
     const tsMls = await this.#loadTsMls();
     const { decode, mlsMessageDecoder, wireformats } = tsMls;

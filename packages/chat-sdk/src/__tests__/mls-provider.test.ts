@@ -38,6 +38,10 @@ class MockDeliveryService {
   readonly rateLimitOnce = new Set<string>();
   /** URLs to rate-limit persistently (429 on every hit). */
   readonly persistentRateLimit = new Set<string>();
+  /** URL → Retry-After header value; 429 once with that header, then normal. */
+  readonly rateLimitOnceCustom = new Map<string, string>();
+  /** URLs to 503 once, then normal. */
+  readonly serverErrorOnce = new Set<string>();
   /** Log of all fetch calls — {url, method, status}. */
   readonly fetchLog: Array<{ url: string; method: string; status: number }> = [];
   /** Monotonic counter for generated IDs. */
@@ -131,6 +135,17 @@ class MockDeliveryService {
     const getWelcomesMatch = url.match(/\/rooms\/([^/]+)\/mls-welcome$/);
     if (getWelcomesMatch && method === 'GET') {
       const roomId = getWelcomesMatch[1]!;
+      const customRA = this.rateLimitOnceCustom.get(url);
+      if (customRA !== undefined) {
+        this.rateLimitOnceCustom.delete(url);
+        this.fetchLog.push({ url, method, status: 429 });
+        return new Response('Too Many Requests', { status: 429, headers: { 'Retry-After': customRA } });
+      }
+      if (this.serverErrorOnce.has(url)) {
+        this.serverErrorOnce.delete(url);
+        this.fetchLog.push({ url, method, status: 503 });
+        return new Response('Service Unavailable', { status: 503 });
+      }
       if (this.persistentRateLimit.has(url) || this.rateLimitOnce.has(url)) {
         if (this.rateLimitOnce.has(url)) this.rateLimitOnce.delete(url);
         this.fetchLog.push({ url, method, status: 429 });
@@ -189,6 +204,17 @@ class MockDeliveryService {
     if (getMessageMatch && method === 'GET') {
       const roomId = getMessageMatch[1]!;
       const messageId = getMessageMatch[2]!;
+      const customRA = this.rateLimitOnceCustom.get(url);
+      if (customRA !== undefined) {
+        this.rateLimitOnceCustom.delete(url);
+        this.fetchLog.push({ url, method, status: 429 });
+        return new Response('Too Many Requests', { status: 429, headers: { 'Retry-After': customRA } });
+      }
+      if (this.serverErrorOnce.has(url)) {
+        this.serverErrorOnce.delete(url);
+        this.fetchLog.push({ url, method, status: 503 });
+        return new Response('Service Unavailable', { status: 503 });
+      }
       if (this.persistentRateLimit.has(url) || this.rateLimitOnce.has(url)) {
         if (this.rateLimitOnce.has(url)) this.rateLimitOnce.delete(url);
         this.fetchLog.push({ url, method, status: 429 });
@@ -681,7 +707,7 @@ describe('MLSGroupManager inbound path', () => {
     bob.dispose();
   });
 
-  it('fetchAndProcessWelcomes: no-matching-secret → acked + warned, not thrown (M2 ack)', async () => {
+  it('fetchAndProcessWelcomes: processing failure → warned + rethrown, NOT acked (fix #1)', async () => {
     const bob = await makeProvider('bob');
 
     // Generate a KeyPackage for bob that is NOT the one bob's manager has pending.
@@ -732,22 +758,22 @@ describe('MLSGroupManager inbound path', () => {
     const welcomeB64 = Buffer.from(welcomeBytes).toString('base64');
     const welcomeId = ds.queueWelcome('room-no-secret', 'bob', welcomeB64);
 
-    // Bob fetches — processWelcome will throw ValidationError("No matching secret found")
-    // because the Welcome is sealed to otherKp, not bob's pending KP.
+    // Bob fetches — processWelcome will throw because the Welcome is sealed to
+    // otherKp, not bob's pending KP. The failure must be warned + rethrown, and
+    // the Welcome must NOT be acked (server re-delivery is the recovery).
     const warnings: import('../mls-provider.js').MlsWarning[] = [];
     bob.manager.onWarning = (w) => warnings.push(w);
 
-    // Should NOT throw — the no-matching-secret error is caught, warned, and acked.
-    const applied = await bob.manager.fetchAndProcessWelcomes('room-no-secret');
+    // Should throw — failures are no longer swallowed.
+    await expect(bob.manager.fetchAndProcessWelcomes('room-no-secret')).rejects.toThrow();
 
-    expect(applied).toBe(0); // none successfully applied
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]!.code).toBe('mls_welcome_no_matching_secret');
+    expect(warnings[0]!.code).toBe('mls_welcome_processing_failed');
     expect(warnings[0]!.welcomeId).toBe(welcomeId);
 
-    // The Welcome was acked despite the failure.
+    // The Welcome was NOT acked — still in the queue for re-delivery.
     const remaining = ds.roomWelcomes.get('room-no-secret') ?? [];
-    expect(remaining.filter(w => w.welcomeId === welcomeId)).toHaveLength(0);
+    expect(remaining.filter(w => w.welcomeId === welcomeId)).toHaveLength(1);
 
     bob.dispose();
   });
@@ -768,6 +794,152 @@ describe('MLSGroupManager inbound path', () => {
     expect(remaining.filter(w => w.welcomeId === welcomeId)).toHaveLength(1);
 
     bob.dispose();
+  });
+
+  it('processWelcome: Welcome sealed to second pending KP → tries all, succeeds (fix #2)', async () => {
+    // Bob publishes TWO KeyPackages. The group creator seals the Welcome to
+    // the SECOND one (which the server may return as key_packages[0]). The
+    // buggy code only tried #pendingKeyPackages[0] and would fail; the fix
+    // tries each pending KP until one decrypts.
+    const bob = await makeProvider('bob');
+    await bob.manager.publishKeyPackage(); // second KP → pending = [kp1, kp2]
+
+    const tsMls = await import('ts-mls');
+    const cs = await getCiphersuiteImpl();
+    const { decode, mlsMessageDecoder, wireformats, generateKeyPackage,
+            createGroup, createCommit, defaultCapabilities, defaultLifetime,
+            defaultCredentialTypes, defaultProposalTypes } = tsMls;
+    const makeCred = (uid: string) => ({
+      credentialType: defaultCredentialTypes.basic,
+      identity: new TextEncoder().encode(uid),
+    });
+
+    // Decode Bob's SECOND pending KP from the DS (index 1).
+    const bobKps = ds.keyPackages.get('bob')!;
+    expect(bobKps.length).toBeGreaterThanOrEqual(2);
+    const secondKpBytes = Buffer.from(bobKps[1]!, 'base64');
+    const secondKpMsg = decode(mlsMessageDecoder, new Uint8Array(secondKpBytes));
+    const secondKp = (secondKpMsg as unknown as { keyPackage: import('ts-mls').KeyPackage }).keyPackage;
+
+    // Create a group as Alice, add Bob via his SECOND KP → Welcome sealed to it.
+    const aliceKp = await generateKeyPackage({
+      credential: makeCred('alice'), capabilities: defaultCapabilities(),
+      lifetime: defaultLifetime(), cipherSuite: cs,
+    });
+    const groupId = new TextEncoder().encode('second-kp-room');
+    let aliceState = await createGroup({
+      context: await makeContext(),
+      groupId,
+      keyPackage: aliceKp.publicPackage,
+      privateKeyPackage: aliceKp.privatePackage,
+    });
+    const commitResult = await createCommit({
+      context: await makeContext(),
+      state: aliceState,
+      extraProposals: [{ proposalType: defaultProposalTypes.add, add: { keyPackage: secondKp } }],
+      ratchetTreeExtension: true,
+      wireAsPublicMessage: true,
+    });
+    if (!commitResult.welcome) throw new Error('no welcome generated');
+
+    // Encode + queue the Welcome for Bob.
+    const welcomeMsg = {
+      wireformat: wireformats.mls_welcome,
+      welcome: commitResult.welcome.welcome,
+      version: tsMls.protocolVersions.mls10,
+    };
+    const welcomeBytes = tsMls.encode(tsMls.mlsMessageEncoder, welcomeMsg);
+    const welcomeB64 = Buffer.from(welcomeBytes).toString('base64');
+    ds.queueWelcome('room-second-kp', 'bob', welcomeB64);
+
+    // Bob fetches — processWelcome must try kp1 (fails), then kp2 (succeeds).
+    const applied = await bob.manager.fetchAndProcessWelcomes('room-second-kp');
+    expect(applied).toBe(1);
+    expect(bob.manager.getEpoch('room-second-kp')).not.toBeNull();
+
+    bob.dispose();
+  });
+
+  it('fetchWithRetry: Retry-After capped at 30s — absurd header does not park the client (fix #3)', async () => {
+    const alice = await makeProvider('alice');
+    const bob = await makeProvider('bob');
+
+    await alice.manager.createGroup('room-cap', ['bob']);
+
+    // Mock a 429 with an absurd Retry-After (≈31 years), then 200.
+    const welcomeUrl = 'http://mock/api/sdk/rooms/room-cap/mls-welcome';
+    ds.rateLimitOnceCustom.set(welcomeUrl, '999999999');
+
+    // Intercept setTimeout to capture the requested delay and run it at 0ms
+    // so the test doesn't actually sleep. Assert the delay is bounded.
+    const originalSetTimeout = globalThis.setTimeout;
+    const capturedDelays: number[] = [];
+    globalThis.setTimeout = ((cb: TimerHandler, delay?: number) => {
+      capturedDelays.push(delay ?? 0);
+      return originalSetTimeout(cb, 0);
+    }) as typeof globalThis.setTimeout;
+
+    try {
+      const applied = await bob.manager.fetchAndProcessWelcomes('room-cap');
+      expect(applied).toBe(1);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    // At least one retry delay was captured (from the 429).
+    expect(capturedDelays.length).toBeGreaterThanOrEqual(1);
+    // Every delay must be ≤ 30s — the cap prevents an unbounded server-supplied sleep.
+    for (const d of capturedDelays) {
+      expect(d).toBeLessThanOrEqual(30_000);
+    }
+
+    alice.dispose();
+    bob.dispose();
+  });
+
+  it('fetchAndProcessWelcomes: 503 then 200 → retries 5xx and succeeds (fix #4)', async () => {
+    const alice = await makeProvider('alice');
+    const bob = await makeProvider('bob');
+
+    await alice.manager.createGroup('room-503', ['bob']);
+
+    // Mock a 503 once, then 200.
+    const welcomeUrl = 'http://mock/api/sdk/rooms/room-503/mls-welcome';
+    ds.serverErrorOnce.add(welcomeUrl);
+
+    const applied = await bob.manager.fetchAndProcessWelcomes('room-503');
+    expect(applied).toBe(1);
+    expect(bob.manager.getEpoch('room-503')).not.toBeNull();
+
+    alice.dispose();
+    bob.dispose();
+  });
+
+  it('fetchAndProcessMessage: 503 then 200 → retries 5xx and succeeds (fix #4)', async () => {
+    const alice = await makeProvider('alice');
+    const bob = await makeProvider('bob');
+
+    await alice.manager.createGroup('room-msg-503', ['bob']);
+    await bob.manager.fetchAndProcessWelcomes('room-msg-503');
+
+    // Alice adds Carol → commit message stored in DS.
+    const carol = await makeProvider('carol');
+    await alice.manager.addMember('room-msg-503', 'carol');
+
+    const roomMsgs = ds.roomMessages.get('room-msg-503')!;
+    const messageIds = [...roomMsgs.keys()];
+    const messageId = messageIds[messageIds.length - 1]!;
+
+    // Mock a 503 once on the message GET, then 200.
+    ds.serverErrorOnce.add(`http://mock/api/sdk/rooms/room-msg-503/mls-messages/${messageId}`);
+
+    // Should retry the 503 and succeed.
+    await bob.manager.fetchAndProcessMessage('room-msg-503', messageId);
+    expect(bob.manager.getEpoch('room-msg-503')).toBe(alice.manager.getEpoch('room-msg-503'));
+
+    alice.dispose();
+    bob.dispose();
+    carol.dispose();
   });
 
   it('fetchAndProcessWelcomes: 429 retry → succeeds after rate limit (M3)', async () => {
