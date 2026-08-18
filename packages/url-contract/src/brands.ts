@@ -15,7 +15,7 @@
  * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
-import { BARE_LENGTH, TYPED_LENGTH, OPAQUE_LENGTH } from './constants.js';
+import { BARE_LENGTH, TYPED_LENGTH, OPAQUE_LENGTH, OPAQUE_UUID_LENGTH } from './constants.js';
 
 declare const __brand: unique symbol;
 
@@ -26,10 +26,12 @@ declare const __brand: unique symbol;
 /**
  * RoomId — branded type for a validated room identifier (any ADR-0005 form).
  *
- * Accepts three shapes (ADR-0005 brand widening — PR #1234 MAJOR):
+ * Accepts four shapes (ADR-0005 brand widening — PR #1234 MAJOR; UUID form
+ * added 2026-08-18, see constants.ts OPAQUE_UUID_LENGTH):
  *   - Bare 9-char:     `AAAA-0000`           (legacy, no checksum)
  *   - Typed 10-char:   `AAAA-0000C`          (group code with Luhn checksum)
  *   - Opaque 22-char:  `[A-Za-z0-9_-]{22}`  (1to1/burner/sealed share-by-link)
+ *   - Opaque 36-char:  dashed lowercase UUID (server-minted sdk room ids)
  *
  * Structural validation: isValidRoomIdShape() (this module).
  * Full semantic validation (Luhn check for 10-char form): isValidRoomId() and
@@ -59,6 +61,11 @@ function isValidRoomIdShape(s: string): boolean {
   }
   if (s.length === OPAQUE_LENGTH) {
     return /^[A-Za-z0-9_-]{22}$/.test(s);
+  }
+  if (s.length === OPAQUE_UUID_LENGTH) {
+    // Dashed-UUID opaque — the shape the server's sdk-room mint actually
+    // produces (see constants.ts OPAQUE_UUID_LENGTH for the incident).
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
   }
   return false;
 }

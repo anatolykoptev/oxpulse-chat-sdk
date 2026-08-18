@@ -53,12 +53,26 @@ export type RealKind = '1to1' | 'group' | 'burner' | 'sealed';
 const OPAQUE_RE = /^[A-Za-z0-9_-]{22}$/;
 
 /**
+ * Regex for the dashed-UUID opaque form: 8-4-4-4-12 lowercase hex.
+ *
+ * The server's sdk-room mint has always returned this form
+ * (uuid::Uuid::new_v4().to_string()) while the URL layer accepted only the
+ * 22-char form — so every navigation into an existing sealed chat bounced
+ * off the catch-all route to '/?invalid_room=1' (prod, 2026-08-18: 156 of
+ * 164 rooms carry this shape). Lowercase-only: the Rust uuid crate prints
+ * lowercase and the client stores the server's value verbatim, so accepting
+ * uppercase would only widen the trust boundary for hand-typed input.
+ */
+const OPAQUE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
  * Full semantic validation of a room ID string.
  *
- * Accepts the three ADR-0005 forms:
+ * Accepts the four forms (three ADR-0005 + the server's dashed-UUID reality):
  *   - 9-char bare  `AAAA-0000`            (structure only — no checksum)
  *   - 10-char typed `AAAA-0000C`           (structure + Luhn checksum verified)
  *   - 22-char opaque `[A-Za-z0-9_-]{22}`  (1to1/burner/sealed)
+ *   - 36-char opaque dashed lowercase UUID (server-minted sdk room ids)
  *
  * For full-semantic call sites (kind resolution), prefer parseRoomCode() which
  * also returns the RoomKind. isValidRoomId is the entry-point guard for callers
@@ -89,6 +103,8 @@ export function isValidRoomId(s: string): boolean {
   }
   // 22-char opaque base64url
   if (OPAQUE_RE.test(s)) return true;
+  // 36-char dashed-UUID opaque (server-minted sdk room ids)
+  if (OPAQUE_UUID_RE.test(s)) return true;
   return false;
 }
 
@@ -108,6 +124,7 @@ export function kindFromFirstLetter(letter: string): 'group' | null {
  *
  * Priority order (most specific first):
  *   1. 22-char base64url → kind: 'opaque' (roomId = the 22-char branded RoomId)
+ *   1b. 36-char dashed lowercase UUID → kind: 'opaque' (server-minted sdk ids)
  *   2. 9-char bare 'AAAA-0000' → kind: 'legacy-bare' (roomId = branded RoomId)
  *   3. 10-char typed 'AAAA-0000C' + Luhn OK + G-first → kind: 'group'
  *      (roomId = 9-char payload without checksum, branded RoomId)
@@ -125,6 +142,12 @@ export function parseRoomCode(code: string): { roomId: RoomId; kind: RoomKind } 
 
   // 1. 22-char opaque base64url
   if (code.length === 22 && OPAQUE_RE.test(code)) {
+    return { roomId: asRoomId(code), kind: 'opaque' };
+  }
+
+  // 1b. 36-char dashed-UUID opaque (server-minted sdk room ids — see
+  // OPAQUE_UUID_RE for why this shape exists at all).
+  if (code.length === 36 && OPAQUE_UUID_RE.test(code)) {
     return { roomId: asRoomId(code), kind: 'opaque' };
   }
 

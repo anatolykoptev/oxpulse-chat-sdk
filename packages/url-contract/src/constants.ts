@@ -73,6 +73,18 @@ export const TYPED_LENGTH = 10;
 export const OPAQUE_LENGTH = 22;
 
 /**
+ * Length of the dashed-UUID opaque room ID form: 8-4-4-4-12 lowercase hex.
+ *
+ * The server's sdk-room mint has returned this form since the beginning
+ * (uuid::Uuid::new_v4().to_string() — 156 of 164 prod rooms on 2026-08-18),
+ * while the URL layer accepted only the 22-char form, so every navigation
+ * into an existing sealed chat bounced to '/?invalid_room=1'. Accepted as a
+ * fourth shape, kind 'opaque'. Lowercase-only: the Rust uuid crate prints
+ * lowercase, and the client stores the server's value verbatim.
+ */
+export const OPAQUE_UUID_LENGTH = 36;
+
+/**
  * The 6 group-letter uppercase letters as a ReadonlySet — for O(1) membership tests.
  *
  * Derived from GROUP_LETTERS to avoid duplication. This set breaks the circular
