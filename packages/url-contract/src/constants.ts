@@ -85,6 +85,16 @@ export const OPAQUE_LENGTH = 22;
 export const OPAQUE_UUID_LENGTH = 36;
 
 /**
+ * Regex for the dashed-UUID opaque form: 8-4-4-4-12 lowercase hex.
+ * Shared by parse.ts (parseRoomCode / isValidRoomId) and brands.ts
+ * (isValidRoomIdShape) — one definition, so the parser and the brand cannot
+ * drift. If the brand ever narrowed relative to the parser, parseRoomCode's
+ * UUID branch would THROW from asRoomId instead of returning null (the only
+ * rejection path that would escape a route guard as an exception).
+ */
+export const OPAQUE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
  * The 6 group-letter uppercase letters as a ReadonlySet — for O(1) membership tests.
  *
  * Derived from GROUP_LETTERS to avoid duplication. This set breaks the circular

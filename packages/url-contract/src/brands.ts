@@ -15,7 +15,7 @@
  * ADR:  docs/adr/ADR-0005-heterogeneous-room-urls.md
  */
 
-import { BARE_LENGTH, TYPED_LENGTH, OPAQUE_LENGTH, OPAQUE_UUID_LENGTH } from './constants.js';
+import { BARE_LENGTH, TYPED_LENGTH, OPAQUE_LENGTH, OPAQUE_UUID_LENGTH, OPAQUE_UUID_RE } from './constants.js';
 
 declare const __brand: unique symbol;
 
@@ -42,7 +42,7 @@ export type RoomId = string & { readonly [__brand]: 'RoomId' };
 /**
  * Structural-only shape check for a potential RoomId string.
  *
- * Accepts the three ADR-0005 length+alphabet shapes without performing
+ * Accepts the four length+alphabet shapes (three ADR-0005 + dashed-UUID) without performing
  * Luhn checksum verification. Sufficient as the trust-boundary guard for the
  * brand cast. For full semantic checks use isValidRoomId() from ./parse.js.
  *
@@ -65,7 +65,7 @@ function isValidRoomIdShape(s: string): boolean {
   if (s.length === OPAQUE_UUID_LENGTH) {
     // Dashed-UUID opaque — the shape the server's sdk-room mint actually
     // produces (see constants.ts OPAQUE_UUID_LENGTH for the incident).
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
+    return OPAQUE_UUID_RE.test(s);
   }
   return false;
 }
@@ -73,10 +73,11 @@ function isValidRoomIdShape(s: string): boolean {
 /**
  * Brand a string as RoomId after structural shape validation.
  *
- * Accepts three ADR-0005 shapes (PR #1234 MAJOR — brand widened):
+ * Accepts four shapes (three ADR-0005 + the dashed-UUID server mint) (PR #1234 MAJOR — brand widened):
  *   - 9-char bare `AAAA-0000` (legacy)
  *   - 10-char typed `AAAA-0000C` (group code with Luhn checksum)
  *   - 22-char opaque `[A-Za-z0-9_-]{22}` (1to1/burner/sealed)
+ *   - 36-char opaque dashed lowercase UUID (server-minted sdk room ids)
  *
  * Note: Luhn checksum validity for 10-char codes is NOT checked here (structural cast only).
  * For full semantic validation use isValidRoomId() or parseRoomCode() from ./parse.js (W5.4).

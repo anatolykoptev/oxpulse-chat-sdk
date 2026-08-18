@@ -1,11 +1,12 @@
 /**
  * parse.ts — stateless canonical-short codec for room codes.
  *
- * ADR-0005: heterogeneous room URLs. The codec supports three forms:
+ * ADR-0005: heterogeneous room URLs. The codec supports four forms:
  *
  *   Bare:        'AAAA-0000' (9 chars) → kind: 'legacy-bare' (transition window)
  *   Typed group: 'AAAA-0000C' (10 chars, G-letter first + Luhn checksum) → kind: 'group'
  *   Opaque:      22-char base64url string → kind: 'opaque'
+ *   Opaque UUID: 36-char dashed lowercase UUID (server-minted sdk ids) → kind: 'opaque'
  *
  * ADR-0004 typed codes for 1to1/burner/sealed (A-F, N-T, U-Z first letters)
  * are no longer generated or accepted as typed codes. Those room kinds now use
@@ -25,7 +26,7 @@
  * encodeCanonicalShort / decodeCanonicalShort omitted — W5.5 (generators wave).
  */
 
-import { GROUP_FIRST_LETTERS } from './constants.js';
+import { GROUP_FIRST_LETTERS, OPAQUE_UUID_RE } from './constants.js';
 import { verifyChecksum } from './checksum.js';
 import { asRoomId, type RoomId } from './brands.js';
 
@@ -52,18 +53,8 @@ export type RealKind = '1to1' | 'group' | 'burner' | 'sealed';
  */
 const OPAQUE_RE = /^[A-Za-z0-9_-]{22}$/;
 
-/**
- * Regex for the dashed-UUID opaque form: 8-4-4-4-12 lowercase hex.
- *
- * The server's sdk-room mint has always returned this form
- * (uuid::Uuid::new_v4().to_string()) while the URL layer accepted only the
- * 22-char form — so every navigation into an existing sealed chat bounced
- * off the catch-all route to '/?invalid_room=1' (prod, 2026-08-18: 156 of
- * 164 rooms carry this shape). Lowercase-only: the Rust uuid crate prints
- * lowercase and the client stores the server's value verbatim, so accepting
- * uppercase would only widen the trust boundary for hand-typed input.
- */
-const OPAQUE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// OPAQUE_UUID_RE (dashed-UUID opaque form) is shared with brands.ts via
+// constants.ts — see the incident note there for why this shape exists.
 
 /**
  * Full semantic validation of a room ID string.
