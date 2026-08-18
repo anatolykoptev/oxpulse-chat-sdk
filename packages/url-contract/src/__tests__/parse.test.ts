@@ -158,6 +158,45 @@ describe('parseRoomCode — invalid inputs', () => {
   }
 });
 
+// ── 4b. parseRoomCode — 36-char dashed-UUID opaque ────────────────────────────
+//
+// 2026-08-18 prod incident: the server's sdk-room mint returns dashed-UUID
+// room ids (156 of 164 rooms in prod), while this parser accepted only the
+// 22-char opaque form — so EVERY navigation into an existing sealed chat
+// bounced off the catch-all route to '/?invalid_room=1'. The UUID form is a
+// fourth accepted shape, kind 'opaque', same as the 22-char form.
+
+describe('parseRoomCode — dashed-UUID opaque (36-char)', () => {
+  const PROD_UUID = 'a0b4600e-c0f6-4843-98ee-51bb634931c4';
+
+  it('returns kind: opaque for a prod-shaped dashed UUID', () => {
+    const result = parseRoomCode(PROD_UUID);
+    expect(result).not.toBeNull();
+    expect(result!.kind).toBe('opaque');
+    expect(result!.roomId).toBe(PROD_UUID);
+  });
+
+  it('isValidRoomId accepts the dashed-UUID form', () => {
+    expect(isValidRoomId(PROD_UUID)).toBe(true);
+  });
+
+  it('rejects uppercase hex (server mints lowercase; tighter boundary)', () => {
+    expect(parseRoomCode('A0B4600E-C0F6-4843-98EE-51BB634931C4')).toBeNull();
+  });
+
+  it('rejects non-hex chars in UUID positions', () => {
+    expect(parseRoomCode('g0b4600e-c0f6-4843-98ee-51bb634931c4')).toBeNull();
+  });
+
+  it('rejects misplaced dashes at 36 chars', () => {
+    expect(parseRoomCode('a0b4600ec-0f6-4843-98ee-51bb634931c4')).toBeNull();
+  });
+
+  it('rejects r:-prefixed UUID', () => {
+    expect(parseRoomCode(`r:${PROD_UUID}`)).toBeNull();
+  });
+});
+
 // ── 5. isValidRoomId — full semantic validation ───────────────────────────────
 
 describe('isValidRoomId — full semantic check', () => {

@@ -29,6 +29,26 @@ describe('RoomId', () => {
     expect(asRoomId('ABCDEFGHIJKLMNOPQRSTU_')).toBe('ABCDEFGHIJKLMNOPQRSTU_');
   });
 
+  it('accepts 36-char dashed-UUID opaque form (server-minted sdk ids)', () => {
+    const uuid = 'a0b4600e-c0f6-4843-98ee-51bb634931c4';
+    expect(asRoomId(uuid)).toBe(uuid);
+    expect(tryAsRoomId(uuid)).toBe(uuid);
+  });
+
+  // The tightening direction must be gated here, not only in parse.test.ts:
+  // the catch-all route consumes the BRAND (asRoomId/tryAsRoomId), and a
+  // brands-only widening (e.g. [0-9a-fA-F]) would make the brand and the
+  // parser silently disagree on the trust boundary.
+  it('rejects uppercase-hex UUID (brand matches the parser exactly)', () => {
+    const upper = 'A0B4600E-C0F6-4843-98EE-51BB634931C4';
+    expect(() => asRoomId(upper)).toThrow(TypeError);
+    expect(tryAsRoomId(upper)).toBeNull();
+  });
+
+  it('rejects 36-char non-UUID dash placement', () => {
+    expect(tryAsRoomId('a0b4600ec-0f6-4843-98ee-51bb634931c4')).toBeNull();
+  });
+
   it('rejects 8-char (too short for any form)', () => {
     expect(() => asRoomId('ABCD-123')).toThrow(TypeError);
     expect(tryAsRoomId('ABCD-123')).toBeNull();

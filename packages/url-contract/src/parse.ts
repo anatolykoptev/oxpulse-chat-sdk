@@ -1,11 +1,12 @@
 /**
  * parse.ts — stateless canonical-short codec for room codes.
  *
- * ADR-0005: heterogeneous room URLs. The codec supports three forms:
+ * ADR-0005: heterogeneous room URLs. The codec supports four forms:
  *
  *   Bare:        'AAAA-0000' (9 chars) → kind: 'legacy-bare' (transition window)
  *   Typed group: 'AAAA-0000C' (10 chars, G-letter first + Luhn checksum) → kind: 'group'
  *   Opaque:      22-char base64url string → kind: 'opaque'
+ *   Opaque UUID: 36-char dashed lowercase UUID (server-minted sdk ids) → kind: 'opaque'
  *
  * ADR-0004 typed codes for 1to1/burner/sealed (A-F, N-T, U-Z first letters)
  * are no longer generated or accepted as typed codes. Those room kinds now use
@@ -25,7 +26,7 @@
  * encodeCanonicalShort / decodeCanonicalShort omitted — W5.5 (generators wave).
  */
 
-import { GROUP_FIRST_LETTERS } from './constants.js';
+import { GROUP_FIRST_LETTERS, OPAQUE_UUID_RE } from './constants.js';
 import { verifyChecksum } from './checksum.js';
 import { asRoomId, type RoomId } from './brands.js';
 
@@ -52,13 +53,17 @@ export type RealKind = '1to1' | 'group' | 'burner' | 'sealed';
  */
 const OPAQUE_RE = /^[A-Za-z0-9_-]{22}$/;
 
+// OPAQUE_UUID_RE (dashed-UUID opaque form) is shared with brands.ts via
+// constants.ts — see the incident note there for why this shape exists.
+
 /**
  * Full semantic validation of a room ID string.
  *
- * Accepts the three ADR-0005 forms:
+ * Accepts the four forms (three ADR-0005 + the server's dashed-UUID reality):
  *   - 9-char bare  `AAAA-0000`            (structure only — no checksum)
  *   - 10-char typed `AAAA-0000C`           (structure + Luhn checksum verified)
  *   - 22-char opaque `[A-Za-z0-9_-]{22}`  (1to1/burner/sealed)
+ *   - 36-char opaque dashed lowercase UUID (server-minted sdk room ids)
  *
  * For full-semantic call sites (kind resolution), prefer parseRoomCode() which
  * also returns the RoomKind. isValidRoomId is the entry-point guard for callers
@@ -89,6 +94,8 @@ export function isValidRoomId(s: string): boolean {
   }
   // 22-char opaque base64url
   if (OPAQUE_RE.test(s)) return true;
+  // 36-char dashed-UUID opaque (server-minted sdk room ids)
+  if (OPAQUE_UUID_RE.test(s)) return true;
   return false;
 }
 
@@ -108,6 +115,7 @@ export function kindFromFirstLetter(letter: string): 'group' | null {
  *
  * Priority order (most specific first):
  *   1. 22-char base64url → kind: 'opaque' (roomId = the 22-char branded RoomId)
+ *   1b. 36-char dashed lowercase UUID → kind: 'opaque' (server-minted sdk ids)
  *   2. 9-char bare 'AAAA-0000' → kind: 'legacy-bare' (roomId = branded RoomId)
  *   3. 10-char typed 'AAAA-0000C' + Luhn OK + G-first → kind: 'group'
  *      (roomId = 9-char payload without checksum, branded RoomId)
@@ -125,6 +133,12 @@ export function parseRoomCode(code: string): { roomId: RoomId; kind: RoomKind } 
 
   // 1. 22-char opaque base64url
   if (code.length === 22 && OPAQUE_RE.test(code)) {
+    return { roomId: asRoomId(code), kind: 'opaque' };
+  }
+
+  // 1b. 36-char dashed-UUID opaque (server-minted sdk room ids — see
+  // OPAQUE_UUID_RE for why this shape exists at all).
+  if (code.length === 36 && OPAQUE_UUID_RE.test(code)) {
     return { roomId: asRoomId(code), kind: 'opaque' };
   }
 
