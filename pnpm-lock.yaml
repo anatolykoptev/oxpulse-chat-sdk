@@ -54,7 +54,7 @@ importers:
         specifier: ^6
         version: 6.2.5
       ts-mls:
-        specifier: ^2.0.0-rc.16
+        specifier: 2.0.0-rc.16
         version: 2.0.0-rc.16(@noble/ciphers@2.3.0)(@noble/curves@2.3.0)(@noble/post-quantum@0.6.1)
       typescript:
         specifier: ^6.0.3
