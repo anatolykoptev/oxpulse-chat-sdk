@@ -151,7 +151,37 @@ export interface MlsProviderOptions {
    * UID → identity-public-key mapping (e.g. fetched from the server DS).
    */
   authService: import('ts-mls').AuthenticationService;
+
+  /**
+   * Called when a non-fatal MLS event occurs that the SDK consumer should
+   * surface to the user (e.g. a Welcome that could not be processed). The
+   * error is also rethrown so the caller can react; the warning gives the
+   * user visibility. The Welcome is NOT acked — the server re-delivers it
+   * and the next attempt may succeed (e.g. after a KeyPackage restore).
+   *
+   * When omitted, warnings are emitted via `console.warn`.
+   */
+  onWarning?: (warning: MlsWarning) => void;
 }
+
+/**
+ * A non-fatal MLS warning surfaced through `onWarning`.
+ *
+ * Emitted before the error is rethrown, so the calling operation IS
+ * aborted — the warning gives the user visibility while the rethrow lets
+ * the caller react. The Welcome is left queued for server re-delivery.
+ */
+export type MlsWarning =
+  | {
+      /** A Welcome could not be processed (wrong KeyPackage, decode failure, etc.). */
+      code: 'mls_welcome_processing_failed';
+      /** Room ID the Welcome was for. */
+      roomId: string;
+      /** Server-assigned Welcome ID. */
+      welcomeId: string;
+      /** Human-readable detail. */
+      message: string;
+    };
 
 // ---------------------------------------------------------------------------
 // MLSGroupManager — drives the MLS group lifecycle
@@ -201,11 +231,18 @@ export class MLSGroupManager {
     publicPackage: KeyPackage;
     privatePackage: PrivateKeyPackage;
   }> = [];
+  /**
+   * Warnings callback — called for non-fatal MLS events (e.g. a Welcome whose
+   * KeyPackage was already consumed). Can be set after construction.
+   * Defaults to `opts.onWarning` (or `console.warn` when not provided).
+   */
+  onWarning?: (warning: MlsWarning) => void;
 
   constructor(opts: MlsProviderOptions, aead: MlsChatProvider, stateStore: MLSStateStore) {
     this.#opts = opts;
     this.#aead = aead;
     this.#stateStore = stateStore;
+    this.onWarning = opts.onWarning;
   }
 
   /** Lazy-load ts-mls. Throws a clear error if not installed. */
@@ -400,8 +437,6 @@ export class MLSGroupManager {
     if (this.#pendingKeyPackages.length === 0) {
       throw new SDKChatError('mls_keypackage_not_found', 'MLSGroupManager.processWelcome: no pending KeyPackage');
     }
-    // Peek without consuming — shift only after joinGroup succeeds.
-    const myKp = this.#pendingKeyPackages[0]!;
 
     const { decode, mlsMessageDecoder, joinGroup, wireformats } = tsMls;
     const decoded = decode(mlsMessageDecoder, welcome);
@@ -413,12 +448,37 @@ export class MLSGroupManager {
     }
 
     const welcomeMsg = decoded as import('ts-mls').MlsWelcomeMessage;
-    const state = await joinGroup({
-      context: ctx,
-      welcome: welcomeMsg.welcome,
-      keyPackage: myKp.publicPackage,
-      privateKeys: myKp.privatePackage,
-    });
+
+    // Try each pending KeyPackage until one decrypts the Welcome. The group
+    // creator picks key_packages[0] from the server's response, whose ordering
+    // is unspecified; if the directory returns newest-first while our local
+    // list is oldest-first, the creator seals to a key we never try. Trying
+    // only #pendingKeyPackages[0] (the previous behaviour) fails the join even
+    // when the client holds the right key. Remove only the KP that worked.
+    let state: ClientState | undefined;
+    let workedIndex = -1;
+    let lastErr: unknown = null;
+    for (let i = 0; i < this.#pendingKeyPackages.length; i++) {
+      const kp = this.#pendingKeyPackages[i]!;
+      try {
+        state = await joinGroup({
+          context: ctx,
+          welcome: welcomeMsg.welcome,
+          keyPackage: kp.publicPackage,
+          privateKeys: kp.privatePackage,
+        });
+        workedIndex = i;
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!state || workedIndex === -1) {
+      throw lastErr ?? new SDKChatError(
+        'mls_welcome_decrypt_failed',
+        'MLSGroupManager.processWelcome: no pending KeyPackage could decrypt the welcome',
+      );
+    }
 
     // Extract groupId from the welcome's group info.
     const groupId = state.groupContext.groupId;
@@ -438,8 +498,8 @@ export class MLSGroupManager {
 
     this.#roomGroupIds.set(roomId, groupId);
     this.#roomStates.set(roomId, state);
-    // Consume the KeyPackage only after joinGroup succeeds.
-    this.#pendingKeyPackages.shift();
+    // Consume only the KeyPackage that worked.
+    this.#pendingKeyPackages.splice(workedIndex, 1);
     await this.#applyEpoch(roomId, state);
     await this.#persistRoom(roomId);
   }
@@ -495,6 +555,91 @@ export class MLSGroupManager {
       await this.#applyEpoch(roomId, result.newState);
       await this.#persistRoom(roomId);
     }
+  }
+
+  /**
+   * Fetch and process all pending Welcome messages for a room.
+   *
+   * GETs the room's pending Welcomes from the server and processes each
+   * in order, returning how many were applied. For each Welcome:
+   *
+   * - On success → acks it (DELETE) so the server stops re-notifying.
+   * - On failure → reports a warning via `onWarning`/`console.warn` and
+   *   rethrows. The Welcome is NOT acked — the server re-delivers it and
+   *   the next attempt may succeed (e.g. the KeyPackage was sealed to a
+   *   different pending one, or the private half has not been restored
+   *   yet). A wrongly acked invite is silent and permanent; a stream of
+   *   warnings is visible and bounded by the 7-day TTL.
+   *
+   * @returns The number of Welcomes successfully applied.
+   */
+  async fetchAndProcessWelcomes(roomId: string): Promise<number> {
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
+    const baseUrl = this.#roomBaseUrl();
+    const resp = await this.#fetchWithRetry(
+      `${baseUrl}/rooms/${roomId}/mls-welcome`,
+      { headers: { 'Authorization': `Bearer ${this.#opts.jwt}` } },
+    );
+    if (resp.status === 404) return 0; // no pending welcomes
+    if (!resp.ok) {
+      throw new SDKChatError('server_error', `fetchAndProcessWelcomes: GET failed: ${resp.status}`);
+    }
+    const data = await resp.json() as { welcomes: Array<{ welcome_id: string; welcome_b64: string }> };
+    if (!data.welcomes) return 0;
+
+    let applied = 0;
+    for (const entry of data.welcomes) {
+      const welcomeBytes = base64ToBytes(entry.welcome_b64);
+      try {
+        await this.processWelcome(roomId, welcomeBytes);
+        applied++;
+        // Ack on success — server stops re-notifying.
+        await this.#ackWelcome(roomId, entry.welcome_id);
+      } catch (err) {
+        // Ack ONLY on success. A failure may be transient (the Welcome is
+        // sealed to a different pending KeyPackage, or the private half has
+        // not been restored yet) — acking would destroy a usable invite.
+        // Report the warning and rethrow; re-delivery is the recovery.
+        const warning: MlsWarning = {
+          code: 'mls_welcome_processing_failed',
+          roomId,
+          welcomeId: entry.welcome_id,
+          message: `Welcome ${entry.welcome_id} for room ${roomId} could not be processed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+        if (this.onWarning) {
+          this.onWarning(warning);
+        } else {
+          console.warn(`[chat-sdk] MLS: ${warning.message}`);
+        }
+        throw err;
+      }
+    }
+    return applied;
+  }
+
+  /**
+   * Fetch and process a single MLS protocol message by ID.
+   *
+   * GETs the protocol message from the server and feeds it to
+   * `processMessage`. Not consumed server-side; the row expires after
+   * an hour.
+   */
+  async fetchAndProcessMessage(roomId: string, messageId: string): Promise<void> {
+    if (this.#disposed) throw new SDKChatError('invalid_args', 'MLSGroupManager: disposed');
+    const baseUrl = this.#roomBaseUrl();
+    const resp = await this.#fetchWithRetry(
+      `${baseUrl}/rooms/${roomId}/mls-messages/${messageId}`,
+      { headers: { 'Authorization': `Bearer ${this.#opts.jwt}` } },
+    );
+    if (resp.status === 404) {
+      throw new SDKChatError('not_found', `fetchAndProcessMessage: message ${messageId} not found in room ${roomId}`);
+    }
+    if (!resp.ok) {
+      throw new SDKChatError('server_error', `fetchAndProcessMessage: GET failed: ${resp.status}`);
+    }
+    const data = await resp.json() as { message_b64: string };
+    const messageBytes = base64ToBytes(data.message_b64);
+    await this.processMessage(roomId, messageBytes);
   }
 
   /**
@@ -652,7 +797,117 @@ export class MLSGroupManager {
 
   // ---- Private helpers ---------------------------------------------------
 
-  /** Fetch a KeyPackage for a user from the server directory. */
+  /**
+   * Derive the room base URL from the KeyPackage directory URL.
+   *
+   * Strips a single trailing `/keys` segment and nothing else.
+   * This fixes #368: `String.prototype.replace('/keys', '')` replaces the
+   * FIRST occurrence anywhere in the URL, silently mangling a directory URL
+   * whose host or path contains `/keys` earlier (e.g.
+   * `https://host/keys/api/sdk/keys` → `https://host/api/sdk/keys`).
+   */
+  #roomBaseUrl(): string {
+    const dir = this.#opts.keyPackageDirectoryUrl;
+    // Strip a single trailing '/keys' (with optional trailing slash before it).
+    if (dir.endsWith('/keys')) return dir.slice(0, -'/keys'.length);
+    if (dir.endsWith('/keys/')) return dir.slice(0, -'/keys/'.length);
+    // If the directory URL doesn't end with /keys, use it as-is.
+    return dir.replace(/\/$/, '');
+  }
+
+  /**
+   * Fetch with bounded exponential backoff on 429 and transient 5xx.
+   *
+   * Retries 429, 502, 503, 504 (transient server-side failures). Other 4xx
+   * are non-retryable — they indicate a permanent client-side problem.
+   *
+   * A transient 502/503/504 on `fetchAndProcessMessage` is a permanently
+   * lost commit if not retried: the row expires after an hour and there is
+   * no catch-up endpoint (oxpulse-chat#3090). Retrying 5xx with the same
+   * bounded schedule gives transient blips a chance to recover.
+   *
+   * Honours `Retry-After` when the header is present (seconds or HTTP date),
+   * otherwise 250 ms doubling, at most 3 retries, with ±20% jitter.
+   * `Retry-After` is capped at 30 s — in this product's threat model the
+   * server is the adversary, and an unbounded server-supplied sleep
+   * (`Retry-After: 999999999`) would park the room's inbound path in a
+   * setTimeout for ~31 years with nothing to cancel it: a denial-of-service
+   * on the client, not a courtesy. When the header exceeds the cap we use
+   * the cap rather than abandoning the attempt.
+   *
+   * Schedule note: 250 ms doubling over 3 retries is ~1.75 s of total
+   * backoff. This gives up on any rate limit longer than ~2 s, but widening
+   * it would let a malicious server stall the client longer by sending 429s
+   * — the short schedule is defensive. `fetchAndProcessWelcomes` can be
+   * re-called by the consumer later; `fetchAndProcessMessage` cannot, but
+   * its 1-hour TTL is wider than any reasonable retry window, and the
+   * consumer's SSE reconnection covers longer outages.
+   *
+   * After the last attempt throws `SDKChatError` — `mls_rate_limited` for
+   * 429, `server_error` for 5xx — so a caller can tell the two apart.
+   */
+  async #fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const MAX_RETRIES = 3;
+    const RETRY_AFTER_CAP_MS = 30_000;
+    const RETRYABLE = new Set([429, 502, 503, 504]);
+    let lastResp: Response | null = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const resp = await fetch(url, init);
+      if (!RETRYABLE.has(resp.status)) return resp;
+      lastResp = resp;
+      if (attempt === MAX_RETRIES) break;
+
+      // Compute delay.
+      let delayMs: number;
+      const retryAfter = resp.headers.get('Retry-After');
+      if (retryAfter !== null) {
+        // Retry-After can be seconds or an HTTP-date.
+        const asSeconds = Number(retryAfter);
+        if (Number.isFinite(asSeconds)) {
+          delayMs = Math.min(asSeconds * 1000, RETRY_AFTER_CAP_MS);
+        } else {
+          const asDate = Date.parse(retryAfter);
+          delayMs = Number.isFinite(asDate)
+            ? Math.min(Math.max(0, asDate - Date.now()), RETRY_AFTER_CAP_MS)
+            : 0;
+        }
+      } else {
+        // 250 ms doubling: 250, 500, 1000, ...
+        delayMs = 250 * (2 ** attempt);
+      }
+
+      // Add ±20% jitter, then enforce the cap again so jitter never pushes
+      // the delay above RETRY_AFTER_CAP_MS.
+      const jitter = delayMs * 0.2 * (Math.random() * 2 - 1);
+      delayMs = Math.min(Math.max(0, delayMs + jitter), RETRY_AFTER_CAP_MS);
+
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    // All retries exhausted — throw an error that reflects the last status.
+    const code = lastResp?.status === 429 ? 'mls_rate_limited' : 'server_error';
+    throw new SDKChatError(
+      code,
+      `MLSGroupManager: retries exhausted after ${MAX_RETRIES} attempts (last status ${lastResp?.status ?? 'unknown'})`,
+      lastResp?.status,
+    );
+  }
+
+  /** Ack a Welcome by deleting it from the server queue. */
+  async #ackWelcome(roomId: string, welcomeId: string): Promise<void> {
+    const baseUrl = this.#roomBaseUrl();
+    const resp = await fetch(
+      `${baseUrl}/rooms/${roomId}/mls-welcome/${welcomeId}`,
+      {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${this.#opts.jwt}` },
+      },
+    );
+    // 204 = acked, 404 = unknown or not ours — both are acceptable (idempotent).
+    if (!resp.ok && resp.status !== 404) {
+      throw new SDKChatError('server_error', `MLSGroupManager: ackWelcome failed: ${resp.status}`);
+    }
+  }
+
   async #fetchKeyPackage(uid: string): Promise<KeyPackage> {
     const tsMls = await this.#loadTsMls();
     const { decode, mlsMessageDecoder, wireformats } = tsMls;
@@ -707,7 +962,7 @@ export class MLSGroupManager {
       version: tsMls.protocolVersions.mls10,
     };
     const welcomeBytes = tsMls.encode(tsMls.mlsMessageEncoder, welcomeMsg);
-    const baseUrl = this.#opts.keyPackageDirectoryUrl.replace('/keys', '');
+    const baseUrl = this.#roomBaseUrl();
     const resp = await fetch(
       `${baseUrl}/rooms/${roomId}/mls-welcome`,
       {
@@ -735,7 +990,7 @@ export class MLSGroupManager {
     tsMls: TsMlsModule,
   ): Promise<void> {
     const msgBytes = tsMls.encode(tsMls.mlsMessageEncoder, msg as MlsMessage);
-    const baseUrl = this.#opts.keyPackageDirectoryUrl.replace('/keys', '');
+    const baseUrl = this.#roomBaseUrl();
     const resp = await fetch(
       `${baseUrl}/rooms/${roomId}/mls-messages`,
       {

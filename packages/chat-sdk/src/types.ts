@@ -171,6 +171,13 @@ export type E2EEOptions =
         /** Called after each epoch advance with the 32-byte authenticator. */
         onEpochAuthenticator?: (roomId: string, authenticator: Uint8Array) => void;
         /**
+         * Called for non-fatal MLS warnings (e.g. a Welcome whose KeyPackage
+         * was already consumed — the user cannot join via that Welcome, but
+         * the error is acked server-side to stop re-notification).
+         * When omitted, warnings are emitted via `console.warn`.
+         */
+        onWarning?: (warning: import('./mls-provider.js').MlsWarning) => void;
+        /**
          * State store for MLS ClientState. Defaults to IndexedDB-backed.
          * MLS group state is serialized via ts-mls 2.0 clientStateEncoder
          * and persisted to IndexedDB — group state survives page reloads.
