@@ -36,6 +36,7 @@ import type {
   ReactionsResponse,
   ProductMeta,
   SubscribeArgs,
+  SubscribeConnectionState,
   Room,
   RoomSummary,
   Member,
@@ -243,6 +244,16 @@ function classifyUnsealError(err: unknown): 'replay' | 'auth' | 'unknown' {
  * advances. The built-in WebCrypto decrypt is sub-ms and never reaches this.
  */
 const DECRYPT_DEADLINE_MS = 5000;
+
+/**
+ * Silence budget for the subscribe() liveness watchdog: 3 × the server's 15 s
+ * `ping` interval (oxpulse-chat SSE_KEEPALIVE_INTERVAL), so two lost pings are
+ * tolerated before a half-open link is recycled.
+ */
+const DEFAULT_LIVENESS_TIMEOUT_MS = 45_000;
+
+/** Upper bound of the random delay before an `online` / watchdog-forced reconnect. */
+const FORCED_RECONNECT_JITTER_MS = 1_000;
 
 /**
  * batchAppend() attempt budget. The per-attempt timeout is sized for slow mobile
@@ -1411,7 +1422,11 @@ export class SDKChatClient {
     });
   }
 
-  async #fetchSubscribeTicket(roomId: string, afterSeq: number): Promise<string> {
+  async #fetchSubscribeTicket(
+    roomId: string,
+    afterSeq: number,
+    signal?: AbortSignal,
+  ): Promise<string> {
     let resp: Response;
     try {
       resp = await fetch(`${this.#baseUrl}/api/sdk/messages/subscribe-ticket`, {
@@ -1421,6 +1436,7 @@ export class SDKChatClient {
           Authorization: `Bearer ${this.#jwt}`,
         },
         body: JSON.stringify({ room_id: roomId, after_seq: afterSeq }),
+        signal,
       });
     } catch (err) {
       throw new SDKChatError('network', `subscribe-ticket fetch failed: ${String(err)}`);
@@ -1448,6 +1464,46 @@ export class SDKChatClient {
     // reconnect(0)≈800-1200ms forever (~1 req/s indefinitely).
     let reconnectAttempt = 0;
 
+    // Liveness watchdog. The server emits a named `ping` event with non-empty
+    // data (`event: ping` / `data: 1`) every 15 s (SSE_KEEPALIVE_INTERVAL). It
+    // must carry data: EventSource swallows `:` comments and the HTML SSE spec
+    // discards an event with an empty data buffer, so `addEventListener('ping')`
+    // would never fire for a bare `event: ping`. A half-open link never fires onerror, so without this the
+    // stream stalls silently. `pingsEverSeen` is sticky for the subscription: once any
+    // stream pinged, the server version is known to ping, so every later stream
+    // is watched from attach and on every frame (axum resets its keep-alive timer
+    // on each delivered event, so a busy room may never see a ping on a stream).
+    // Until a ping is ever seen the only guard is a one-shot first-frame timer:
+    // every server version sends the `connected` prelude, so a stream silent for
+    // livenessMs from attach is dead; the first frame of any kind disarms it.
+    const livenessMs = args.livenessTimeoutMs ?? DEFAULT_LIVENESS_TIMEOUT_MS;
+    let pingsEverSeen = false;
+    let lastActivityAt = Date.now();
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+    // Reconnect-cycle generation. A forced reconnect bumps it; every await in a
+    // superseded cycle (replay fetch, ticket fetch) bails on mismatch so a hung
+    // request that finally resolves can neither deliver nor attach a 2nd stream.
+    let epoch = 0;
+    // Aborted with each epoch bump / teardown so an abandoned cycle's in-flight
+    // replay + ticket requests are cancelled instead of lingering on a dead link.
+    let cycleAbort = new AbortController();
+    let connState: SubscribeConnectionState | null = null;
+    const setConnState = (next: SubscribeConnectionState) => {
+      if (connState === next) return;
+      connState = next;
+      try {
+        args.onConnectionState?.(next);
+      } catch {
+        // A throwing UI callback must not wedge the stream.
+      }
+    };
+    // Deferred to a microtask: subscribe() has not returned its unsubscribe handle
+    // yet, and a synchronous callback would run before the caller could capture it
+    // (e.g. `const off = subscribe(..., { onConnectionState: () => off() })` -> TDZ).
+    queueMicrotask(() => {
+      if (!destroyed) setConnState('connecting');
+    });
+
     // W6 E2EE: register this subscriber on the room's shared serial decrypt
     // chain. Refcounted so a co-subscriber (widget remount / reconnect race)
     // sharing this roomId keeps the chain alive until the LAST teardown.
@@ -1463,8 +1519,20 @@ export class SDKChatClient {
 
     const attach = (ticket: string) => {
       if (destroyed) return;
+      // Idempotent: never leave an orphaned stream behind a second attach.
+      es?.close();
       const url = `${this.#baseUrl}/api/sdk/messages/subscribe?ticket=${encodeURIComponent(ticket)}&after_seq=${lastSeq}`;
       es = new EventSource(url);
+      lastActivityAt = Date.now();
+      // Always watch a fresh stream: this timer is the first-frame timer (any frame
+      // disarms it unless pingsEverSeen, in which case it is re-armed as the
+      // liveness watchdog). Remaining blind window: none on a stream whose server
+      // ever pinged; on a never-pinging server a stream that delivers its
+      // `connected` prelude and then goes half-open is not detected (a quiet
+      // healthy stream there is indistinguishable). Known trade-off: after pings
+      // were seen, a re-attach onto a no-ping instance (mixed-version deploy) that
+      // stays quiet is recycled every livenessMs until the deploy converges.
+      armWatchdog();
 
       // Phase 2: parse `event: connected` prelude emitted by server (Wave 3.2).
       // Carries crypto_mode for the room. Validate against configured option and
@@ -1474,6 +1542,7 @@ export class SDKChatClient {
         // teardown so a torn-down subscription cannot write this room's
         // #activeCryptoModeByRoom entry (which subsequent list()/send() would read).
         if (destroyed) return;
+        noteActivity();
         const msgEv = ev as MessageEvent;
         try {
           const data = JSON.parse(msgEv.data as string) as { crypto_mode?: string };
@@ -1493,6 +1562,7 @@ export class SDKChatClient {
         // queued message dispatched post-close cannot append a decrypt onto a
         // released subscriber's chain.
         if (destroyed) return;
+        noteActivity();
         // Stream is delivering frames → reset the reconnect backoff attempt
         // counter so a subsequent drop uses a fast reconnect, not an escalated
         // backoff.
@@ -1548,6 +1618,8 @@ export class SDKChatClient {
       const transientTypes = ['typing', 'presence', 'read_receipt'] as const;
       for (const evType of transientTypes) {
         es.addEventListener(evType, (ev: Event) => {
+          if (destroyed) return;
+          noteActivity();
           const msgEv = ev as MessageEvent;
           try {
             const data = JSON.parse(msgEv.data as string) as Record<string, unknown>;
@@ -1562,6 +1634,8 @@ export class SDKChatClient {
       // arrive as named SSE events on the `sdk_message_log_mutation` channel.
       if (args.onMutation || args.onReaction) {
         es.addEventListener('mutation', (ev: Event) => {
+          if (destroyed) return;
+          noteActivity();
           const msgEv = ev as MessageEvent;
           try {
             const data = JSON.parse(msgEv.data as string) as {
@@ -1614,6 +1688,14 @@ export class SDKChatClient {
         });
       }
 
+      // Liveness keep-alive: `event: ping` / `data: 1` (see the watchdog notes above).
+      es.addEventListener('ping', () => {
+        if (destroyed) return;
+        pingsEverSeen = true;
+        reconnectAttempt = 0;
+        noteActivity();
+      });
+
       // MAJOR #5: server graceful shutdown — stream.rs Phase-2 emits
       // `event: shutdown\ndata: server_restart` before closing the stream.
       // Contract: client reconnects immediately (no backoff) and replays from
@@ -1624,6 +1706,7 @@ export class SDKChatClient {
         es?.close();
         es = null;
         if (destroyed) return;
+        setConnState('reconnecting');
         // Immediate reconnect: replay from lastSeq then re-attach.
         reconnectImmediate();
       });
@@ -1632,6 +1715,7 @@ export class SDKChatClient {
         es?.close();
         es = null;
         if (destroyed) return;
+        setConnState('reconnecting');
         // Escalate backoff across consecutive connect-then-drop flaps: pass the
         // current attempt then increment so the next drop uses a higher delay.
         reconnect(reconnectAttempt);
@@ -1653,6 +1737,79 @@ export class SDKChatClient {
       args.onError(sdkErr);
     };
 
+    function noteActivity(): void {
+      lastActivityAt = Date.now();
+      setConnState('connected');
+      if (pingsEverSeen) armWatchdog();
+      else disarmWatchdog(); // first frame seen: first-frame timer done
+    }
+
+    function noteReplayProgress(): void {
+      lastActivityAt = Date.now();
+      if (pingsEverSeen) armWatchdog();
+    }
+
+    function disarmWatchdog(): void {
+      if (watchdogTimer !== null) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = null;
+      }
+    }
+
+    function armWatchdog(): void {
+      if (livenessMs <= 0) return;
+      if (watchdogTimer !== null) clearTimeout(watchdogTimer);
+      watchdogTimer = setTimeout(() => {
+        watchdogTimer = null;
+        // A backoff reconnect() is already scheduled (e.g. onerror escalated to
+        // 16-30 s): forcing now would cut that backoff short and defeat the flap
+        // damping. Re-arm so a cycle that hangs AFTER the backoff is still caught.
+        if (reconnectTimer !== null) {
+          armWatchdog();
+          return;
+        }
+        forceReconnect('liveness-timeout');
+      }, livenessMs);
+    }
+
+    // Tear the (possibly half-open) stream down and re-attach through the
+    // normal replay path, which resumes after lastSeq. Also re-arms the
+    // watchdog so a cycle that itself hangs (replay/ticket fetch on a dead
+    // link) is abandoned and restarted after another livenessMs.
+    function forceReconnect(reason: 'liveness-timeout' | 'online' | 'visibility-stale'): void {
+      if (destroyed) return;
+      console.debug('[chat-sdk] subscribe: forced reconnect', {
+        roomId,
+        reason,
+        silentMs: Date.now() - lastActivityAt,
+      });
+      epoch += 1;
+      cycleAbort.abort();
+      cycleAbort = new AbortController();
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      es?.close();
+      es = null;
+      setConnState('reconnecting');
+      if (pingsEverSeen) armWatchdog();
+      // 0-1 s jitter: a network blip (`online`) or a shared outage trips every
+      // client at once; spread the replay + ticket requests instead of herding.
+      reconnectImmediate(Math.random() * FORCED_RECONNECT_JITTER_MS);
+    }
+
+    const onOnline = (): void => forceReconnect('online');
+    const onVisibility = (): void => {
+      if (globalThis.document?.visibilityState !== 'visible') return;
+      // Timers are frozen in background tabs, so judge staleness by wall clock.
+      if (pingsEverSeen && livenessMs > 0 && Date.now() - lastActivityAt > livenessMs) {
+        forceReconnect('visibility-stale');
+      }
+    };
+    globalThis.addEventListener?.('online', onOnline);
+    globalThis.document?.addEventListener?.('visibilitychange', onVisibility);
+
     // Replay messages missed while the stream was down, then advance lastSeq.
     // SEC-CR-14-01: when e2ee is active the replay unseal is routed through the
     // room's #decryptChain (the SAME serial queue as the live stream) so it can
@@ -1663,6 +1820,8 @@ export class SDKChatClient {
     // (unchanged). Shared by reconnectImmediate() and reconnect() so both fix the
     // bypass identically.
     const replayMissed = async () => {
+      const myEpoch = epoch;
+      const signal = cycleAbort.signal;
       try {
         let cursor = lastSeq;
         while (true) {
@@ -1670,9 +1829,12 @@ export class SDKChatClient {
           // deliver nothing AND must not append onto a co-subscriber's still-live
           // chain (append gates on refCount, which a surviving co-subscriber keeps
           // > 0). Mirrors the live-stream guard in the onmessage handler.
-          if (destroyed) return;
-          const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, { afterSeq: cursor });
-          if (destroyed) return;
+          if (destroyed || myEpoch !== epoch) return;
+          const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, { afterSeq: cursor, signal });
+          if (destroyed || myEpoch !== epoch) return;
+          // A page arrived: the replay is making progress, so a slow-but-alive
+          // link must not be recycled mid-replay and restarted from the same cursor.
+          noteReplayProgress();
           if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
             for (const row of rawItems) {
               lastSeq = row.seq;
@@ -1709,6 +1871,8 @@ export class SDKChatClient {
           cursor = nextCursor;
         }
       } catch (err) {
+        // An abandoned (superseded / torn-down) cycle aborts its own request: not an error.
+        if (signal.aborted) return;
         // Surface replay failures to the caller; the reconnect flow still re-attaches for
         // transient (network / server) failures.
         reportError(err);
@@ -1730,40 +1894,48 @@ export class SDKChatClient {
 
     // MAJOR #5: immediate reconnect for graceful shutdown — same replay logic as
     // reconnect() but fires in the next microtask instead of after backoff delay.
-    const reconnectImmediate = () => {
+    const reconnectImmediate = (delayMs = 0) => {
+      const myEpoch = epoch;
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
-        if (destroyed) return;
+        if (destroyed || myEpoch !== epoch) return;
+        const signal = cycleAbort.signal;
         await replayMissed();
-        if (destroyed) return;
+        if (destroyed || myEpoch !== epoch) return;
         let ticket: string;
         try {
-          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq, signal);
         } catch (err) {
+          if (destroyed || myEpoch !== epoch) return;
           reportError(err);
           reconnect(0);
           return;
         }
+        if (destroyed || myEpoch !== epoch) return;
         attach(ticket);
-      }, 0);
+      }, delayMs);
     };
 
     const reconnect = (attempt: number) => {
       const delay = backoffMs(attempt);
+      const myEpoch = epoch;
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
-        if (destroyed) return;
+        if (destroyed || myEpoch !== epoch) return;
+        const signal = cycleAbort.signal;
         await replayMissed();
-        if (destroyed) return;
+        if (destroyed || myEpoch !== epoch) return;
         let ticket: string;
         try {
-          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq, signal);
         } catch (err) {
+          if (destroyed || myEpoch !== epoch) return;
           // Retry with backoff on ticket failure; surface error.
           reportError(err);
           reconnect(attempt + 1);
           return;
         }
+        if (destroyed || myEpoch !== epoch) return;
         attach(ticket);
       }, delay);
     };
@@ -1775,10 +1947,17 @@ export class SDKChatClient {
     // room's chain refcount for the client's lifetime.
     const teardownSubscriber = () => {
       destroyed = true;
+      cycleAbort.abort();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      if (watchdogTimer !== null) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = null;
+      }
+      globalThis.removeEventListener?.('online', onOnline);
+      globalThis.document?.removeEventListener?.('visibilitychange', onVisibility);
       es?.close();
       es = null;
       // Deregister this subscriber from the room's shared serial decrypt chain.
@@ -1802,16 +1981,24 @@ export class SDKChatClient {
     };
 
     // Initial connection: fetch ticket then open EventSource.
+    // Epoch-guarded like every reconnect cycle: an `online` / watchdog
+    // forceReconnect during a hung initial ticket fetch supersedes it, so the
+    // original must neither attach a 2nd EventSource nor start a parallel
+    // reconnect(0) cycle (E2EE rooms would double-append frames).
     (async () => {
       if (destroyed) return;
+      const myEpoch = epoch;
+      const signal = cycleAbort.signal;
       let ticket: string;
       try {
-        ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+        ticket = await this.#fetchSubscribeTicket(roomId, lastSeq, signal);
       } catch (err) {
+        if (destroyed || myEpoch !== epoch) return;
         reportError(err);
         reconnect(0);
         return;
       }
+      if (destroyed || myEpoch !== epoch) return;
       attach(ticket);
     })();
 

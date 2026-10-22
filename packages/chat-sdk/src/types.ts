@@ -565,7 +565,34 @@ export interface SubscribeArgs {
    * updated map.  This is an intentional signal-only design (no data in the event).
    */
   onRosterSignal?: () => void;
+  /**
+   * Called when the stream's connection state changes, so the app can show a
+   * "connecting…" indicator. `connecting` = initial open, `connected` = the
+   * stream is delivering (prelude / message / ping seen), `reconnecting` = the
+   * stream dropped or went silent and a replay + re-attach is under way.
+   * Fires on transitions only. Never called synchronously from inside
+   * `subscribe()`: the initial `connecting` is delivered on a microtask, after the
+   * unsubscribe handle has been returned (and not at all if already unsubscribed).
+   */
+  onConnectionState?: (state: SubscribeConnectionState) => void;
+  /**
+   * Silence budget (ms) for the liveness watchdog. If nothing — message,
+   * transient event or the server's `ping` keep-alive — arrives for this long,
+   * the stream is torn down and re-attached through the reconnect + replay path
+   * (resuming after the last delivered seq). Default 45 000 (3 × the server's
+   * 15 s ping). `0` disables the watchdog.
+   *
+   * The watchdog arms only once a `ping` event has been seen on the CURRENT
+   * stream, so a server that does not emit pings is never reconnected on a
+   * quiet room. The server's `ping` must be a named event with NON-EMPTY data
+   * (`event: ping` + `data: 1`): browsers' EventSource swallows `:` comments and,
+   * per the HTML SSE spec, discards any event whose data buffer is empty.
+   */
+  livenessTimeoutMs?: number;
 }
+
+/** Connection state reported by {@link SubscribeArgs.onConnectionState}. */
+export type SubscribeConnectionState = 'connecting' | 'connected' | 'reconnecting';
 
 // SDKChatErrorCode lives in errors.ts since 2026-06-05 (cycle break). We
 // re-export here so existing consumers' `import { SDKChatErrorCode } from
