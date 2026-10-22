@@ -759,6 +759,19 @@ export interface BatchAppendItem {
   productMeta?: unknown;
 }
 
+/** Options for {@link SDKChatClient.batchAppend}. */
+export interface BatchAppendOptions {
+  /**
+   * Per-attempt timeout (ms). Default: 20 000 + 1 ms per 4 body bytes (a 32 kbps
+   * floor — EDGE-class links), capped at 120 000.
+   */
+  timeoutMs?: number;
+  /** Total attempts including the first (default 4 = up to 3 retries). `1` disables retry. */
+  maxAttempts?: number;
+  /** Abort the call (including backoff waits). Rejects with the signal's reason; never retried. */
+  signal?: AbortSignal;
+}
+
 /** @internal Wire DTO for POST /api/sdk/messages/batch — NOT exported from index.ts. */
 interface BatchAppendItemDTO {
   msg_id: string;
