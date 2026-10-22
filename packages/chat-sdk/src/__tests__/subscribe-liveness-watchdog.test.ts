@@ -1,7 +1,8 @@
 /**
  * subscribe-liveness-watchdog.test.ts — a half-open SSE link (NAT drop, captive
  * Wi-Fi, mobile handover) never fires EventSource.onerror, so the stream stalls
- * silently. The server emits a named `ping` event every 15 s; the client forces
+ * silently. The server emits a named `ping` event (non-empty `data: 1`, else the
+ * browser never dispatches it) every 15 s; the client forces
  * a reconnect (replay from the last seq) when nothing arrives for
  * `livenessTimeoutMs`, and promptly on `online` / `visibilitychange`.
  *
@@ -39,6 +40,10 @@ function installES(): void {
         },
         emitNamed: (type, data) => {
           if (ctl.closed) return;
+          // HTML SSE spec "dispatch the event": an event whose data buffer is empty is
+          // DISCARDED, never dispatched to listeners. (axum's `Event::data("")` writes no
+          // `data:` line at all.) Mirror it so a mock can't deliver what a browser won't.
+          if (data === '') return;
           for (const l of self.ls.get(type) ?? []) l(Object.assign(new Event(type), { data }));
         },
       };
@@ -128,7 +133,7 @@ describe('subscribe() liveness watchdog', () => {
     expect(streams).toHaveLength(1);
 
     streams[0].emit(JSON.stringify(row(3)));
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
     serverLog = [3, 4]; // seq 4 landed while the link was half-open
 
     await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
@@ -145,10 +150,10 @@ describe('subscribe() liveness watchdog', () => {
   it('(2) keep-alive pings arriving in time never trigger a reconnect', async () => {
     make().subscribe('r2', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
     for (let i = 0; i < 10; i++) {
       await vi.advanceTimersByTimeAsync(15_000);
-      streams[0].emitNamed('ping', '');
+      streams[0].emitNamed('ping', '1');
     }
     await flush();
     expect(streams).toHaveLength(1);
@@ -161,7 +166,7 @@ describe('subscribe() liveness watchdog', () => {
     await flush();
     serverLog = [1, 2, 3];
     for (const s of [1, 2, 3]) streams[0].emit(JSON.stringify(row(s)));
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
 
     await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
     await flush();
@@ -177,7 +182,7 @@ describe('subscribe() liveness watchdog', () => {
     const onMessage = vi.fn();
     make().subscribe('r4', { onMessage, livenessTimeoutMs: THRESHOLD });
     await flush();
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
     serverLog = [1];
 
     // First replay list hangs (half-open link: the fetch never settles).
@@ -233,7 +238,7 @@ describe('subscribe() liveness watchdog', () => {
     vi.stubGlobal('document', doc);
     make().subscribe('r7', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
 
     // Fresh stream: becoming visible is a no-op.
     await vi.advanceTimersByTimeAsync(10_000);
@@ -261,20 +266,20 @@ describe('subscribe() liveness watchdog', () => {
     expect(states).toEqual(['connecting']);
     await flush();
     streams[0].emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
     expect(states.at(-1)).toBe('connected');
 
     await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
     expect(states.at(-1)).toBe('reconnecting');
     await flush();
-    streams[1].emitNamed('ping', '');
+    streams[1].emitNamed('ping', '1');
     expect(states).toEqual(['connecting', 'connected', 'reconnecting', 'connected']);
   });
 
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {
     const unsub = make().subscribe('r9', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();
-    streams[0].emitNamed('ping', '');
+    streams[0].emitNamed('ping', '1');
     unsub();
     await vi.advanceTimersByTimeAsync(THRESHOLD * 3);
     await flush();

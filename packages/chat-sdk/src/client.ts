@@ -1456,9 +1456,11 @@ export class SDKChatClient {
     // reconnect(0)≈800-1200ms forever (~1 req/s indefinitely).
     let reconnectAttempt = 0;
 
-    // Liveness watchdog. The server emits a named `ping` event every 15 s
-    // (SSE_KEEPALIVE_INTERVAL; the `: keepalive` comment is invisible to
-    // EventSource). A half-open link never fires onerror, so without this the
+    // Liveness watchdog. The server emits a named `ping` event with non-empty
+    // data (`event: ping` / `data: 1`) every 15 s (SSE_KEEPALIVE_INTERVAL). It
+    // must carry data: EventSource swallows `:` comments and the HTML SSE spec
+    // discards an event with an empty data buffer, so `addEventListener('ping')`
+    // would never fire for a bare `event: ping`. A half-open link never fires onerror, so without this the
     // stream stalls silently. `serverPings` is sticky per subscription: armed
     // only after a ping has been seen, so a server that does not ping is never
     // churned on a quiet room.

@@ -580,10 +580,11 @@ export interface SubscribeArgs {
    * (resuming after the last delivered seq). Default 45 000 (3 × the server's
    * 15 s ping). `0` disables the watchdog.
    *
-   * The watchdog arms only once a `ping` event has been seen on this
-   * subscription, so a server that does not emit pings is never reconnected on
-   * a quiet room. The plain `: keepalive` SSE comment cannot be used: browsers'
-   * EventSource swallows comments.
+   * The watchdog arms only once a `ping` event has been seen on the CURRENT
+   * stream, so a server that does not emit pings is never reconnected on a
+   * quiet room. The server's `ping` must be a named event with NON-EMPTY data
+   * (`event: ping` + `data: 1`): browsers' EventSource swallows `:` comments and,
+   * per the HTML SSE spec, discards any event whose data buffer is empty.
    */
   livenessTimeoutMs?: number;
 }
