@@ -46,13 +46,14 @@ import type {
   PresenceUser,
   OptimisticHandle,
   BatchAppendItem,
+  BatchAppendOptions,
   RoomVisibility,
   ShareLink,
   JoinResult,
   ExportRoomOptions,
   ExportResult,
 } from './types.js';
-import { SDKChatBatchError, SDKChatError, type SDKChatErrorCode } from './errors.js';
+import { SDKChatBatchError, SDKChatError, SDKChatRetryError, type SDKChatErrorCode } from './errors.js';
 import { createSFrameProvider } from './sframe.js';
 import { RoomDecryptChain } from './room-decrypt-chain.js';
 import { ReplayError } from 'sframe-ratchet/chat';
@@ -242,6 +243,44 @@ function classifyUnsealError(err: unknown): 'replay' | 'auth' | 'unknown' {
  * advances. The built-in WebCrypto decrypt is sub-ms and never reaches this.
  */
 const DECRYPT_DEADLINE_MS = 5000;
+
+/**
+ * batchAppend() attempt budget. The per-attempt timeout is sized for slow mobile
+ * links: 20 s base (TLS + RTT on a bad radio) plus 1 ms per 4 body bytes (a
+ * 32 kbps floor, EDGE-class), capped at 2 min — a 100 KB batch gets ~45 s.
+ * 4 attempts with 1/2/4 s (+-20%) backoff bounds a dead link at roughly 4 x
+ * timeout + 7 s before the app is told.
+ */
+const BATCH_APPEND_MAX_ATTEMPTS = 4;
+const BATCH_APPEND_BASE_TIMEOUT_MS = 20_000;
+const BATCH_APPEND_MAX_TIMEOUT_MS = 120_000;
+const BATCH_APPEND_FLOOR_BYTES_PER_MS = 4;
+/** Longest Retry-After batchAppend() will sit through; beyond it the call fails fast. */
+const BATCH_APPEND_MAX_RETRY_AFTER_MS = 60_000;
+
+/** Parse a Retry-After header (delta-seconds or HTTP-date) into ms; undefined if absent/garbage. */
+function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (value == null || value === '') return undefined;
+  if (/^\d+$/.test(value.trim())) return Number(value.trim()) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - Date.now());
+}
+
+/** setTimeout sleep that rejects with the signal's reason the moment it aborts. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted === true) return reject(signal.reason);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 /**
  * Grace after the abort deadline before the chain FORCE-DRAINS a still-unsettled unseal
  * (a provider that both ignores the AbortSignal and hangs). At `DECRYPT_DEADLINE_MS +
@@ -3283,8 +3322,26 @@ export class SDKChatClient {
    * wire DTO conversion (base64, snake_case) happens internally.
    *
    * room_id is injected automatically; created_at is set server-side.
+   *
+   * Each attempt has a timeout and a retriable failure (network error, timeout,
+   * 429 honouring Retry-After, 5xx) is retried with backoff + jitter, up to
+   * `opts.maxAttempts` (default 4); other 4xx are never retried. When every
+   * attempt fails it throws {@link SDKChatRetryError}.
+   *
+   * WHY RETRY IS SAFE: the body is built ONCE and re-sent byte-identical, and every
+   * row's msg_id is caller-supplied (BatchAppendItem.msgId is required). The server
+   * applies the batch in one transaction with `INSERT ... ON CONFLICT (app_id,
+   * room_id, msg_id) DO UPDATE SET app_id = EXCLUDED.app_id` (oxpulse-core
+   * msg_log.rs batch_append), so a batch whose response was lost — applied but
+   * unacknowledged — is a no-op on re-send. Callers MUST therefore keep the same
+   * msgIds when they re-call batchAppend after an error; minting fresh ids per call
+   * would duplicate messages.
    */
-  async batchAppend(roomId: string, items: BatchAppendItem[]): Promise<void> {
+  async batchAppend(
+    roomId: string,
+    items: BatchAppendItem[],
+    opts: BatchAppendOptions = {},
+  ): Promise<void> {
     // SEC-CR-001: fail-CLOSED if THIS room was poisoned by a prior crypto_mode mismatch —
     // gate-consistency with send/sendText/#fetchRows/subscribe (a poisoned room refuses
     // ALL sends). batchAppend carries pre-sealed bytes, so this is completeness, not a
@@ -3300,27 +3357,91 @@ export class SDKChatClient {
     }));
     const body = await this.#encodeBody(payload);
 
-    let resp: Response;
-    try {
-      resp = await fetch(`${this.#baseUrl}/api/sdk/messages/batch`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.#jwt}`,
-          'Content-Type': typeof body === 'string' ? 'application/json' : 'application/octet-stream',
-        },
-        body: body as BodyInit,
-      });
-    } catch (err) {
-      throw new SDKChatError('network', `batchAppend() fetch failed: ${String(err)}`);
-    }
-
-    if (!resp.ok) {
-      throw new SDKChatError(
-        httpStatusToCode(resp.status),
-        `batchAppend() HTTP ${resp.status}`,
-        resp.status,
+    const headers = {
+      Authorization: `Bearer ${this.#jwt}`,
+      'Content-Type': typeof body === 'string' ? 'application/json' : 'application/octet-stream',
+    };
+    const maxAttempts = Math.max(1, Math.floor(opts.maxAttempts ?? BATCH_APPEND_MAX_ATTEMPTS));
+    const timeoutMs =
+      opts.timeoutMs ??
+      Math.min(
+        BATCH_APPEND_MAX_TIMEOUT_MS,
+        BATCH_APPEND_BASE_TIMEOUT_MS + Math.ceil(body.length / BATCH_APPEND_FLOOR_BYTES_PER_MS),
       );
+    const callerSignal = opts.signal;
+    const callerAborted = (): boolean => callerSignal?.aborted === true;
+
+    let lastError!: SDKChatError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (callerAborted()) throw callerSignal!.reason;
+
+      // Manual AbortController + setTimeout (not AbortSignal.timeout): controllable
+      // under fake timers, and lets us tell OUR timeout from the caller's abort.
+      const controller = new AbortController();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+      const forwardAbort = (): void => controller.abort(callerSignal?.reason);
+      callerSignal?.addEventListener('abort', forwardAbort, { once: true });
+
+      let retryAfterMs: number | undefined;
+      let permanent: SDKChatError | undefined;
+      try {
+        const resp = await fetch(`${this.#baseUrl}/api/sdk/messages/batch`, {
+          method: 'POST',
+          headers,
+          body: body as BodyInit,
+          signal: controller.signal,
+        });
+        if (resp.ok) return;
+        const err = new SDKChatError(
+          httpStatusToCode(resp.status),
+          `batchAppend() HTTP ${resp.status}`,
+          resp.status,
+        );
+        // Only 429 and 5xx are transient; every other 4xx can never succeed.
+        if (resp.status !== 429 && resp.status < 500) permanent = err;
+        else lastError = err;
+        if (resp.status === 429) retryAfterMs = parseRetryAfterMs(resp.headers?.get?.('Retry-After'));
+      } catch (e) {
+        // A caller abort surfaces AS an abort (never retried, never a 'network' error).
+        if (callerAborted()) throw callerSignal!.reason;
+        lastError = new SDKChatError(
+          'network',
+          timedOut
+            ? `batchAppend() attempt timed out after ${timeoutMs} ms`
+            : `batchAppend() fetch failed: ${String(e)}`,
+        );
+      } finally {
+        clearTimeout(timer);
+        callerSignal?.removeEventListener('abort', forwardAbort);
+      }
+      if (permanent !== undefined) throw permanent;
+
+      if (attempt === maxAttempts) {
+        throw new SDKChatRetryError(
+          lastError.code,
+          `batchAppend() gave up after ${attempt} attempt(s): ${lastError.message}`,
+          { attempts: attempt, cause: lastError },
+          lastError.statusCode,
+        );
+      }
+      if (retryAfterMs !== undefined && retryAfterMs > BATCH_APPEND_MAX_RETRY_AFTER_MS) {
+        // The server asked us to wait longer than we will block a send call: stop now
+        // and let the app decide (its msgIds stay valid for a later re-send).
+        throw new SDKChatRetryError(
+          lastError.code,
+          `batchAppend() rate limited; server asked to wait ${retryAfterMs} ms`,
+          { attempts: attempt, cause: lastError, retryAfterMs },
+          lastError.statusCode,
+        );
+      }
+      await abortableSleep(Math.max(backoffMs(attempt - 1), retryAfterMs ?? 0), callerSignal);
     }
+    // Unreachable: the loop either returns, or throws on its final attempt.
+    throw lastError;
   }
 
   // ── W9 T4: Product-card helpers ───────────────────────────────────────────

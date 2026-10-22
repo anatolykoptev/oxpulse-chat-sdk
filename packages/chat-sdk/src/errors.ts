@@ -59,6 +59,38 @@ export class SDKChatError extends Error {
 }
 
 /**
+ * Thrown by `batchAppend` when every bounded attempt failed with a retriable
+ * condition (network error, per-attempt timeout, 429 or 5xx).
+ *
+ * `code` / `statusCode` are those of the LAST failure (`network` for a timeout,
+ * `rate_limited`, `server_error`), so existing code that classifies on
+ * `SDKChatError.code` keeps working; `instanceof SDKChatRetryError` tells the app
+ * the batch was retried and its state is unknown — re-sending the SAME msg_ids
+ * is safe (the server dedups), so the app may keep the batch queued.
+ */
+export class SDKChatRetryError extends SDKChatError {
+  /** Number of attempts made (including the first). */
+  readonly attempts: number;
+  /** Server-requested wait (ms) when the last failure was a 429 with Retry-After that exceeded the SDK's cap. */
+  readonly retryAfterMs?: number;
+  /** The last underlying failure. */
+  readonly cause: unknown;
+
+  constructor(
+    code: SDKChatErrorCode,
+    message: string,
+    opts: { attempts: number; cause: unknown; retryAfterMs?: number },
+    statusCode?: number,
+  ) {
+    super(code, message, statusCode);
+    this.name = 'SDKChatRetryError';
+    this.attempts = opts.attempts;
+    this.retryAfterMs = opts.retryAfterMs;
+    this.cause = opts.cause;
+  }
+}
+
+/**
  * Thrown by `batchAddMembers` when a chunk fails mid-stream.
  *
  * Carries the partial-success aggregate from all chunks that completed

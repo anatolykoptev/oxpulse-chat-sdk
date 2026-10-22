@@ -27,7 +27,7 @@
 // ─── Public API surface ───────────────────────────────────────────────────────
 
 export { SDKChatClient, BATCH_ADD_MEMBERS_CHUNK } from './client.js';
-export type { SDKChatClientOptions, SendArgs, ListArgs, ListResult, SubscribeArgs, MessageRow, SDKChatErrorCode, UpdateMessageArgs, PinnedMessage, MutationEvent, ReactionEvent, ReactionsResponse, OptimisticHandle, CryptoProvider, E2EEOptions, SealContext, BatchAppendItem, CryptoMode, ExportRoomOptions, ExportMessageRow, ExportResult } from './types.js';
+export type { SDKChatClientOptions, SendArgs, ListArgs, ListResult, SubscribeArgs, MessageRow, SDKChatErrorCode, UpdateMessageArgs, PinnedMessage, MutationEvent, ReactionEvent, ReactionsResponse, OptimisticHandle, CryptoProvider, E2EEOptions, SealContext, BatchAppendItem, BatchAppendOptions, CryptoMode, ExportRoomOptions, ExportMessageRow, ExportResult } from './types.js';
 // ─── W5: Room management types ───────────────────────────────────────────────
 export type { Room, RoomSummary, Member, RoomVisibility } from './types.js';
 // ─── #292: Share-link mint + join-by-link types ──────────────────────────────
@@ -46,7 +46,7 @@ export type { MLSStateStore } from './mls-state-store.js';
 export { IdbMlsStateStore, InMemoryMlsStateStore, createIdbMlsStateStore } from './mls-state-store.js';
 export type { PendingMessage, OutboxDegradation, OutboxOp } from './outbox.js';
 export { isOutboxDurable, onOutboxDegraded } from './outbox.js';
-export { SDKChatError, SDKChatBatchError } from './errors.js';
+export { SDKChatError, SDKChatBatchError, SDKChatRetryError } from './errors.js';
 export { generateUUID, backoffWithJitter, backoffMs } from './utils.js';
 
 // ─── Push notification SDK ────────────────────────────────────────────────────
