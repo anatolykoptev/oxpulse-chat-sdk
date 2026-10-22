@@ -384,6 +384,86 @@ describe('subscribe() liveness watchdog', () => {
     expect(tickets()).toBe(4);
   });
 
+  /** A fetch that never settles on its own but rejects the way a real one does when its signal aborts. */
+  const hangUntilAbort = (init?: RequestInit) =>
+    new Promise<Response>((_, rej) => {
+      init?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+    });
+
+  it('(13) an abandoned cycle aborts its in-flight replay request, silently', async () => {
+    const onError = vi.fn();
+    make().subscribe('r13', { onMessage: vi.fn(), onError, livenessTimeoutMs: THRESHOLD });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+    fetchMock.mockImplementationOnce((_i, init) => hangUntilAbort(init));
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // forced cycle #1 hangs in replay
+    await flush();
+    const replayCalls = () => fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/sdk/messages?'));
+    const hung = replayCalls()[0][1] as RequestInit;
+    expect(hung.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // watchdog abandons it
+    await flush();
+    expect(hung.signal?.aborted).toBe(true);
+    expect(onError).not.toHaveBeenCalled(); // the abort is not a user-visible error
+    expect(streams).toHaveLength(2);
+  });
+
+  it('(13b) `online` aborts a hung initial ticket request; unsubscribe aborts the live cycle', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    fetchMock.mockImplementationOnce((_i, init) => hangUntilAbort(init));
+    const onError = vi.fn();
+    const unsub = make().subscribe('r13b', { onMessage: vi.fn(), onError });
+    await flush();
+    const ticketCalls = () => fetchMock.mock.calls.filter((c) => String(c[0]).endsWith('/subscribe-ticket'));
+    const first = ticketCalls()[0][1] as RequestInit;
+    win.dispatchEvent(new Event('online'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(first.signal?.aborted).toBe(true);
+    expect(streams).toHaveLength(1);
+
+    // Unsubscribe mid-cycle: a hung replay is aborted and nothing is reported or rescheduled.
+    fetchMock.mockImplementationOnce((_i, init) => hangUntilAbort(init));
+    win.dispatchEvent(new Event('online'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    const replays = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/sdk/messages?'));
+    const hung = replays.at(-1)![1] as RequestInit;
+    unsub();
+    await flush();
+    expect(hung.signal?.aborted).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    const before = fetchMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush();
+    expect(fetchMock.mock.calls.length).toBe(before); // no reconnect timer left behind
+  });
+
+  it('(14) a slow-but-progressing multi-page replay is not restarted by the watchdog', async () => {
+    const onMessage = vi.fn();
+    make().subscribe('r14', { onMessage, livenessTimeoutMs: THRESHOLD });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+    // Each replay page takes 30 s; three pages = 90 s > the 45 s silence budget.
+    const pages: Array<[number, boolean]> = [[1, true], [2, true], [3, false]];
+    let page = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (!String(input).includes('/api/sdk/messages?')) return serverImpl(input, init);
+      const [seq, more] = pages[Math.min(page++, pages.length - 1)];
+      await new Promise((r) => setTimeout(r, 30_000));
+      return ok({ items: [row(seq)], has_more: more, next_cursor: more ? seq : null });
+    });
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // forced reconnect -> slow replay starts
+    await vi.advanceTimersByTimeAsync(95_000);
+    await flush();
+    const replays = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/sdk/messages?'));
+    expect(replays).toHaveLength(3); // one pass, never restarted
+    expect(onMessage.mock.calls.map((c) => (c[0] as { seq: number }).seq)).toEqual([1, 2, 3]);
+    expect(streams).toHaveLength(2);
+  });
+
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {
     const unsub = make().subscribe('r9', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();

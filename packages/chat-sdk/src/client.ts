@@ -1422,7 +1422,11 @@ export class SDKChatClient {
     });
   }
 
-  async #fetchSubscribeTicket(roomId: string, afterSeq: number): Promise<string> {
+  async #fetchSubscribeTicket(
+    roomId: string,
+    afterSeq: number,
+    signal?: AbortSignal,
+  ): Promise<string> {
     let resp: Response;
     try {
       resp = await fetch(`${this.#baseUrl}/api/sdk/messages/subscribe-ticket`, {
@@ -1432,6 +1436,7 @@ export class SDKChatClient {
           Authorization: `Bearer ${this.#jwt}`,
         },
         body: JSON.stringify({ room_id: roomId, after_seq: afterSeq }),
+        signal,
       });
     } catch (err) {
       throw new SDKChatError('network', `subscribe-ticket fetch failed: ${String(err)}`);
@@ -1475,6 +1480,9 @@ export class SDKChatClient {
     // superseded cycle (replay fetch, ticket fetch) bails on mismatch so a hung
     // request that finally resolves can neither deliver nor attach a 2nd stream.
     let epoch = 0;
+    // Aborted with each epoch bump / teardown so an abandoned cycle's in-flight
+    // replay + ticket requests are cancelled instead of lingering on a dead link.
+    let cycleAbort = new AbortController();
     let connState: SubscribeConnectionState | null = null;
     const setConnState = (next: SubscribeConnectionState) => {
       if (connState === next) return;
@@ -1719,6 +1727,11 @@ export class SDKChatClient {
       if (serverPings) armWatchdog();
     }
 
+    function noteReplayProgress(): void {
+      lastActivityAt = Date.now();
+      if (serverPings) armWatchdog();
+    }
+
     function armWatchdog(): void {
       if (livenessMs <= 0) return;
       if (watchdogTimer !== null) clearTimeout(watchdogTimer);
@@ -1742,6 +1755,8 @@ export class SDKChatClient {
     function forceReconnect(): void {
       if (destroyed) return;
       epoch += 1;
+      cycleAbort.abort();
+      cycleAbort = new AbortController();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -1777,6 +1792,7 @@ export class SDKChatClient {
     // bypass identically.
     const replayMissed = async () => {
       const myEpoch = epoch;
+      const signal = cycleAbort.signal;
       try {
         let cursor = lastSeq;
         while (true) {
@@ -1785,8 +1801,11 @@ export class SDKChatClient {
           // chain (append gates on refCount, which a surviving co-subscriber keeps
           // > 0). Mirrors the live-stream guard in the onmessage handler.
           if (destroyed || myEpoch !== epoch) return;
-          const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, { afterSeq: cursor });
+          const { rawItems, hasMore, nextCursor } = await this.#fetchRows(roomId, { afterSeq: cursor, signal });
           if (destroyed || myEpoch !== epoch) return;
+          // A page arrived: the replay is making progress, so a slow-but-alive
+          // link must not be recycled mid-replay and restarted from the same cursor.
+          noteReplayProgress();
           if (this.#activeCryptoModeByRoom.get(roomId) === 'plaintext') {
             for (const row of rawItems) {
               lastSeq = row.seq;
@@ -1823,6 +1842,8 @@ export class SDKChatClient {
           cursor = nextCursor;
         }
       } catch (err) {
+        // An abandoned (superseded / torn-down) cycle aborts its own request: not an error.
+        if (signal.aborted) return;
         // Surface replay failures to the caller; the reconnect flow still re-attaches for
         // transient (network / server) failures.
         reportError(err);
@@ -1849,13 +1870,14 @@ export class SDKChatClient {
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
         if (destroyed || myEpoch !== epoch) return;
+        const signal = cycleAbort.signal;
         await replayMissed();
         if (destroyed || myEpoch !== epoch) return;
         let ticket: string;
         try {
-          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq, signal);
         } catch (err) {
-          if (myEpoch !== epoch) return;
+          if (destroyed || myEpoch !== epoch) return;
           reportError(err);
           reconnect(0);
           return;
@@ -1871,13 +1893,14 @@ export class SDKChatClient {
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
         if (destroyed || myEpoch !== epoch) return;
+        const signal = cycleAbort.signal;
         await replayMissed();
         if (destroyed || myEpoch !== epoch) return;
         let ticket: string;
         try {
-          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+          ticket = await this.#fetchSubscribeTicket(roomId, lastSeq, signal);
         } catch (err) {
-          if (myEpoch !== epoch) return;
+          if (destroyed || myEpoch !== epoch) return;
           // Retry with backoff on ticket failure; surface error.
           reportError(err);
           reconnect(attempt + 1);
@@ -1895,6 +1918,7 @@ export class SDKChatClient {
     // room's chain refcount for the client's lifetime.
     const teardownSubscriber = () => {
       destroyed = true;
+      cycleAbort.abort();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -1935,9 +1959,10 @@ export class SDKChatClient {
     (async () => {
       if (destroyed) return;
       const myEpoch = epoch;
+      const signal = cycleAbort.signal;
       let ticket: string;
       try {
-        ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
+        ticket = await this.#fetchSubscribeTicket(roomId, lastSeq, signal);
       } catch (err) {
         if (destroyed || myEpoch !== epoch) return;
         reportError(err);
