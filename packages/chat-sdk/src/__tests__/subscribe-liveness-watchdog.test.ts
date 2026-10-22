@@ -223,6 +223,70 @@ describe('subscribe() liveness watchdog', () => {
     expect(streams).toHaveLength(1);
   });
 
+  it('(5b) a stream that is silent from attach is recycled after livenessMs, even on a server seen to ping', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    make().subscribe('r5b', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+    win.dispatchEvent(new Event('online')); // forced reconnect -> stream 1, dead on arrival
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(streams).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // stream 1 never sends a single frame
+    await flush();
+    expect(streams[1].closed).toBe(true);
+    expect(streams).toHaveLength(3);
+  });
+
+  it('(5c) a busy room (events < 15 s apart, no ping on this stream) is still guarded once any earlier stream pinged', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    make().subscribe('r5c', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+    win.dispatchEvent(new Event('online'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(streams).toHaveLength(2);
+
+    // Traffic every 5 s, never a ping: axum resets its keep-alive timer on every event.
+    for (let i = 1; i <= 20; i++) {
+      streams[1].emit(JSON.stringify(row(i)));
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    await flush();
+    expect(streams).toHaveLength(2); // live traffic is never churned
+
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // link goes half-open
+    await flush();
+    expect(streams[1].closed).toBe(true);
+    expect(streams).toHaveLength(3);
+  });
+
+  it('(5d) no-ping server: first-frame timer applies only until the first frame', async () => {
+    make().subscribe('r5d', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+    await flush();
+    // Quiet but healthy: the prelude arrived, then nothing (no pings from this server).
+    streams[0].emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
+    await vi.advanceTimersByTimeAsync(THRESHOLD * 4);
+    await flush();
+    expect(streams).toHaveLength(1);
+    expect(streams[0].closed).toBe(false);
+  });
+
+  it('(5e) no-ping server: a stream that never delivers even the prelude is recycled', async () => {
+    make().subscribe('r5e', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+    await flush();
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
+    await flush();
+    expect(streams[0].closed).toBe(true);
+    expect(streams).toHaveLength(2);
+  });
+
   it('(6) `online` reconnects promptly, resuming after the last seq', async () => {
     const win = new EventTarget();
     vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
@@ -464,18 +528,20 @@ describe('subscribe() liveness watchdog', () => {
     expect(streams).toHaveLength(2);
   });
 
-  it('(15) pings are tracked per stream: a re-attached stream that never pings is not churned', async () => {
+  it('(15) mixed-version deploy: once pings were seen, a quiet re-attached stream is recycled at most once per livenessMs', async () => {
+    // Busy and quiet-without-pings streams are indistinguishable, so the busy room
+    // wins (5c); the cost is a slow, bounded churn until the deploy converges.
     make().subscribe('r15', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();
     streams[0].emitNamed('ping', '1');
-    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // old (pinging) stream goes silent -> recycled
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
     await flush();
     expect(streams).toHaveLength(2);
-    // Mixed-version deploy: the replacement server instance does not ping. Quiet room.
-    await vi.advanceTimersByTimeAsync(THRESHOLD * 5);
+    streams[1].emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
+    await vi.advanceTimersByTimeAsync(THRESHOLD * 3);
     await flush();
-    expect(streams).toHaveLength(2);
-    expect(streams[1].closed).toBe(false);
+    expect(streams.length).toBeGreaterThanOrEqual(3);
+    expect(streams.length).toBeLessThanOrEqual(2 + 3); // never faster than 1 / livenessMs
   });
 
   it('(16) every forced reconnect logs its reason (debug)', async () => {

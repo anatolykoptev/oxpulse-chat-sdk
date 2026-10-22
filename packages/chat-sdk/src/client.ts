@@ -1469,11 +1469,15 @@ export class SDKChatClient {
     // must carry data: EventSource swallows `:` comments and the HTML SSE spec
     // discards an event with an empty data buffer, so `addEventListener('ping')`
     // would never fire for a bare `event: ping`. A half-open link never fires onerror, so without this the
-    // stream stalls silently. `serverPings` is per stream (reset on every attach):
-    // armed only after a ping has been seen on the current stream, so a server
-    // that does not ping is never churned on a quiet room.
+    // stream stalls silently. `pingsEverSeen` is sticky for the subscription: once any
+    // stream pinged, the server version is known to ping, so every later stream
+    // is watched from attach and on every frame (axum resets its keep-alive timer
+    // on each delivered event, so a busy room may never see a ping on a stream).
+    // Until a ping is ever seen the only guard is a one-shot first-frame timer:
+    // every server version sends the `connected` prelude, so a stream silent for
+    // livenessMs from attach is dead; the first frame of any kind disarms it.
     const livenessMs = args.livenessTimeoutMs ?? DEFAULT_LIVENESS_TIMEOUT_MS;
-    let serverPings = false;
+    let pingsEverSeen = false;
     let lastActivityAt = Date.now();
     let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
     // Reconnect-cycle generation. A forced reconnect bumps it; every await in a
@@ -1519,15 +1523,16 @@ export class SDKChatClient {
       es?.close();
       const url = `${this.#baseUrl}/api/sdk/messages/subscribe?ticket=${encodeURIComponent(ticket)}&after_seq=${lastSeq}`;
       es = new EventSource(url);
-      // Pings are keyed to the CURRENT stream: a re-attach may land on a server
-      // instance that does not ping (mixed-version deploy), so forget the old
-      // stream's pings and its armed timer; the first ping on this stream re-arms.
-      serverPings = false;
-      if (watchdogTimer !== null) {
-        clearTimeout(watchdogTimer);
-        watchdogTimer = null;
-      }
       lastActivityAt = Date.now();
+      // Always watch a fresh stream: this timer is the first-frame timer (any frame
+      // disarms it unless pingsEverSeen, in which case it is re-armed as the
+      // liveness watchdog). Remaining blind window: none on a stream whose server
+      // ever pinged; on a never-pinging server a stream that delivers its
+      // `connected` prelude and then goes half-open is not detected (a quiet
+      // healthy stream there is indistinguishable). Known trade-off: after pings
+      // were seen, a re-attach onto a no-ping instance (mixed-version deploy) that
+      // stays quiet is recycled every livenessMs until the deploy converges.
+      armWatchdog();
 
       // Phase 2: parse `event: connected` prelude emitted by server (Wave 3.2).
       // Carries crypto_mode for the room. Validate against configured option and
@@ -1686,7 +1691,7 @@ export class SDKChatClient {
       // Liveness keep-alive: `event: ping` / `data: 1` (see the watchdog notes above).
       es.addEventListener('ping', () => {
         if (destroyed) return;
-        serverPings = true;
+        pingsEverSeen = true;
         reconnectAttempt = 0;
         noteActivity();
       });
@@ -1735,12 +1740,20 @@ export class SDKChatClient {
     function noteActivity(): void {
       lastActivityAt = Date.now();
       setConnState('connected');
-      if (serverPings) armWatchdog();
+      if (pingsEverSeen) armWatchdog();
+      else disarmWatchdog(); // first frame seen: first-frame timer done
     }
 
     function noteReplayProgress(): void {
       lastActivityAt = Date.now();
-      if (serverPings) armWatchdog();
+      if (pingsEverSeen) armWatchdog();
+    }
+
+    function disarmWatchdog(): void {
+      if (watchdogTimer !== null) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = null;
+      }
     }
 
     function armWatchdog(): void {
@@ -1780,7 +1793,7 @@ export class SDKChatClient {
       es?.close();
       es = null;
       setConnState('reconnecting');
-      if (serverPings) armWatchdog();
+      if (pingsEverSeen) armWatchdog();
       // 0-1 s jitter: a network blip (`online`) or a shared outage trips every
       // client at once; spread the replay + ticket requests instead of herding.
       reconnectImmediate(Math.random() * FORCED_RECONNECT_JITTER_MS);
@@ -1790,7 +1803,7 @@ export class SDKChatClient {
     const onVisibility = (): void => {
       if (globalThis.document?.visibilityState !== 'visible') return;
       // Timers are frozen in background tabs, so judge staleness by wall clock.
-      if (serverPings && livenessMs > 0 && Date.now() - lastActivityAt > livenessMs) {
+      if (pingsEverSeen && livenessMs > 0 && Date.now() - lastActivityAt > livenessMs) {
         forceReconnect('visibility-stale');
       }
     };
