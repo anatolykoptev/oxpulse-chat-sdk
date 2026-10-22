@@ -21,6 +21,7 @@ interface Ctl {
   closed: boolean;
   emit(data: string): void;
   emitNamed(type: string, data: string): void;
+  error(): void;
 }
 const streams: Ctl[] = [];
 
@@ -37,6 +38,9 @@ function installES(): void {
         closed: false,
         emit: (data) => {
           if (!ctl.closed) self.onmessage?.({ data } as MessageEvent);
+        },
+        error: () => {
+          if (!ctl.closed) self.onerror?.(new Event('error'));
         },
         emitNamed: (type, data) => {
           if (ctl.closed) return;
@@ -111,6 +115,7 @@ function make(): SDKChatClient {
 }
 
 describe('subscribe() liveness watchdog', () => {
+  let randomSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     fetchMock.mockReset(); // drops any unconsumed mockImplementationOnce from a failed test
     fetchMock.mockImplementation(serverImpl);
@@ -119,8 +124,12 @@ describe('subscribe() liveness watchdog', () => {
     vi.stubGlobal('fetch', fetchMock);
     vi.useFakeTimers();
     installES();
+    // Forced reconnects add 0-1 s jitter and backoffMs adds +-20%: pin Math.random so
+    // timings are deterministic; jitter tests override it.
+    randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
   });
   afterEach(() => {
+    randomSpy.mockRestore();
     for (const u of unsubs.splice(0)) u();
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -225,7 +234,7 @@ describe('subscribe() liveness watchdog', () => {
     serverLog = [7, 8];
 
     win.dispatchEvent(new Event('online'));
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(1_000);
     await flush();
 
     expect(streams).toHaveLength(2);
@@ -320,6 +329,59 @@ describe('subscribe() liveness watchdog', () => {
     const listsAfter = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/sdk/messages?')).length;
     expect(listsAfter).toBe(listsBefore);
     expect(streams).toHaveLength(1);
+  });
+
+  it('(11) online / watchdog-forced reconnects are jittered over 0-1 s (no thundering herd)', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    make().subscribe('r11', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+
+    randomSpy.mockReturnValue(0.9);
+    win.dispatchEvent(new Event('online'));
+    await vi.advanceTimersByTimeAsync(800);
+    await flush();
+    expect(streams).toHaveLength(1); // still waiting out the jitter
+    await vi.advanceTimersByTimeAsync(200);
+    await flush();
+    expect(streams).toHaveLength(2);
+
+    // Same for a watchdog-forced reconnect.
+    streams[1].emitNamed('ping', '1');
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
+    await flush();
+    expect(streams).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(streams).toHaveLength(3);
+  });
+
+  it('(12) a watchdog expiry during a reconnect() backoff does not cut the backoff short', async () => {
+    make().subscribe('r12', { onMessage: vi.fn(), livenessTimeoutMs: 2_000 });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+    // From now on every ticket fetch fails: forced cycle -> reconnect(0) 0.8 s -> reconnect(1) 1.6 s ...
+    fetchMock.mockImplementation(async (input, init) =>
+      String(input).endsWith('/subscribe-ticket')
+        ? ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)
+        : serverImpl(input, init),
+    );
+    const tickets = () => fetchMock.mock.calls.filter((c) => String(c[0]).endsWith('/subscribe-ticket')).length;
+    await vi.advanceTimersByTimeAsync(2_001); // watchdog -> forceReconnect at T
+    await flush();
+    expect(tickets()).toBe(2); // initial + forced cycle #1 (failed)
+    await vi.advanceTimersByTimeAsync(800); // T+800: reconnect(0) fires -> ticket #3 fails
+    await flush();
+    expect(tickets()).toBe(3);
+    // T+1600 .. T+2400 the 1.6 s backoff is pending; the watchdog (re-armed at T) expires at T+2000.
+    await vi.advanceTimersByTimeAsync(1_300); // T+2100
+    await flush();
+    expect(tickets()).toBe(3); // backoff honoured, not cut by the watchdog
+    await vi.advanceTimersByTimeAsync(400); // T+2500: backoff done
+    await flush();
+    expect(tickets()).toBe(4);
   });
 
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {

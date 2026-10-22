@@ -252,6 +252,9 @@ const DECRYPT_DEADLINE_MS = 5000;
  */
 const DEFAULT_LIVENESS_TIMEOUT_MS = 45_000;
 
+/** Upper bound of the random delay before an `online` / watchdog-forced reconnect. */
+const FORCED_RECONNECT_JITTER_MS = 1_000;
+
 /**
  * batchAppend() attempt budget. The per-attempt timeout is sized for slow mobile
  * links: 20 s base (TLS + RTT on a bad radio) plus 1 ms per 4 body bytes (a
@@ -1721,6 +1724,13 @@ export class SDKChatClient {
       if (watchdogTimer !== null) clearTimeout(watchdogTimer);
       watchdogTimer = setTimeout(() => {
         watchdogTimer = null;
+        // A backoff reconnect() is already scheduled (e.g. onerror escalated to
+        // 16-30 s): forcing now would cut that backoff short and defeat the flap
+        // damping. Re-arm so a cycle that hangs AFTER the backoff is still caught.
+        if (reconnectTimer !== null) {
+          armWatchdog();
+          return;
+        }
         forceReconnect();
       }, livenessMs);
     }
@@ -1740,7 +1750,9 @@ export class SDKChatClient {
       es = null;
       setConnState('reconnecting');
       if (serverPings) armWatchdog();
-      reconnectImmediate();
+      // 0-1 s jitter: a network blip (`online`) or a shared outage trips every
+      // client at once; spread the replay + ticket requests instead of herding.
+      reconnectImmediate(Math.random() * FORCED_RECONNECT_JITTER_MS);
     }
 
     const onOnline = (): void => forceReconnect();
@@ -1832,7 +1844,7 @@ export class SDKChatClient {
 
     // MAJOR #5: immediate reconnect for graceful shutdown — same replay logic as
     // reconnect() but fires in the next microtask instead of after backoff delay.
-    const reconnectImmediate = () => {
+    const reconnectImmediate = (delayMs = 0) => {
       const myEpoch = epoch;
       reconnectTimer = setTimeout(async () => {
         reconnectTimer = null;
@@ -1850,7 +1862,7 @@ export class SDKChatClient {
         }
         if (destroyed || myEpoch !== epoch) return;
         attach(ticket);
-      }, 0);
+      }, delayMs);
     };
 
     const reconnect = (attempt: number) => {
