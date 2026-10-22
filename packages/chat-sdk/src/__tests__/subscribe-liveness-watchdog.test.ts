@@ -276,6 +276,52 @@ describe('subscribe() liveness watchdog', () => {
     expect(states).toEqual(['connecting', 'connected', 'reconnecting', 'connected']);
   });
 
+  it('(10) `online` during a hung INITIAL ticket fetch yields exactly one EventSource', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    // The first-ever ticket fetch hangs (half-open link at connect time).
+    let release!: (r: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((res) => { release = res; }));
+    const onMessage = vi.fn();
+    make().subscribe('r10', { onMessage });
+    await flush();
+    expect(streams).toHaveLength(0);
+
+    win.dispatchEvent(new Event('online')); // forceReconnect -> replay -> ticket -> attach
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    expect(streams).toHaveLength(1);
+
+    // The original, abandoned ticket fetch now resolves: it must NOT attach a 2nd stream.
+    release(ok({ ticket: 'stale', expires_at: 'x' }));
+    await flush();
+    expect(streams).toHaveLength(1);
+    expect(streams.filter((s) => !s.closed)).toHaveLength(1);
+    streams[0].emit(JSON.stringify(row(1)));
+    expect(onMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('(10b) a hung initial ticket fetch that REJECTS after `online` does not start a parallel cycle', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    let fail!: (e: Error) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((_, rej) => { fail = rej; }));
+    make().subscribe('r10b', { onMessage: vi.fn() });
+    await flush();
+    win.dispatchEvent(new Event('online'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    const listsBefore = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/sdk/messages?')).length;
+    fail(new Error('boom'));
+    await vi.advanceTimersByTimeAsync(2_000); // would fire the parallel reconnect(0) backoff
+    await flush();
+    const listsAfter = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/api/sdk/messages?')).length;
+    expect(listsAfter).toBe(listsBefore);
+    expect(streams).toHaveLength(1);
+  });
+
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {
     const unsub = make().subscribe('r9', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();

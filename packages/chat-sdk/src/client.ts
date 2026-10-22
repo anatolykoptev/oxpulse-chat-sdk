@@ -1499,6 +1499,8 @@ export class SDKChatClient {
 
     const attach = (ticket: string) => {
       if (destroyed) return;
+      // Idempotent: never leave an orphaned stream behind a second attach.
+      es?.close();
       const url = `${this.#baseUrl}/api/sdk/messages/subscribe?ticket=${encodeURIComponent(ticket)}&after_seq=${lastSeq}`;
       es = new EventSource(url);
       // A fresh stream must prove itself: with pings known, arm now so a stream
@@ -1914,16 +1916,23 @@ export class SDKChatClient {
     };
 
     // Initial connection: fetch ticket then open EventSource.
+    // Epoch-guarded like every reconnect cycle: an `online` / watchdog
+    // forceReconnect during a hung initial ticket fetch supersedes it, so the
+    // original must neither attach a 2nd EventSource nor start a parallel
+    // reconnect(0) cycle (E2EE rooms would double-append frames).
     (async () => {
       if (destroyed) return;
+      const myEpoch = epoch;
       let ticket: string;
       try {
         ticket = await this.#fetchSubscribeTicket(roomId, lastSeq);
       } catch (err) {
+        if (destroyed || myEpoch !== epoch) return;
         reportError(err);
         reconnect(0);
         return;
       }
+      if (destroyed || myEpoch !== epoch) return;
       attach(ticket);
     })();
 
