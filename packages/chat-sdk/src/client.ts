@@ -1469,9 +1469,9 @@ export class SDKChatClient {
     // must carry data: EventSource swallows `:` comments and the HTML SSE spec
     // discards an event with an empty data buffer, so `addEventListener('ping')`
     // would never fire for a bare `event: ping`. A half-open link never fires onerror, so without this the
-    // stream stalls silently. `serverPings` is sticky per subscription: armed
-    // only after a ping has been seen, so a server that does not ping is never
-    // churned on a quiet room.
+    // stream stalls silently. `serverPings` is per stream (reset on every attach):
+    // armed only after a ping has been seen on the current stream, so a server
+    // that does not ping is never churned on a quiet room.
     const livenessMs = args.livenessTimeoutMs ?? DEFAULT_LIVENESS_TIMEOUT_MS;
     let serverPings = false;
     let lastActivityAt = Date.now();
@@ -1514,10 +1514,15 @@ export class SDKChatClient {
       es?.close();
       const url = `${this.#baseUrl}/api/sdk/messages/subscribe?ticket=${encodeURIComponent(ticket)}&after_seq=${lastSeq}`;
       es = new EventSource(url);
-      // A fresh stream must prove itself: with pings known, arm now so a stream
-      // that is dead on arrival is recycled instead of waiting forever.
+      // Pings are keyed to the CURRENT stream: a re-attach may land on a server
+      // instance that does not ping (mixed-version deploy), so forget the old
+      // stream's pings and its armed timer; the first ping on this stream re-arms.
+      serverPings = false;
+      if (watchdogTimer !== null) {
+        clearTimeout(watchdogTimer);
+        watchdogTimer = null;
+      }
       lastActivityAt = Date.now();
-      if (serverPings) armWatchdog();
 
       // Phase 2: parse `event: connected` prelude emitted by server (Wave 3.2).
       // Carries crypto_mode for the room. Validate against configured option and

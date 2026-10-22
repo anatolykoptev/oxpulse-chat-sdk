@@ -464,6 +464,20 @@ describe('subscribe() liveness watchdog', () => {
     expect(streams).toHaveLength(2);
   });
 
+  it('(15) pings are tracked per stream: a re-attached stream that never pings is not churned', async () => {
+    make().subscribe('r15', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+    await flush();
+    streams[0].emitNamed('ping', '1');
+    await vi.advanceTimersByTimeAsync(THRESHOLD + 1); // old (pinging) stream goes silent -> recycled
+    await flush();
+    expect(streams).toHaveLength(2);
+    // Mixed-version deploy: the replacement server instance does not ping. Quiet room.
+    await vi.advanceTimersByTimeAsync(THRESHOLD * 5);
+    await flush();
+    expect(streams).toHaveLength(2);
+    expect(streams[1].closed).toBe(false);
+  });
+
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {
     const unsub = make().subscribe('r9', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();
