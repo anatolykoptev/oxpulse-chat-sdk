@@ -1493,7 +1493,12 @@ export class SDKChatClient {
         // A throwing UI callback must not wedge the stream.
       }
     };
-    setConnState('connecting');
+    // Deferred to a microtask: subscribe() has not returned its unsubscribe handle
+    // yet, and a synchronous callback would run before the caller could capture it
+    // (e.g. `const off = subscribe(..., { onConnectionState: () => off() })` -> TDZ).
+    queueMicrotask(() => {
+      if (!destroyed) setConnState('connecting');
+    });
 
     // W6 E2EE: register this subscriber on the room's shared serial decrypt
     // chain. Refcounted so a co-subscriber (widget remount / reconnect race)

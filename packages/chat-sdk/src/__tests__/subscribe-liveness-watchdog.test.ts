@@ -272,8 +272,8 @@ describe('subscribe() liveness watchdog', () => {
       livenessTimeoutMs: THRESHOLD,
       onConnectionState: (s) => states.push(s),
     });
-    expect(states).toEqual(['connecting']);
     await flush();
+    expect(states).toEqual(['connecting']);
     streams[0].emitNamed('connected', JSON.stringify({ crypto_mode: 'plaintext' }));
     streams[0].emitNamed('ping', '1');
     expect(states.at(-1)).toBe('connected');
@@ -507,6 +507,21 @@ describe('subscribe() liveness watchdog', () => {
     } finally {
       debug.mockRestore();
     }
+  });
+
+  it('(17) the initial `connecting` is not delivered synchronously inside subscribe()', async () => {
+    const states: string[] = [];
+    const unsub = make().subscribe('r17', { onMessage: vi.fn(), onConnectionState: (s) => states.push(s) });
+    expect(states).toEqual([]); // the caller does not hold the unsubscribe handle's consumer state yet
+    await flush();
+    expect(states).toEqual(['connecting']);
+    unsub();
+
+    // Unsubscribed before the microtask: nothing is delivered after the fact.
+    const late: string[] = [];
+    make().subscribe('r17b', { onMessage: vi.fn(), onConnectionState: (s) => late.push(s) })();
+    await flush();
+    expect(late).toEqual([]);
   });
 
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {

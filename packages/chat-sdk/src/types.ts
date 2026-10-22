@@ -570,7 +570,9 @@ export interface SubscribeArgs {
    * "connecting…" indicator. `connecting` = initial open, `connected` = the
    * stream is delivering (prelude / message / ping seen), `reconnecting` = the
    * stream dropped or went silent and a replay + re-attach is under way.
-   * Fires on transitions only.
+   * Fires on transitions only. Never called synchronously from inside
+   * `subscribe()`: the initial `connecting` is delivered on a microtask, after the
+   * unsubscribe handle has been returned (and not at all if already unsubscribed).
    */
   onConnectionState?: (state: SubscribeConnectionState) => void;
   /**
