@@ -1683,12 +1683,7 @@ export class SDKChatClient {
         });
       }
 
-      // MAJOR #5: server graceful shutdown — stream.rs Phase-2 emits
-      // `event: shutdown\ndata: server_restart` before closing the stream.
-      // Contract: client reconnects immediately (no backoff) and replays from
-      // lastSeq so no messages are lost across graceful server restarts.
-      // Without this handler the stream close fires onerror with a 800-1200ms
-      // exponential-backoff delay; with it we skip the delay.
+      // Liveness keep-alive: `event: ping` / `data: 1` (see the watchdog notes above).
       es.addEventListener('ping', () => {
         if (destroyed) return;
         serverPings = true;
@@ -1696,6 +1691,12 @@ export class SDKChatClient {
         noteActivity();
       });
 
+      // MAJOR #5: server graceful shutdown — stream.rs Phase-2 emits
+      // `event: shutdown\ndata: server_restart` before closing the stream.
+      // Contract: client reconnects immediately (no backoff) and replays from
+      // lastSeq so no messages are lost across graceful server restarts.
+      // Without this handler the stream close fires onerror with a 800-1200ms
+      // exponential-backoff delay; with it we skip the delay.
       es.addEventListener('shutdown', () => {
         es?.close();
         es = null;
