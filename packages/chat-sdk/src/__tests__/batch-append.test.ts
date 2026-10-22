@@ -128,11 +128,13 @@ describe('SDKChatClient.batchAppend()', () => {
     expect(wireItem['product_meta']).toEqual({ price: 99 });
   });
 
-  it('throws SDKChatError with code network on fetch failure', async () => {
+  it('throws SDKChatError with code network on persistent fetch failure', async () => {
+    // Retry is covered in batch-append-retry.test.ts; here a single attempt keeps
+    // this test about the error mapping.
     fetchSpy.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const client = makeClient();
     await expect(
-      client.batchAppend(ROOM_ID, [{ msgId: '00000000-0000-4000-8000-000000000001' }]),
+      client.batchAppend(ROOM_ID, [{ msgId: '00000000-0000-4000-8000-000000000001' }], { maxAttempts: 1 }),
     ).rejects.toSatisfy((err: unknown) => {
       return err instanceof SDKChatError && err.code === 'network';
     });
