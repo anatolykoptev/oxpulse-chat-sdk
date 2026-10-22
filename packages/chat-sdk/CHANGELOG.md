@@ -1,5 +1,27 @@
 # @oxpulse/chat-sdk — Changelog
 
+## 3.6.0
+
+### Minor Changes
+
+- d615660: `batchAppend()` no longer hangs forever or fails on the first blip: each attempt has a timeout and transient failures are retried.
+
+  Per-attempt timeout is 20 s plus 1 ms per 4 body bytes (a 32 kbps floor for EDGE-class links), capped at 2 min. Network errors, timeouts, 429 (honouring `Retry-After`, up to 60 s) and 5xx are retried with backoff and jitter, up to 4 attempts. Every other 4xx fails immediately. New optional third argument `{ timeoutMs, maxAttempts, signal }`; the signal also cancels backoff waits. When every attempt fails the call throws the new `SDKChatRetryError` (a subclass of `SDKChatError`, `code`/`statusCode` of the last failure, plus `attempts`).
+
+  Retrying is safe because the body is built once and re-sent byte-identical, and the server applies the batch in one transaction with `ON CONFLICT (app_id, room_id, msg_id)`; an applied-but-unacknowledged batch is a no-op on re-send. Callers must reuse the same `msgId`s when they re-call `batchAppend` after an error.
+
+  Behaviour change: a call that used to reject on the first network error or 5xx now takes up to roughly 4 x timeout to reject. Pass `{ maxAttempts: 1 }` for the old single-shot behaviour.
+
+- c9e012f: `subscribe()` now recovers from a half-open SSE link (NAT drop, captive Wi-Fi, mobile handover) instead of stalling silently.
+
+  EventSource only fires `onerror` when the socket closes, which a half-open link never does. The stream now has a liveness watchdog: if nothing (message, transient event or the server's `ping` keep-alive) arrives for `livenessTimeoutMs` (default 45 s, `0` disables), the stream is torn down and re-attached through the existing reconnect path, which replays from the last delivered seq. The reconnect also fires promptly on the browser `online` event, and on `visibilitychange` to visible when the stream has gone stale.
+
+  New `SubscribeArgs.onConnectionState` reports `connecting` / `connected` / `reconnecting` so an app can show a "connecting…" indicator.
+
+  The watchdog arms only after the first named `ping` event is seen on the current stream. The server's current keep-alive is an SSE comment (`: keepalive`), which EventSource never surfaces, so until the server emits `event: ping` WITH non-empty data (`data: 1`; an event with an empty data buffer is never dispatched by a browser) the watchdog stays dormant and behaviour is unchanged (the `online` reconnect and `onConnectionState` work regardless). Superseded reconnect cycles are now abandoned by an epoch check, so a replay fetch that hangs on a dead link cannot deliver or attach a second stream after the watchdog restarts the cycle.
+
+  Forced reconnects (`online`, watchdog, stale-on-visible) are jittered over 0-1 s and logged at debug level with their reason; a watchdog expiry never cuts an in-progress reconnect backoff short. Abandoned reconnect cycles abort their replay/ticket requests, a multi-page replay that is still making progress is not restarted, the initial connect is epoch-guarded (no duplicate EventSource when `online` fires during a hung first ticket fetch), and pings are tracked per stream. `onConnectionState('connecting')` is delivered on a microtask, never synchronously inside `subscribe()`.
+
 ## 3.5.0
 
 ### Minor Changes
