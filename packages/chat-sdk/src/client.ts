@@ -1749,7 +1749,7 @@ export class SDKChatClient {
           armWatchdog();
           return;
         }
-        forceReconnect();
+        forceReconnect('liveness-timeout');
       }, livenessMs);
     }
 
@@ -1757,8 +1757,13 @@ export class SDKChatClient {
     // normal replay path, which resumes after lastSeq. Also re-arms the
     // watchdog so a cycle that itself hangs (replay/ticket fetch on a dead
     // link) is abandoned and restarted after another livenessMs.
-    function forceReconnect(): void {
+    function forceReconnect(reason: 'liveness-timeout' | 'online' | 'visibility-stale'): void {
       if (destroyed) return;
+      console.debug('[chat-sdk] subscribe: forced reconnect', {
+        roomId,
+        reason,
+        silentMs: Date.now() - lastActivityAt,
+      });
       epoch += 1;
       cycleAbort.abort();
       cycleAbort = new AbortController();
@@ -1775,12 +1780,12 @@ export class SDKChatClient {
       reconnectImmediate(Math.random() * FORCED_RECONNECT_JITTER_MS);
     }
 
-    const onOnline = (): void => forceReconnect();
+    const onOnline = (): void => forceReconnect('online');
     const onVisibility = (): void => {
       if (globalThis.document?.visibilityState !== 'visible') return;
       // Timers are frozen in background tabs, so judge staleness by wall clock.
       if (serverPings && livenessMs > 0 && Date.now() - lastActivityAt > livenessMs) {
-        forceReconnect();
+        forceReconnect('visibility-stale');
       }
     };
     globalThis.addEventListener?.('online', onOnline);

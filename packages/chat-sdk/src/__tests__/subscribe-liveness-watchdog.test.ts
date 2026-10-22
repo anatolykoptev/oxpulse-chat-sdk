@@ -478,6 +478,37 @@ describe('subscribe() liveness watchdog', () => {
     expect(streams[1].closed).toBe(false);
   });
 
+  it('(16) every forced reconnect logs its reason (debug)', async () => {
+    const win = new EventTarget();
+    vi.stubGlobal('addEventListener', win.addEventListener.bind(win));
+    vi.stubGlobal('removeEventListener', win.removeEventListener.bind(win));
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    vi.stubGlobal('document', doc);
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    try {
+      make().subscribe('r16', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
+      await flush();
+      streams[0].emitNamed('ping', '1');
+      await vi.advanceTimersByTimeAsync(THRESHOLD + 1);
+      await flush();
+      streams[1].emitNamed('ping', '1');
+      win.dispatchEvent(new Event('online'));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+      streams[2].emitNamed('ping', '1');
+      vi.setSystemTime(Date.now() + THRESHOLD + 5_000);
+      doc.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+      const reasons = debug.mock.calls
+        .filter((c) => String(c[0]).startsWith('[chat-sdk] subscribe: forced reconnect'))
+        .map((c) => (c[1] as { reason: string }).reason);
+      expect(reasons).toEqual(['liveness-timeout', 'online', 'visibility-stale']);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
   it('teardown clears the watchdog (no reconnect after unsubscribe)', async () => {
     const unsub = make().subscribe('r9', { onMessage: vi.fn(), livenessTimeoutMs: THRESHOLD });
     await flush();
