@@ -460,6 +460,7 @@ export class SDKChatClient {
     ciphersuite?: string;
     keyPackageDirectoryUrl: string;
     onEpochAuthenticator?: (roomId: string, authenticator: Uint8Array) => void;
+    onWarning?: (warning: import('./mls-provider.js').MlsWarning) => void;
     stateStore?: import('./mls-state-store.js').MLSStateStore;
     authService: import('ts-mls').AuthenticationService;
   } | null = null;
@@ -675,6 +676,9 @@ export class SDKChatClient {
         jwt: this.#jwt,
         ...(mlsOpts.onEpochAuthenticator !== undefined
           ? { onEpochAuthenticator: mlsOpts.onEpochAuthenticator }
+          : {}),
+        ...(mlsOpts.onWarning !== undefined
+          ? { onWarning: mlsOpts.onWarning }
           : {}),
         ...(mlsOpts.stateStore !== undefined ? { stateStore: mlsOpts.stateStore } : {}),
         authService: mlsOpts.authService,

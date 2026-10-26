@@ -41,7 +41,9 @@ export type SDKChatErrorCode =
   /** MLS: IndexedDB is unavailable for state persistence (private browsing, SSR). */
   | 'mls_idb_unavailable'
   /** MLS: No AuthenticationService provided (KCI protection required). */
-  | 'mls_auth_service_required';
+  | 'mls_auth_service_required'
+  /** MLS: inbound fetch rate-limited by the server (429) after all retries exhausted. */
+  | 'mls_rate_limited';
 
 /**
  * Typed error thrown by SDKChatClient for all API failures.
