@@ -359,7 +359,11 @@ export function verifyAuthSig(
   try {
     const nonce   = hmac(sha256, peerMacKey, concatBytes(utf8(LABEL_AUTH_NONCE), sessionId, canonicalTranscript));
     const message = concatBytes(utf8(LABEL_AUTH_SIGN), nonce);
-    return ed25519.verify(receivedSig, message, peerLongTermPub);
+    // zip215:false = RFC 8032 strict: rejects non-canonical A/R encodings and
+    // small-order keys. noble defaults to the lax ZIP-215 rule, which accepts a
+    // small-order peer key with an identity signature over ANY message. Every
+    // honest signer (computeAuthSig above, noble ed25519.sign) is canonical.
+    return ed25519.verify(receivedSig, message, peerLongTermPub, { zip215: false });
   } catch {
     return false;
   }
