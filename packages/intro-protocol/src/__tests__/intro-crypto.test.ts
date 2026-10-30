@@ -234,6 +234,35 @@ describe('buildAuthTranscript + AUTH MAC/SIG', () => {
     const sig = computeAuthSig(priv, alice, sessionId, transcript);
     expect(verifyAuthSig(otherPub, alice, sessionId, transcript, sig)).toBe(false);
   });
+  // Strict Ed25519 (zip215:false). Reverting verifyAuthSig to the lax default
+  // (the ed25519.verify call in intro-crypto.ts) turns the second test RED.
+  it('AUTH SIG accepts every signature computeAuthSig produces (random keys)', () => {
+    const { alice } = deriveMacKeys(new Uint8Array(32).fill(7));
+    const sessionId = new Uint8Array(16);
+    const transcript = new Uint8Array([1, 2, 3, 4, 5]);
+    for (let i = 0; i < 20; i++) {
+      const priv = randomBytes(32);
+      const sig = computeAuthSig(priv, alice, sessionId, transcript);
+      expect(verifyAuthSig(ed25519.getPublicKey(priv), alice, sessionId, transcript, sig)).toBe(true);
+    }
+  });
+  it('AUTH SIG rejects a small-order / non-canonical peer key with a crafted signature', () => {
+    const { alice } = deriveMacKeys(new Uint8Array(32).fill(7));
+    const sessionId = new Uint8Array(16);
+    const transcript = new Uint8Array([1, 2, 3, 4, 5]);
+    // identity point (y=1): small-order. R = identity, S = 0 verifies for ANY
+    // message under ZIP-215, so the peer key would "sign" without a secret.
+    const identity = new Uint8Array(32); identity[0] = 1;
+    // y = p+1 (0xee 0xff.. 0x7f): the NON-canonical encoding of the identity.
+    const nonCanonical = new Uint8Array(32).fill(0xff); nonCanonical[0] = 0xee; nonCanonical[31] = 0x7f;
+    for (const key of [identity, nonCanonical]) {
+      const sig = new Uint8Array(64); sig.set(key, 0);
+      expect(
+        verifyAuthSig(key, alice, sessionId, transcript, sig),
+        'crafted identity-point signature must be rejected (strict Ed25519)',
+      ).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
