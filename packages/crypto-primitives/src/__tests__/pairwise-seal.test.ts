@@ -227,6 +227,30 @@ describe('pairwise-seal', () => {
 		).rejects.toThrow(/sender signature invalid/i);
 	});
 
+	// Discriminating strict-mode test: with the identity point as pub and the
+	// identity signature (R = identity, S = 0), ZIP-215 accepts for ANY message
+	// (cofactored equation 8(SB - R - kA) = O), strict RFC 8032 rejects. Under
+	// zip215:true the sig check passes and openMessage fails later at AEAD, so the
+	// error message — not just "throws" — pins the strict check.
+	it('SEC-CR-002: openMessage rejects a ZIP-215-valid identity signature at the sig check', async () => {
+		const sender = makeSender();
+		const recipient = makeRecipient();
+		const { env } = await seal(sender, recipient, new TextEncoder().encode('zip215'));
+		const identity = new Uint8Array(32);
+		identity[0] = 0x01;
+		const forged = env.slice();
+		forged.fill(0, 30, 94);
+		forged[30] = 0x01; // R = identity (encoding y=1), S = 0
+		await expect(
+			openMessage({
+				envelopeBytes: forged,
+				recipientX25519Priv: recipient.x.secretKey,
+				recipientX25519Pub: recipient.x.publicKey,
+				expectedSenderEd25519Pub: identity,
+			}),
+		).rejects.toThrow(/sender signature invalid/i);
+	});
+
 	// ---------------------------------------------------------------------------
 	// #288 regression: authenticated binding transcript (v2).
 	// Every envelope metadata field is folded into a SHA-256 bindingDigest that
