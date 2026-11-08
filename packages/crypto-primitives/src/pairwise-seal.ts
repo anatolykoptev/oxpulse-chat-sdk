@@ -17,6 +17,9 @@ const BINDING_FLAGS_LEN = 1;
 const BINDING_MSGID_LEN = 16;
 const BINDING_RECIPIENT_ADDR_LEN = 8;
 const BINDING_SENDER_PUB_LEN = 32;
+// Minimum inner ciphertext: eph_pub[32] ‖ nonce[12] ‖ AES-GCM tag[16]. Shared by
+// openMessage and verifyEnvelopeSender so their accept sets cannot drift.
+const IC_MIN_BYTES = 32 + 12 + 16;
 const BINDING_TRANSCRIPT_LEN =
 	AAD_PREFIX.length +
 	BINDING_VERSION_LEN +
@@ -245,7 +248,7 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	}
 
 	// 3. Parse IC fields
-	if (env.innerCiphertext.byteLength < 32 + 12 + 16) {
+	if (env.innerCiphertext.byteLength < IC_MIN_BYTES) {
 		throw new Error('crypto-primitives/pairwise: inner ciphertext too short');
 	}
 	const ephPub = env.innerCiphertext.subarray(0, 32);
@@ -353,6 +356,8 @@ export async function verifyEnvelopeSender(
 	}
 	try {
 		const env = decodeMessageEnvelope(envelopeBytes);
+		// Same minimum as openMessage: an IC that could never open is not accepted.
+		if (env.innerCiphertext.byteLength < IC_MIN_BYTES) return false;
 		const bindingDigest = computeBindingDigest(
 			0x02,
 			env.flags,

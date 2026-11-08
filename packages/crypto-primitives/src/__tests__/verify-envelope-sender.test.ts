@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { x25519, ed25519 } from '@noble/curves/ed25519.js';
 import { sealMessage, openMessage, verifyEnvelopeSender } from '../pairwise-seal.ts';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { encodeMessageEnvelope } from '../envelope.ts';
 import * as barrel from '../index.ts';
 
 // Wire offsets (envelope.ts): magic[0..4) version[4] flags[5] msgId[6..22)
@@ -116,5 +118,34 @@ describe('verifyEnvelopeSender', () => {
 		const env = await sealFor(peer, otherDevice.publicKey);
 		await expect(verifyEnvelopeSender(env, new Uint8Array(31))).rejects.toThrow(TypeError);
 		await expect(verifyEnvelopeSender(env, new Uint8Array(33))).rejects.toThrow(TypeError);
+	});
+
+	it('false for a correctly SIGNED envelope whose IC is below the openMessage minimum', async () => {
+		// Independent transcript: SHA-256("oxp/pw/v1" ‖ 02 ‖ flags ‖ msgId ‖ addr ‖ pub).
+		const msgId = crypto.getRandomValues(new Uint8Array(16));
+		const addr = sha256(otherDevice.publicKey).slice(0, 8);
+		const build = (icLen: number) => {
+			const ic = crypto.getRandomValues(new Uint8Array(icLen));
+			const t = new Uint8Array(67);
+			t.set(new TextEncoder().encode('oxp/pw/v1'), 0);
+			t[9] = 0x02;
+			t[10] = 0;
+			t.set(msgId, 11);
+			t.set(addr, 27);
+			t.set(peer.publicKey, 35);
+			const signed = new Uint8Array(64);
+			signed.set(sha256(t), 0);
+			signed.set(sha256(ic), 32);
+			return encodeMessageEnvelope({
+				flags: 0,
+				msgId,
+				recipientAddr: addr,
+				senderSig: ed25519.sign(signed, peer.secretKey),
+				innerCiphertext: ic,
+			});
+		};
+		expect(await verifyEnvelopeSender(build(60), peer.publicKey)).toBe(true); // boundary
+		expect(await verifyEnvelopeSender(build(59), peer.publicKey)).toBe(false);
+		expect(await verifyEnvelopeSender(build(0), peer.publicKey)).toBe(false);
 	});
 });
