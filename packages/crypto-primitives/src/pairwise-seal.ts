@@ -67,6 +67,26 @@ function computeBindingDigest(
 	return sha256(transcript);
 }
 
+/**
+ * Verifies `senderSig` over `bindingDigest ‖ sha256(IC)` — the single
+ * signed-bytes construction shared by `openMessage` and
+ * `verifyEnvelopeSender`. zip215:false aligns with server
+ * dalek::verify_strict (RFC 8032 strict). Returns false on any invalid
+ * signature; noble throws on malformed key/sig lengths, which callers
+ * surface or swallow as appropriate.
+ */
+function verifySenderSig(
+	env: MessageEnvelopeV2,
+	bindingDigest: Uint8Array,
+	senderEd25519Pub: Uint8Array,
+): boolean {
+	const icHash = sha256(env.innerCiphertext);
+	const signedBytes = new Uint8Array(bindingDigest.length + icHash.length);
+	signedBytes.set(bindingDigest, 0);
+	signedBytes.set(icHash, bindingDigest.length);
+	return ed25519.verify(env.senderSig, signedBytes, senderEd25519Pub, { zip215: false });
+}
+
 export interface SealMessageArgs {
 	plaintext: Uint8Array;
 	recipientX25519Pub: Uint8Array; // 32 bytes
@@ -246,16 +266,7 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 	);
 
 	// 5. Verify sender signature — covers bindingDigest ‖ sha256(IC) (ADR-6).
-	//    zip215:false aligns with server dalek::verify_strict (RFC 8032 strict).
-	const icHash = sha256(env.innerCiphertext);
-	const signedBytes = new Uint8Array(bindingDigest.length + icHash.length);
-	signedBytes.set(bindingDigest, 0);
-	signedBytes.set(icHash, bindingDigest.length);
-	if (
-		!ed25519.verify(env.senderSig, signedBytes, args.expectedSenderEd25519Pub, {
-			zip215: false,
-		})
-	) {
+	if (!verifySenderSig(env, bindingDigest, args.expectedSenderEd25519Pub)) {
 		throw new Error('crypto-primitives/pairwise: sender signature invalid');
 	}
 
@@ -300,5 +311,57 @@ export async function openMessage(args: OpenMessageArgs): Promise<OpenMessageRes
 		// Zeroize shared secret + KDF key on ALL paths (#282).
 		zeroize(ss);
 		zeroize(kdfKey);
+	}
+}
+
+/**
+ * Signature-only check of a pairwise-sealed envelope: was it signed by
+ * `expectedSenderEd25519Pub`? Needs no recipient key and never decrypts, so
+ * it works on an envelope addressed to ANOTHER device of the caller (which
+ * `openMessage` rejects at its recipient-address check before reaching the
+ * signature).
+ *
+ * Decodes with the same codec as `openMessage`, recomputes the same
+ * `computeBindingDigest` from the public wire fields (version, flags, msgId,
+ * recipientAddr) plus the expected sender key, and verifies `senderSig` over
+ * `bindingDigest ‖ sha256(IC)` with strict Ed25519 (`zip215: false`).
+ *
+ * The wire format carries no sender key — the caller supplies the pinned one,
+ * so "embedded pub equals expected" is implied: a different key yields a
+ * different digest and the signature fails.
+ *
+ * Returns `false` (never throws) for malformed, truncated, v1, forged or
+ * wrong-signer envelopes, and for a malformed signature. Throws `TypeError`
+ * only on programmer error: `expectedSenderEd25519Pub` is not 32 bytes.
+ *
+ * Does NOT prove: that the envelope is a chat message rather than a control
+ * frame (that is only knowable from the decrypted payload / flags semantics);
+ * that the ciphertext decrypts, is fresh, or is not replayed; or that the
+ * recipient is who the caller believes (only that the peer signed THIS
+ * ciphertext addressed to THIS `recipientAddr`, which is a public 8-byte
+ * hash). It authenticates authorship of this ciphertext, nothing more.
+ */
+export async function verifyEnvelopeSender(
+	envelopeBytes: Uint8Array,
+	expectedSenderEd25519Pub: Uint8Array,
+): Promise<boolean> {
+	if (
+		!(expectedSenderEd25519Pub instanceof Uint8Array) ||
+		expectedSenderEd25519Pub.byteLength !== BINDING_SENDER_PUB_LEN
+	) {
+		throw new TypeError('crypto-primitives/pairwise: expectedSenderEd25519Pub must be 32 bytes');
+	}
+	try {
+		const env = decodeMessageEnvelope(envelopeBytes);
+		const bindingDigest = computeBindingDigest(
+			0x02,
+			env.flags,
+			env.msgId,
+			env.recipientAddr,
+			expectedSenderEd25519Pub,
+		);
+		return verifySenderSig(env, bindingDigest, expectedSenderEd25519Pub);
+	} catch {
+		return false;
 	}
 }
