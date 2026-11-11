@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // CDN publisher for @oxpulse/chat-widget.
 //
-// Publishes the esbuild CDN bundle (dist-cdn/) to the krolik box file-server
+// Publishes the esbuild CDN bundle (dist-cdn/) to the CDN file-server
 // via rsync.  Assumes `build:cdn` has already run (dist-cdn/ exists).
 //
 // Key properties:
@@ -43,8 +43,8 @@
 // complexity.  Not implemented; documented here for future reference.
 //
 // Required env:
-//   CDN_SSH_HOST     box hostname or IP (e.g. "192.9.243.148")
-//   CDN_SSH_USER     ssh user (e.g. "krolik")
+//   CDN_SSH_HOST     box hostname or IP (e.g. "192.0.2.10")
+//   CDN_SSH_USER     ssh user (e.g. "deploy")
 //   CDN_DEPLOY_KEY   private ed25519 key content (PEM); written to a tmp file
 //   CDN_SSH_HOST_KEY box's SSH host public key line, WITHOUT the hostname
 //                    prefix (just "ssh-ed25519 AAAA...") — pinned into a
@@ -65,7 +65,7 @@
 //   DRY_RUN=1       skip actual remote writes; print plan; exit 0
 //
 // SSH authorised_keys line the operator must install on the box:
-//   command="rrsync -wo /home/krolik/deploy/krolik-server/files/cdn-oxpulse",restrict ssh-ed25519 <PUBKEY> cdn-deploy@oxpulse-chat-sdk
+//   command="rrsync -wo <CDN_ROOT>",restrict ssh-ed25519 <PUBKEY> cdn-deploy@oxpulse-chat-sdk
 //
 // This jails the key to write-only rsync access on the CDN directory via rrsync.
 // The key can rsync files in but cannot read or delete any existing content.
@@ -245,7 +245,7 @@ if (!DRY_RUN) {
 
 const SSH_TARGET = `${CDN_SSH_USER}@${CDN_SSH_HOST}`;
 
-// rrsync jail maps to /home/krolik/deploy/krolik-server/files/cdn-oxpulse
+// rrsync jail maps to <CDN_ROOT> on the host
 // so rsync paths are RELATIVE to that root.
 const REMOTE_WIDGET_BASE = 'widget';
 const REMOTE_VERSION_DIR = `${REMOTE_WIDGET_BASE}/${VERSION}`;

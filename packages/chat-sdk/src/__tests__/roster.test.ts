@@ -16,7 +16,7 @@
  * SDK iss=oxpulse) is enforced SERVER-SIDE by the /api/sdk/tokens exchange
  * endpoint (Validation::new(EdDSA) + iss check). The client has no mechanism to
  * distinguish issuers — it receives opaque string tokens and forwards them. A
- * client-side tautology asserting 'piter-now' !== 'oxpulse' on literal objects
+ * client-side tautology asserting an app issuer !== 'oxpulse' on literal objects
  * provides no coverage against a real regression. Tests belong where enforcement
  * lives: server integration tests for the /api/sdk/tokens exchange. Removed.
  *
@@ -172,7 +172,7 @@ describe('FF6 alg-pin: mintNamedWriteToken rejects alg:none and alg:HS256 from m
   function makeFakeToken(alg: string): string {
     const header = btoa(JSON.stringify({ alg, typ: 'JWT' }))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    const payload = btoa(JSON.stringify({ iss: 'piter-now', sub: 'ep_x' }))
+    const payload = btoa(JSON.stringify({ iss: 'issuer-a', sub: 'ep_x' }))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     return `${header}.${payload}.fakesig`;
   }

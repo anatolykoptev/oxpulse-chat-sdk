@@ -18,7 +18,7 @@ related:
 > The full, tiered adversary model (passive network observer / nation-state
 > active adversary / compromised partner-edge relay operator) lives in the
 > parent `oxpulse-chat` repo:
-> [`/home/krolik/src/oxpulse-chat/docs/strategy/THREAT-MODEL.md`](/home/krolik/src/oxpulse-chat/docs/strategy/THREAT-MODEL.md).
+> `docs/strategy/THREAT-MODEL.md` in the `oxpulse-chat` repo.
 > Read that document first for the general framing (adversary tiers,
 > capabilities, non-capabilities). This document does not repeat it — it
 > adds only the SDK-specific framing that doc's Tier 1-3 model doesn't

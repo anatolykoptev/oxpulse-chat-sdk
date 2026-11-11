@@ -83,7 +83,7 @@ Mechanics:
   FRESH chain from `Promise.resolve()` that ran **concurrently** with the
   orphaned chain's in-flight unseal, desyncing the ratchet. This was
   BUG #1 (HIGH) in the whole-repo audit
-  (`~/deploy/krolik-server/reports/oxpulse-chat-sdk/reviews/repo-council/2026-07-02.md`).
+  (repo-council review of 2026-07-02, in the private reports store).
 - **Generation counter fixes the deferred-delete race.** `release()` doesn't
   delete synchronously at refcount 0 — it schedules a delete that fires only
   after the captured chain tail (`draining`) settles, so an in-flight unseal

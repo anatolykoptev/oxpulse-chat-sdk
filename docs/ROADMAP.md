@@ -17,7 +17,7 @@ related:
 > a passive observer cannot tell dict-mode from dictless.
 >
 > **Master plan** (cross-repo, authoritative):
-> `~/deploy/krolik-server/plans/oxpulse-chat/2026-05-04-1kbps-resilience-plan.md`
+> `plans/oxpulse-chat/2026-05-04-1kbps-resilience-plan.md` in the private plans store
 > and `docs/architecture/wire-optimization.md` in the `oxpulse-chat` repo.
 > This document is the SDK-side tracking view — it mirrors the phase ladder
 > from the perspective of what ships in **this** repo.
