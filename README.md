@@ -30,6 +30,10 @@ The workspace tooling (`pnpm`, scripts) requires **Node.js >= 22** (set in the r
 
 The published packages (`@oxpulse/wire-codec`, `@oxpulse/chat-sdk`, `@oxpulse/chat-widget`) declare **Node.js >= 18** — this is the real runtime floor for consumers. The two floors are intentional: workspace tooling wants modern Node.js features; published artifacts run in a wider range of environments.
 
+## Contributing
+
+Setup, the CI gate and the changeset flow are in [CONTRIBUTING.md](CONTRIBUTING.md); release mechanics are in [RELEASING.md](RELEASING.md); every document is indexed in [docs/INDEX.md](docs/INDEX.md).
+
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE) for details.
