@@ -38,6 +38,7 @@ export {
 export {
 	sealMessage,
 	openMessage,
+	verifyEnvelopeSender,
 	type SealMessageArgs,
 	type OpenMessageArgs,
 	type OpenMessageResult,
