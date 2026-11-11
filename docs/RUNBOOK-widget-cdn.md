@@ -1,14 +1,19 @@
 # Runbook: Widget CDN Operations
 
 CDN root: `https://cdn.oxpulse.chat/widget/`
-Served dir on host: `$CDN_ROOT/widget/` (`CDN_ROOT` is the CDN file-server directory configured on the host)
+Served dir on host: `$CDN_ROOT/widget/`
 Caddy site config: `config/caddy/cdn.oxpulse.chat.caddy` in the infrastructure repo
 
 ---
 
 ## 1. Re-run the manual publish (upgrade or patch)
 
-Run from the `oxpulse-chat-sdk` repo root (requires Node >= 22 + pnpm):
+Run from the `oxpulse-chat-sdk` repo root (requires Node >= 22 + pnpm).
+
+Set `CDN_ROOT` to the CDN document root on the host that serves the widget
+(the directory the CDN file server is configured to serve). Every path below is
+built from it with `${CDN_ROOT:?set CDN_ROOT first}`, so an unset variable
+aborts the command instead of resolving to `/widget/<version>`.
 
 ```bash
 # Build the CDN bundle (outputs to packages/chat-widget/dist-cdn/)
@@ -22,14 +27,14 @@ openssl dgst -sha384 -binary packages/chat-widget/dist-cdn/index.js \
 
 # Publish to the CDN host directory
 VER=$(node -p "require('./packages/chat-widget/package.json').version")
-DEST="$CDN_ROOT/widget/${VER}"
+DEST="${CDN_ROOT:?set CDN_ROOT first}/widget/${VER}"
 mkdir -p "$DEST"
 cp packages/chat-widget/dist-cdn/index.js "$DEST/"
 cp packages/chat-widget/dist-cdn/zstd.wasm "$DEST/"
 
 # Update the 'latest' convenience symlink
 ln -sfn "${VER}" \
-  $CDN_ROOT/widget/latest
+  "${CDN_ROOT:?set CDN_ROOT first}/widget/latest"
 
 # Smoke-check
 curl -sI "https://cdn.oxpulse.chat/widget/${VER}/index.js" \
@@ -55,7 +60,7 @@ git -C ~/src/oxpulse-chat-sdk checkout "v${VER}"
 pnpm -F @oxpulse/chat-widget build:cdn
 
 # Copy (same steps as §1 above, skip the latest symlink update)
-DEST="$CDN_ROOT/widget/${VER}"
+DEST="${CDN_ROOT:?set CDN_ROOT first}/widget/${VER}"
 mkdir -p "$DEST"
 cp packages/chat-widget/dist-cdn/index.js "$DEST/"
 cp packages/chat-widget/dist-cdn/zstd.wasm "$DEST/"
