@@ -1,14 +1,19 @@
 # Runbook: Widget CDN Operations
 
 CDN root: `https://cdn.oxpulse.chat/widget/`
-Served dir on host: `/home/krolik/deploy/krolik-server/files/cdn-oxpulse/widget/`
-Caddy site config: `~/deploy/krolik-server/config/caddy/cdn.oxpulse.chat.caddy`
+Served dir on host: `$CDN_ROOT/widget/`
+Caddy site config: `config/caddy/cdn.oxpulse.chat.caddy` in the infrastructure repo
 
 ---
 
 ## 1. Re-run the manual publish (upgrade or patch)
 
-Run from the `oxpulse-chat-sdk` repo root (requires Node >= 22 + pnpm):
+Run from the `oxpulse-chat-sdk` repo root (requires Node >= 22 + pnpm).
+
+Set `CDN_ROOT` to the CDN document root on the host that serves the widget
+(the directory the CDN file server is configured to serve). Every path below is
+built from it with `${CDN_ROOT:?set CDN_ROOT first}`, so an unset variable
+aborts the command instead of resolving to `/widget/<version>`.
 
 ```bash
 # Build the CDN bundle (outputs to packages/chat-widget/dist-cdn/)
@@ -22,14 +27,14 @@ openssl dgst -sha384 -binary packages/chat-widget/dist-cdn/index.js \
 
 # Publish to the CDN host directory
 VER=$(node -p "require('./packages/chat-widget/package.json').version")
-DEST="/home/krolik/deploy/krolik-server/files/cdn-oxpulse/widget/${VER}"
+DEST="${CDN_ROOT:?set CDN_ROOT first}/widget/${VER}"
 mkdir -p "$DEST"
 cp packages/chat-widget/dist-cdn/index.js "$DEST/"
 cp packages/chat-widget/dist-cdn/zstd.wasm "$DEST/"
 
 # Update the 'latest' convenience symlink
 ln -sfn "${VER}" \
-  /home/krolik/deploy/krolik-server/files/cdn-oxpulse/widget/latest
+  "${CDN_ROOT:?set CDN_ROOT first}/widget/latest"
 
 # Smoke-check
 curl -sI "https://cdn.oxpulse.chat/widget/${VER}/index.js" \
@@ -55,7 +60,7 @@ git -C ~/src/oxpulse-chat-sdk checkout "v${VER}"
 pnpm -F @oxpulse/chat-widget build:cdn
 
 # Copy (same steps as §1 above, skip the latest symlink update)
-DEST="/home/krolik/deploy/krolik-server/files/cdn-oxpulse/widget/${VER}"
+DEST="${CDN_ROOT:?set CDN_ROOT first}/widget/${VER}"
 mkdir -p "$DEST"
 cp packages/chat-widget/dist-cdn/index.js "$DEST/"
 cp packages/chat-widget/dist-cdn/zstd.wasm "$DEST/"
@@ -95,7 +100,7 @@ process exits or restarts in a crash loop.
 
 **Root cause class:** Running `caddy run` (or `caddy start`) without
 explicitly disabling the admin API causes it to bind `:2019` on localhost.
-On the krolik box, another process or a prior Caddy instance may already
+On the CDN host, another process or a prior Caddy instance may already
 hold that port. The second `caddy run` will crash on startup.
 
 **Prevention:** NEVER run `caddy run` with the default admin-listen on this
@@ -122,6 +127,6 @@ caddy run --config /path/to/caddy.json \
 **Recovery if CDN is down:**
 1. `systemctl --user status caddy-cdn` — check if unit crashed.
 2. `journalctl --user -u caddy-cdn -n 100` — find the error.
-3. Kill any rogue `caddy` process: `pkill -u krolik caddy`.
+3. Kill any rogue `caddy` process: `pkill -u "$USER" caddy`.
 4. `systemctl --user start caddy-cdn`.
 5. Smoke-check: `curl -sI https://cdn.oxpulse.chat/widget/latest/index.js`.

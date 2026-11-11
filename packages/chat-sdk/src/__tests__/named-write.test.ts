@@ -19,7 +19,7 @@ import { mintNamedWriteToken, NamedWriteMintError } from '../named-write.js';
 const MINT_ENDPOINT = 'https://api.example.com/tokens/named-write';
 const ROOM_ID = 'room-xyz';
 
-// Golden EdDSA-header token (Phase B plan §T5; alg=EdDSA, kid=piter-v1).
+// Golden EdDSA-header token (Phase B plan §T5; alg=EdDSA, a sample kid).
 // The alg-pin guard reads only the header; the signature is a test placeholder.
 const EDDSA_TOKEN =
   'eyJhbGciOiJFZERTQSIsImtpZCI6InBpdGVyLXYxIiwidHlwIjoiSldUIn0.' + // gitleaks:allow
@@ -38,7 +38,7 @@ function makeFetch(status: number, body: unknown): typeof fetch {
 function makeTokenWithAlg(alg: string): string {
   const header = btoa(JSON.stringify({ alg, typ: 'JWT' }))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-  const payload = btoa(JSON.stringify({ iss: 'piter-now', sub: 'ep_x' }))
+  const payload = btoa(JSON.stringify({ iss: 'issuer-a', sub: 'ep_x' }))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
   return `${header}.${payload}.fakesig`;
 }
