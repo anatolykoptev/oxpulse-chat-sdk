@@ -175,13 +175,15 @@ jobs:
         # unaffected: it runs through npm >= 11.5.1 (installed below) and OIDC.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '24.x'
+          node-version: '26.13.1'
           # registry-url puts the npm config in place; OIDC mode does NOT use
           # NODE_AUTH_TOKEN, but the registry URL is still needed for `npm view`.
           registry-url: 'https://registry.npmjs.org'
 
       - name: Enable corepack and install pnpm 10.33.2
         run: |
+          # Node 26 ships no corepack; install it (pinned) first.
+          npm install -g corepack@0.36.0
           corepack enable
           corepack prepare pnpm@10.33.2 --activate
 

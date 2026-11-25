@@ -14,7 +14,7 @@ guards, `docs/` the integration guides, architecture notes and ADRs.
 
 ## Gate
 
-CI (`.github/workflows/preflight.yml`, job on `ubuntu-24.04-arm`, Node 24, pnpm) runs exactly:
+CI (`.github/workflows/preflight.yml`, job on `ubuntu-24.04-arm`, Node 26, pnpm) runs exactly:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -25,8 +25,8 @@ pnpm typecheck
 pnpm test
 ```
 
-Use Node 24: CI asserts `navigator.locks` (Web Locks) exists, because the replay-guard tests lose
-coverage silently without it, even though the root `engines` field only says `>=22`.
+Use Node 26: CI asserts `navigator.locks` (Web Locks) exists, because the replay-guard tests lose
+coverage silently without it, and the root `engines` field says `>=26.13.1`.
 `mutation.yml` runs Stryker nightly and never gates a merge. A docs-only PR (Markdown, `docs/`,
 licence, issue and PR templates) skips the heavy job through the `docs-scope` job in
 `preflight.yml`; that block is canonical across the fleet and compared byte for byte, so do not
