@@ -258,7 +258,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: 26.13.1
           cache: pnpm
 
       - name: Assert Web Locks available

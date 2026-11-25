@@ -64,7 +64,7 @@
     "@stryker-mutator/core": "^9.6.1",
     "@stryker-mutator/typescript-checker": "^9.6.1",
     "@stryker-mutator/vitest-runner": "^9.6.1",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.6",
     "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",
     "esbuild": "^0.25.0",
@@ -73,7 +73,7 @@
     "vitest": "^4.1.5"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "bugs": {
     "url": "https://github.com/anatolykoptev/oxpulse-chat-sdk/issues"
